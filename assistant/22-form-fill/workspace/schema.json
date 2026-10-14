@@ -1,0 +1,56 @@
+{
+  "type": "object",
+  "required": [
+    "full_name",
+    "email",
+    "country",
+    "years_experience",
+    "skills",
+    "highest_degree",
+    "available"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "full_name": {
+      "type": "string"
+    },
+    "email": {
+      "type": "string",
+      "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]+$"
+    },
+    "country": {
+      "type": "string",
+      "enum": [
+        "US",
+        "CA",
+        "GB",
+        "DE"
+      ]
+    },
+    "years_experience": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 60
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "maxItems": 5
+    },
+    "highest_degree": {
+      "type": "string",
+      "enum": [
+        "BSc",
+        "MSc",
+        "PhD",
+        "none"
+      ]
+    },
+    "available": {
+      "type": "boolean"
+    }
+  }
+}

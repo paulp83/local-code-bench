@@ -1,0 +1,121 @@
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 06b4696..0af6a27 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -464,13 +464,21 @@ spec = {
+         "max_ctx": max_ctx, "max_num_seqs": 1, "mem_util": 0.9,
+         "compose_path": cpath, "default_port": port, "kvcalc_key": "SKIP"}},
+ }
+-Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++# The engine profile is NOT written here. promote.py owns the plan, the
++# --dry-run exit and the confirm; a write that happened before it handed off
++# could not be stopped by any of those. Carry the profile in the spec and let
++# promote.py write it in the same atomic step as the model profile / compose /
++# registry entry — so --dry-run writes nothing and a refused run leaves no
++# orphaned engine profile behind.
+ if engine_yaml:
+-    d = Path(wroot) / "scripts/lib/profiles-local/engines.d"
+-    d.mkdir(parents=True, exist_ok=True)
+-    (d / f"{engine}.yml").write_text(engine_yaml, encoding="utf-8")
+-    print(f"[catalog] wrote a local ENGINE profile: profiles-local/engines.d/{engine}.yml "
++    spec["engine_profile"] = {
++        "engine": engine,
++        "content": engine_yaml,
++    }
++    print(f"[catalog] the spec carries a local ENGINE profile: "
++          f"profiles-local/engines.d/{engine}.yml "
+           f"(type={etype}, capabilities evidenced from the compose)")
++Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
+ 
+ def mark(v, given):  # show the user which values THEY chose vs which we guessed
+     return "given" if given else "derived"
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index 1e903c2..94f6b9d 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -82,6 +82,7 @@ _EMIT_REL = "scripts/lib/registry-emit.sh"
+ _LOCAL_DIR_REL = "scripts/lib/profiles-local"
+ _LOCAL_MODELS_REL = f"{_LOCAL_DIR_REL}/models.d"
+ _LOCAL_COMPOSES_REL = f"{_LOCAL_DIR_REL}/composes"
++_LOCAL_ENGINES_REL = f"{_LOCAL_DIR_REL}/engines.d"
+ _LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
+ _LOCAL_SLUG_PREFIX = "local/"
+ # Local entries ALWAYS land here (the enum's pre-experimental rung: hidden from
+@@ -433,6 +434,21 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+         # Force the incubating rung — a local entry never ships functional.
+         kwargs["status"] = _LOCAL_FORCED_STATUS
+ 
++        # Optional engine profile, carried in the spec by the catalog.sh front
++        # door (it derives one for an engine the catalog does not know). It is a
++        # LOCAL-layer artifact: validate its shape here so a malformed one
++        # refuses BEFORE anything is written, like every other spec-shape
++        # problem — the actual write lives in _write_local, gated by the same
++        # --dry-run exit / confirm / collision refusals as the model write.
++        ep = spec.get("engine_profile")
++        if ep is not None:
++            if not isinstance(ep, dict):
++                raise Refusal("spec.engine_profile must be a {engine, content} dict")
++            if not isinstance(ep.get("engine"), str) or not ep["engine"].strip():
++                raise Refusal("spec.engine_profile.engine must be a non-empty engine id")
++            if not isinstance(ep.get("content"), str) or not ep["content"].strip():
++                raise Refusal("spec.engine_profile.content must be the engine profile YAML text")
++
+         profile_path = root / _LOCAL_MODELS_REL / f"{mid}.yml"
+         if profile_path.exists():
+             raise Refusal(f"local model profile already exists: {profile_path}")
+@@ -542,9 +558,14 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+     mid = spec["model_id"]
+     slug = spec["registry_entry"]["slug"]
+     if spec["_layer"] == "local":
+-        return [
++        lines = [
+             f"plan (layer LOCAL — gitignored {_LOCAL_DIR_REL}/, root {root}):",
+             f"  write {_LOCAL_MODELS_REL}/{mid}.yml",
++        ]
++        ep = spec.get("engine_profile")
++        if ep:
++            lines.append(f"  write {_LOCAL_ENGINES_REL}/{ep['engine']}.yml")
++        lines += [
+             f"  write {spec['compose']['path']}",
+             f"  merge entry into {_LOCAL_REGISTRY_REL} (JSON — no source edit)",
+             f"  slug: {slug}  model: {mid}  variant: {spec['default_weight_variant']}"
+@@ -552,6 +573,7 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+             "  then: get_registry() import-sanity + registry-emit.sh --json re-check",
+             "  NO core file is touched. Rollback: delete the written files.",
+         ]
++        return lines
+     return [
+         f"plan (layer CORE — maintainer, root {root}):",
+         f"  write {_MODELS_DIR_REL}/{mid}.yml",
+@@ -564,7 +586,8 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+ 
+ 
+ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+-    """The THREE local-layer artifacts. Returns (profile_path, compose_path)."""
++    """The local-layer artifacts (model profile, compose, registry merge, and an
++    optional engine profile). Returns (profile_path, compose_path)."""
+     mid = spec["model_id"]
+     profile_path = root / _LOCAL_MODELS_REL / f"{mid}.yml"
+     compose_abs = root / spec["compose"]["path"]
+@@ -597,6 +620,21 @@ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+         _info(f"merged entry into {reg_path}")
+     except OSError as exc:
+         raise InternalError(f"could not rewrite {reg_path}: {exc}")
++
++    # ── Write 4/4 (optional): the local engine profile ──────────────────────
++    # Carried in the spec by catalog.sh. Written HERE, not in catalog.sh, so the
++    # --dry-run exit, the confirm and the collision refusals gate it too: a
++    # write that had already happened upstream could not be stopped by any of
++    # them. Validated in validate_spec, so reaching here means it is well-formed.
++    ep = spec.get("engine_profile")
++    if ep:
++        prof = root / _LOCAL_ENGINES_REL / f"{ep['engine']}.yml"
++        try:
++            prof.parent.mkdir(parents=True, exist_ok=True)
++            prof.write_text(ep["content"], encoding="utf-8")
++            _info(f"wrote {prof}")
++        except OSError as exc:
++            raise InternalError(f"could not write {prof}: {exc}")
+     return profile_path, compose_abs
+ 
+ 

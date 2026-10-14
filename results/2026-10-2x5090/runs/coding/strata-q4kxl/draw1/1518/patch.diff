@@ -1,0 +1,43 @@
+diff --git a/scripts/lib/bench-row-formatter.sh b/scripts/lib/bench-row-formatter.sh
+index 6961abd..0deb3f6 100644
+--- a/scripts/lib/bench-row-formatter.sh
++++ b/scripts/lib/bench-row-formatter.sh
+@@ -400,7 +400,9 @@ def load() -> dict[str, Any]:
+     name = str(config_blob.get("Name") or "").lstrip("/")
+     served = flag(cmd, "--served-model-name")
+     tp = flag(cmd, "--tensor-parallel-size")
+-    compose = rel(labels.get("com.docker.compose.project.config_files") or "")
++    # The label can hold a comma-joined list (slug compose + label override,
++    # #1498); the bench record should show the slug's own compose — the first.
++    compose = rel((labels.get("com.docker.compose.project.config_files") or "").split(",")[0])
+     if not compose:
+         compose = infer_compose_path(name, served, tp)
+     rig = parse_rig(read_text(require_file("rig.txt")))
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index b9da2b1..7fd46e5 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1026,8 +1026,22 @@ down_running() {
+     local lbl_dir lbl_file
+     lbl_dir=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null || true)
+     lbl_file=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.config_files"}}' "$c" 2>/dev/null || true)
++    # The label holds a comma-joined list of compose files — the slug's compose
++    # plus the club3090.slug label override (#1498). Pass each as its own -f,
++    # mirroring litellm-log.sh. Drop any listed file that no longer exists (e.g.
++    # after the data dir moved): the label override only adds labels, so `down`
++    # still works without it. Only fall back to `docker stop` when nothing
++    # remains, otherwise compose never runs and the container/network lingers.
++    local -a cfg_args=()
++    local _cfgs=() _f
+     if [[ -n "$lbl_dir" && -n "$lbl_file" ]]; then
+-      (cd "$lbl_dir" && ${COMPOSE_BIN} -f "$lbl_file" down --remove-orphans) || docker stop "$c" >/dev/null
++      IFS=',' read -ra _cfgs <<< "$lbl_file"
++      for _f in "${_cfgs[@]}"; do
++        [[ -n "$_f" && -f "$_f" ]] && cfg_args+=(-f "$_f")
++      done
++    fi
++    if [[ "${#cfg_args[@]}" -gt 0 ]]; then
++      (cd "$lbl_dir" && ${COMPOSE_BIN} "${cfg_args[@]}" down --remove-orphans) || docker stop "$c" >/dev/null
+     else
+       docker stop "$c" >/dev/null
+     fi

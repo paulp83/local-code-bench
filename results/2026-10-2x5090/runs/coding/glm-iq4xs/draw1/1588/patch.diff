@@ -1,0 +1,192 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 9b03501..18950e5 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -195,11 +195,13 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# Container for VRAM, GPU label and flag introspection: the one publishing URL's port, any
+-# engine (#1537: the old `vllm-(qwen|gemma)` name heuristic never found an SGLang container, so
+-# its card listed every GPU on the host). The heuristic stays as the last resort.
++# Container for VRAM, the GPU label and flag introspection: the one that serves URL —
++# same host AND port, not just the port (#1584: URL=http://<other host>:8020 used to bind
++# the local container on :8020, so a remote run announced this rig's slots, GPU label,
++# spec and KV pool as its own). #1537's `vllm-(qwen|gemma)` name fallback is gone with it:
++# when nothing on this host serves URL, CONTAINER stays empty and the card says so
++# instead of describing a container that has nothing to do with the run.
+ CONTAINER="${CONTAINER:-$(URL="$URL" python3 "$PROBE_PY" --container-for-url 2>/dev/null || true)}"
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ # The served context: what the ENGINE reports first (SGLang server info, vLLM /v1/models, vLLM's
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index fee390d..578e736 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -20,10 +20,12 @@ from __future__ import annotations
+ 
+ import argparse
+ import concurrent.futures as cf
++import functools
+ import json
+ import math
+ import os
+ import re
++import socket
+ import statistics
+ import subprocess
+ import sys
+@@ -353,18 +355,115 @@ def engine_stats(container):
+     return (run, wait, run_max, wait_max, hit)
+ 
+ 
+-# ── which container, and is a drafter on (#1537) ──────────────────────────────
++# ── which container, and is a drafter on (#1537, #1584) ───────────────────────
+ # The card's container and spec label used to come from a name heuristic (`vllm-(qwen|gemma)`) and
+ # a grep of the container's Cmd. Both lied on #1537: an SGLang container was never found (card
+ # listed every GPU on the host, spec "?"), and a vLLM compose that builds --speculative-config in
+ # its entrypoint script from SPEC_N read "spec off" with MTP n=4 running. These read the truth:
+ # the container publishing the probed URL's port, and the drafter the ENGINE says it loaded.
++# #1584 follow-up: "publishing the port" is not enough — a URL on another machine shares the
++# port with nothing local, and the old port-only match bound the local container anyway (so a
++# remote run announced this rig's slots, GPUs, spec and KV pool as its own). The container is
++# the one that serves the URL: same port, on an address the mapping is published to.
++@functools.lru_cache(maxsize=None)
++def _host_addresses(host):
++    """The addresses ``host`` names, one per line. A literal is itself, a name is
++    whatever the resolver says (``localhost`` is the loopback pair)."""
++    host = (host or "").strip("[]").lower()
++    if not host:
++        return []
++    if host in ("localhost", "0.0.0.0", "*"):
++        return ["127.0.0.1", "::1"]
++    if ":" in host or re.fullmatch(r"[0-9.]+", host):
++        return [host]
++    addrs = set()
++    try:
++        for info in socket.getaddrinfo(host, None):
++            addrs.add(info[4][0])
++    except Exception:
++        return []
++    return sorted(addrs)
++
++
++@functools.lru_cache(maxsize=None)
++def _own_addresses():
++    """Every address THIS machine answers to — what a 0.0.0.0 publish serves."""
++    addrs = {"127.0.0.1", "::1"}
++    for name in (socket.gethostname(), "localhost"):
++        try:
++            for info in socket.getaddrinfo(name, None):
++                addrs.add(info[4][0])
++        except Exception:
++            pass
++    return addrs
++
++
++def _ports_serve_url(ports, host, port):
++    """True when a `docker ps` "Ports" string publishes ``port`` to ``host`` (#1584).
++    Same answer listen-scope.sh's ports_serve_url gives: the port has to match AND
++    the URL's host has to be an address the mapping is published on — so
++    URL=http://<other machine>:8020 no longer binds the local :8020 container."""
++    for addr in _host_addresses(host):
++        for m in (ports or "").split(","):
++            m = m.strip()
++            if "->" not in m:
++                continue                      # an exposed-only port, not published
++            bind, _, _hp = m.partition("->")
++            if bind.startswith("["):                 # [::]:8020->8000/tcp
++                ip, _, hp = bind[1:].partition("]")
++                hp = hp.lstrip(":")
++            else:
++                ip, _, hp = bind.rpartition(":")
++            lo, _, hi = hp.partition("-")
++            hi = hi or lo
++            if not (lo.isdigit() and hi.isdigit()):
++                continue
++            if not (int(lo) <= port <= int(hi)):
++                continue
++            if ip in ("", "0.0.0.0", "::", "*"):
++                if addr in ("127.0.0.1", "::1") or addr in _own_addresses():
++                    return True
++            elif ip.startswith("127.") or ip == "::1":
++                if addr in ("127.0.0.1", "::1"):
++                    return True
++            elif addr == ip:
++                return True
++    return False
++
++
++def _url_host_port(url):
++    """("host", port) for URL, the port defaulted from the scheme (80 / 443) —
++    the same answer listen-scope.sh's url_host_port gives, IPv6 brackets included."""
++    url = (url or "").strip()
++    if "://" in url:
++        scheme, _, rest = url.partition("://")
++    else:
++        scheme, rest = "http", url
++    hostport = rest.split("/", 1)[0]
++    hostport = hostport.rsplit("@", 1)[-1]
++    if hostport.startswith("["):                       # http://[::1]:8020/...
++        host, _, tail = hostport[1:].partition("]")
++        port_part = tail.lstrip(":")
++    elif hostport.count(":") > 1:                      # a bare IPv6 literal, no port
++        host, port_part = hostport, ""
++    else:
++        host, _, port_part = hostport.rpartition(":")
++    if not host:
++        return "", 0
++    if port_part.isdigit():
++        return host, int(port_part)
++    return host, 443 if scheme == "https" else 80
++
++
+ def container_for_url(url, ps_lines=None):
+-    """Name of the running container publishing ``url``'s host port, else ""."""
+-    m = re.match(r"^[a-z]+://[^/:]+:(\d+)", url or "")
+-    if not m:
++    """Name of the running container publishing ``url`` on this host, else "".
++    #1584: the port alone was the whole test, so URL=http://<other host>:8020
++    bound the local container on :8020 and a remote run reported this rig's
++    slots, GPUs and spec as its own. The host has to be one the mapping serves.
++    """
++    host, port = _url_host_port(url)
++    if not host:
+         return ""
+-    port = m.group(1)
+     if ps_lines is None:
+         try:
+             out = subprocess.run(["docker", "ps", "--format", "{{.Names}}|{{.Ports}}"],
+@@ -372,11 +471,11 @@ def container_for_url(url, ps_lines=None):
+             ps_lines = out.stdout.splitlines()
+         except Exception:
+             return ""
+-    pat = re.compile(r":" + port + r"->")
+     for line in ps_lines:
+         name, _, ports = line.partition("|")
+-        if name and pat.search(ports):
+-            return name.strip()
++        name = name.strip()
++        if name and _ports_serve_url(ports, host, port):
++            return name
+     return ""
+ 
+ 
+diff --git a/scripts/tests/test-concurrency-probe.sh b/scripts/tests/test-concurrency-probe.sh
+index dd73883..5346341 100755
+--- a/scripts/tests/test-concurrency-probe.sh
++++ b/scripts/tests/test-concurrency-probe.sh
+@@ -300,6 +300,12 @@ got="$(PATH="$SPEC_STUB:$PATH" URL=http://localhost:8144 python3 "$LIB" --contai
+ [[ "$got" == "sglang-qwen38-27b-mtp-single" ]] || fail "--container-for-url :8144 should find the SGLang container: got '$got'"
+ got="$(PATH="$SPEC_STUB:$PATH" URL=http://localhost:9999 python3 "$LIB" --container-for-url)"
+ [[ -z "$got" ]] || fail "--container-for-url on a port nobody publishes must be empty: got '$got'"
++# #1584: the port alone is not evidence — a URL on another machine must not bind the local
++# container that happens to publish the same port, and the old `vllm-(qwen|gemma)` name
++# fallback must stay gone with it (a remote run reported this rig's slots/GPUs as its own).
++got="$(PATH="$SPEC_STUB:$PATH" URL=http://10.9.9.9:8144 python3 "$LIB" --container-for-url)"
++[[ -z "$got" ]] || fail "--container-for-url on a REMOTE URL must be empty: got '$got'"
++grep -qF -- "grep -m1 -E 'vllm-(qwen|gemma)'" "$PROBE" && fail "concurrency-probe.sh still falls back to the vllm-(qwen|gemma) name heuristic"
+ got="$(PATH="$SPEC_STUB:$PATH" CONTAINER=vllm-mtp URL=http://127.0.0.1:9 python3 "$LIB" --spec-label)"
+ [[ "$got" == "MTP n=4" ]] || fail "--spec-label from vLLM's engine-config line at the log head: got '$got', want 'MTP n=4'"
+ got="$(PATH="$SPEC_STUB:$PATH" CONTAINER=vllm-off URL=http://127.0.0.1:9 python3 "$LIB" --spec-label)"

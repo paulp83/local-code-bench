@@ -1,0 +1,14 @@
+{
+ "task": "28-ledger-amendments",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 153.1,
+ "tool_calls": 25,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 16,
+ "checks_total": 16,
+ "partial": 1.0
+}

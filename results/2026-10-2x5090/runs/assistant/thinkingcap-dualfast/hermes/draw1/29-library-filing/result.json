@@ -1,0 +1,14 @@
+{
+ "task": "29-library-filing",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 108.0,
+ "tool_calls": 21,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 64,
+ "checks_total": 64,
+ "partial": 1.0
+}

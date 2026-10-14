@@ -1,0 +1,100 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..96fb15a 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,12 +6,29 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
++Traps this encodes, all paid for in production:
++
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+-    double-counts (measured 13,947 against a live 6,820 -- 2.05x).
++    double-counts (measured 13,947 against a live 6,820 -- 2.05x, 2026-08-31).
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
++  * A slug that pins a drafter to a GPU logs TWO MODELS with the same line shape
++    (`load_tensors: CUDA<n> model buffer size = ...`): target first, drafter
++    second. Last-wins silently replaced the target's weights with the drafter's
++    (GLM-5.3-Flash + DFlash2, 2026-10-13: 3313 MiB of target counted as 656 MiB
++    of drafter). The two buffers coexist, so SUM the model lines, exactly like
++    the already-aggregated KV lines. Recurrent state is logged in two shapes,
++    `_comp_state:` (DeepSeek) and `llama_memory_recurrent:` (GLM); both count.
++  * The drafter reserves a COMPUTE buffer too, and the target re-reserves its
++    own AFTER the drafter loads (bigger), so neither last-wins (drops the
++    drafter) nor a naive sum (double-counts the target's first reservation) is
++    right. Rule, per device in log order: a value >= the running max
++    re-reserves the PRIMARY buffer (latest wins); a strictly smaller interleaved
++    value is a DISTINCT context (the drafter) and is added once, latest wins.
++    A `sched_reserve: ... failed` line between them marks the next smaller
++    value as a re-reservation, not a new context -- the PP-fallback retry
++    reserves smaller (qwen3.8-27b/unsloth-q8kxl q8kv.yml).
+ 
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+@@ -30,6 +47,29 @@ def _per_dev(text, pat, agg=False):
+     return out
+ 
+ 
++def _compute_per_dev(text):
++    """sched_reserve totals with the re-reservation rule (see module docstring)."""
++    prim = {}     # dev -> primary (target) buffer, latest reservation
++    second = {}   # dev -> distinct context (drafter) buffer, latest reservation
++    retry = False  # a failed reservation was logged; the next smaller value is a retry
++    for m in re.finditer(
++        r"sched_reserve:\s*"
++        r"(?:compute buffer allocation failed"
++        r"|(CUDA\d) compute buffer size\s*=\s+([\d.]+) MiB)",
++        text,
++    ):
++        if m.group(1) is None:
++            retry = True
++            continue
++        dev, val = m.group(1), float(m.group(2))
++        if val >= prim.get(dev, 0.0) or retry:
++            prim[dev] = val
++            retry = False
++        else:
++            second[dev] = val
++    return {dev: prim[dev] + second.get(dev, 0.0) for dev in set(prim) | set(second)}
++
++
+ def main() -> int:
+     if len(sys.argv) < 2:
+         return 1
+@@ -38,10 +78,20 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+-    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # Two models can log the same line shape on one device (target + drafter, see
++    # module docstring): SUM, never last-wins. KV already aggregates the same way.
++    # The '=' is whitespace-tolerant: some log levels pad the alignment.
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size\s*=\s+([\d.]+) MiB", agg=True)
++    compute = _compute_per_dev(text)
++    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size\s*=\s+([\d.]+) MiB", agg=True)
++    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size\s*=\s+([\d.]+) MiB", agg=True)
++    recur = _per_dev(
++        text,
++        r"llama_memory_recurrent:\s+(CUDA\d)[^\n=]*?(?:RS|state) buffer size\s*=\s*([\d.]+) MiB",
++        agg=True,
++    )
++    for dev, val in recur.items():
++        state[dev] = state.get(dev, 0.0) + val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}
+@@ -70,7 +120,7 @@ def main() -> int:
+     except Exception:
+         pass
+ 
+-    devs = sorted(set(model) | set(smi) | set(pool))
++    devs = sorted(set(model) | set(smi) | set(pool) | set(kv) | set(compute) | set(state))
+     if not devs:
+         return 1
+ 

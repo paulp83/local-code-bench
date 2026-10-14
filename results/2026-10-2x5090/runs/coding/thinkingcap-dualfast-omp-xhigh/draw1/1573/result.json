@@ -1,0 +1,24 @@
+{
+ "n": 1573,
+ "config": "thinkingcap-dualfast-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 437.7,
+ "steps": 62,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 0.5,
+ "files_touched": [
+  "scripts/lib/thinking-budget.sh",
+  "scripts/quality-test.sh"
+ ],
+ "p2p_run": 1,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-quality-thinking-budget.sh": 1
+ }
+}

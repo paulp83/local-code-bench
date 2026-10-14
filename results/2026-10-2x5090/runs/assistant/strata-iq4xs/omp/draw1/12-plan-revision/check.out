@@ -1,0 +1,12 @@
+PASS plan-v1-untouched
+PASS contents-matches
+PASS headings-match
+PASS section-prepare-the-rig
+PASS section-fetch-weights
+PASS section-warm-up-run
+PASS section-quantize
+PASS section-bench-and-verify
+PASS section-write-results
+PASS section-teardown
+PASS no-stale-refs
+PASS: 11 FAIL: 0

@@ -1,0 +1,10 @@
+PASS manifest-exact
+PASS photos-dir-empty
+PASS photo-20251231_235959_x100.jpg
+PASS photo-20260814_172209_gr3.jpg
+PASS photo-20260814_172209_x100-2.jpg
+PASS photo-20260814_172209_x100.jpg
+PASS photo-20260902_080145_gr3.jpg
+PASS photo-20260902_080146_x100.jpg
+PASS sidecars-moved
+PASS: 9 FAIL: 0

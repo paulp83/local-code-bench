@@ -1,0 +1,9 @@
+{
+  "id": "16-travel-itinerary",
+  "source": "novel",
+  "category": "planning",
+  "difficulty": "hard",
+  "est_minutes": 15,
+  "needs_web": false,
+  "notes": "Novel: time zone arithmetic incl. a half-hour offset and overnight legs."
+}

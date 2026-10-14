@@ -1,0 +1,166 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 9b03501..f667f5a 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -195,11 +195,18 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# Container for VRAM, GPU label and flag introspection: the one publishing URL's port, any
+-# engine (#1537: the old `vllm-(qwen|gemma)` name heuristic never found an SGLang container, so
+-# its card listed every GPU on the host). The heuristic stays as the last resort.
++# Container for VRAM, GPU label and flag introspection: the one serving URL on THIS host —
++# host AND port, not the port number alone (#1584 follow-up: URL=http://<other machine>:8020
++# bound the local :8020 container, and the run reported its slot count, GPUs, spec and KV
++# pool as its own). The vllm-(qwen|gemma) name heuristic (#1537: the old one never found an
++# SGLang container) stays the last resort, and for a LOCAL URL only — a remote run has no
++# local container to read, so the name guess stays silent.
++# shellcheck source=lib/listen-scope.sh
++source "${ROOT_DIR}/scripts/lib/listen-scope.sh"
+ CONTAINER="${CONTAINER:-$(URL="$URL" python3 "$PROBE_PY" --container-for-url 2>/dev/null || true)}"
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++if [[ -z "$CONTAINER" ]] && url_is_local "$URL"; then
++  CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)"
++fi
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ # The served context: what the ENGINE reports first (SGLang server info, vLLM /v1/models, vLLM's
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index fee390d..cf1a36c 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -24,6 +24,7 @@ import json
+ import math
+ import os
+ import re
++import socket
+ import statistics
+ import subprocess
+ import sys
+@@ -359,12 +360,82 @@ def engine_stats(container):
+ # listed every GPU on the host, spec "?"), and a vLLM compose that builds --speculative-config in
+ # its entrypoint script from SPEC_N read "spec off" with MTP n=4 running. These read the truth:
+ # the container publishing the probed URL's port, and the drafter the ENGINE says it loaded.
++def _local_host_addrs():
++    """Addresses of THIS host: the loopbacks plus every address ``hostname -I``
++    reports (LAN IPs, the Docker bridge) plus what the local hostname resolves to.
++    A URL on one of these is a URL on this box; on any other address it is a URL
++    on another machine, which shares no container with us."""
++    addrs = {"127.0.0.1", "::1"}
++    try:
++        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True,
++                             encoding="utf-8", errors="replace", timeout=5)
++        addrs.update((out.stdout or "").split())
++    except Exception:
++        pass
++    try:
++        for _fam, _type, _proto, _canon, sockaddr in socket.getaddrinfo(socket.gethostname(), None):
++            addrs.add(sockaddr[0])
++    except Exception:
++        pass
++    return addrs
++
++
++def _url_host_addrs(host):
++    """The addresses a URL host names: a literal is itself, a hostname is what
++    ``getent ahosts`` (then the resolver) says it is. ``localhost`` names both
++    loopbacks. Empty when the name resolves to nothing."""
++    if not host:
++        return set()
++    if host in ("localhost", "0.0.0.0"):
++        return {"127.0.0.1", "::1"}
++    if re.fullmatch(r"[0-9.]+", host):                    # IPv4 literal
++        return {host}
++    if ":" in host and re.fullmatch(r"[0-9a-fA-F:]+", host):  # IPv6 literal
++        return {host}
++    addrs = set()
++    try:
++        out = subprocess.run(["getent", "ahosts", host], capture_output=True, text=True,
++                             encoding="utf-8", errors="replace", timeout=5)
++        addrs = {ln.split()[0] for ln in (out.stdout or "").splitlines() if ln.split()}
++    except Exception:
++        pass
++    if not addrs:
++        try:
++            addrs = {s[4][0] for s in socket.getaddrinfo(host, None)}
++        except Exception:
++            addrs = set()
++    return addrs
++
++
++def _url_host_is_local(host):
++    """True when a URL host names THIS machine: any loopback (127.x / ::1), any
++    address ``hostname -I`` reports (LAN IPs, the Docker bridge), or a name that
++    resolves to one of these. False for another machine or an unresolvable name."""
++    addrs = _url_host_addrs(host)
++    if not addrs:
++        return False
++    own = _local_host_addrs()
++    for a in addrs:
++        if a in own or a.startswith("127.") or a.startswith("::ffff:127.") or a == "::1":
++            return True
++    return False
++
++
+ def container_for_url(url, ps_lines=None):
+-    """Name of the running container publishing ``url``'s host port, else ""."""
+-    m = re.match(r"^[a-z]+://[^/:]+:(\d+)", url or "")
++    """Name of the running container serving ``url`` on THIS host, else "".
++
++    Both legs must match: the container publishes the URL's port AND the URL's
++    host is an address of this machine. A port-only match binds the local
++    container on :8020 to ``http://<other machine>:8020`` (#1584 follow-up), and
++    the run then reports the local server's slot count, GPUs, spec and KV pool
++    as its own. A host nobody here resolves to is remote — no local container
++    can serve it."""
++    m = re.match(r"^[a-z]+://(\[[^\]]+\]|[^/:]+):(\d+)", url or "")
+     if not m:
+         return ""
+-    port = m.group(1)
++    host, port = m.group(1).strip("[]"), m.group(2)
++    if not _url_host_is_local(host):
++        return ""
+     if ps_lines is None:
+         try:
+             out = subprocess.run(["docker", "ps", "--format", "{{.Names}}|{{.Ports}}"],
+diff --git a/scripts/lib/listen-scope.sh b/scripts/lib/listen-scope.sh
+index eed535d..2bc4d67 100644
+--- a/scripts/lib/listen-scope.sh
++++ b/scripts/lib/listen-scope.sh
+@@ -35,6 +35,11 @@
+ #     container's logs, sampling defaults and topology as its own.
+ #   url_host_port URL
+ #     "host port", the port defaulted from the scheme.
++#   url_is_local URL
++#     exit 0 when the URL's host is an address of THIS host (a loopback, any
++#     `hostname -I` address, or a name that resolves to one), 1 for another
++#     machine. A remote run shares no container with this host, so callers
++#     must not let a name heuristic bind a local one (#1584 follow-up).
+ 
+ listen_addrs() {
+   local port="$1"
+@@ -124,3 +129,24 @@ ports_serve_url() {
+   done < <(tr ',' '\n' <<<"$ports")
+   return 1
+ }
++
++# url_is_local URL — exit 0 when the URL's host is an address of THIS host: a
++# loopback, any address `hostname -I` reports (LAN IPs, the Docker bridge), or
++# a hostname that resolves to one. 1 for another machine or an unresolvable
++# name: such a run has no local container to bind, so a port-only match or a
++# name guess would report a local server's facts for someone else's run.
++url_is_local() {
++  local url="$1" host port addrs a own
++  read -r host port < <(url_host_port "$url")
++  [[ -n "$host" ]] || return 1
++  own=" $(hostname -I 2>/dev/null) "
++  addrs="$(_host_addrs "$host")"
++  [[ -n "$addrs" ]] || return 1
++  while IFS= read -r a; do
++    [[ -n "$a" ]] || continue
++    if [[ "$a" == 127.* || "$a" == "::1" || "$a" == "::" || "$own" == *" ${a} "* ]]; then
++      return 0
++    fi
++  done <<<"$addrs"
++  return 1
++}

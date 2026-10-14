@@ -1,0 +1,227 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..d17eab0 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -100,6 +100,28 @@ VALID_DELIVERY_MECHANISM = {
+ # orphan vendored template with no patches.yml entry is caught).
+ CHAT_TEMPLATE_ARTIFACT_SUFFIXES = {".jinja", ".jinja2", ".j2"}
+ 
++# On-disk artifact file suffixes (used to tell a directory patch entry from
++# a vendored file when ``root`` is unavailable); a directory entry has none
++# of these.
++_FILE_SUFFIXES = {".py", ".sh", ".jinja", ".jinja2", ".j2"}
++
++# Bare filenames that name a *class* of patch, not a specific one - every
++# install-script patch carries an ``install.sh`` and every overlay an
++# ``apply.py`` - so these are non-identifying and must never be the sole
++# marker for "this patch's source is mounted".
++_GENERIC_FILENAMES = {
++    "install.sh",
++    "apply.py",
++    "apply.sh",
++    "setup.sh",
++    "setup.py",
++    "run.sh",
++    "run.py",
++    "entrypoint.sh",
++    "main.py",
++    "patch.py",
++}
++
+ SEED_REQUIRED_KEYS = {
+     "model",
+     "arch_family",
+@@ -496,6 +518,115 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     return (bool(vol_markers) and vol_ok) or (bool(inv_markers) and inv_ok)
+ 
+ 
++# --------------------------------------------------------------------------
++# install-script source matching - the mount's SOURCE, not just its target.
++# --------------------------------------------------------------------------
++# The legacy ``entrypoint_invoke`` fallback identified a patch by a directory
++# entry's PARENT (always ``patches``) or a file entry's bare name (e.g.
++# ``install.sh``) - both of which match *any* compose that mounts *any* patch
++# dir or runs *any* install script, so it answered True for a patch whose
++# mount + invoke had been removed (the #359 false-positive class). The sound
++# check matches the mount's SOURCE against the patch's own on-disk directory
++# name, so (a) a compose that no longer mounts/invokes the patch is not
++# reached, and (b) a DIFFERENT patch mounted at the same in-container target
++# does not count.
++_VOL_MOUNT_RE = re.compile(r"(:)(/[^:\s]+)(?::(ro|rw))?\s*$")
++
++
++def _source_names(patch: dict, root: Path | None = None) -> set[str]:
++    """The patch's identifying on-disk directory name(s).
++
++    A directory entry contributes its own name; a file or ``script`` entry
++    contributes its containing directory's name. The shared ``patches``
++    parent and a bare generic filename (``install.sh`` ...) never identify a
++    specific patch, so they are excluded (a vendored file sitting directly
++    under ``patches/`` falls back to its own, non-generic name).
++    """
++    names: set[str] = set()
++
++    def consider(rel: str) -> None:
++        p = Path(rel)
++        t = (root / rel) if root is not None else None
++        is_dir = t.is_dir() if t is not None else (p.suffix not in _FILE_SUFFIXES)
++        if is_dir:
++            if p.name != "patches":
++                names.add(p.name)
++        else:
++            parent = p.parent.name
++            if parent != "patches":
++                names.add(parent)
++            elif p.name not in _GENERIC_FILENAMES:
++                names.add(p.name)
++
++    for rel in patch.get("files") or []:
++        consider(rel)
++    script = (patch.get("delivery_spec") or {}).get("script")
++    if script:
++        consider(script)
++    return names
++
++
++def _mounts_source(body: str, source_names: set[str]) -> bool:
++    """True iff the service body volume-mounts a source naming one of
++    ``source_names``.
++
++    Only real volume-mount lines (``- <source>:<target>[:ro|rw]``) are
++    considered, and the SOURCE side of the mount is matched - not the
++    in-container target - so a different patch mounted at the same target
++    does not register as this patch.
++    """
++    for line in body.splitlines():
++        s = line.strip().strip('"').strip("'")
++        if not s.startswith("- "):
++            continue
++        m = _VOL_MOUNT_RE.search(s)
++        if not m:
++            continue
++        src = s[: m.start(1)]
++        if any(name in src for name in source_names):
++            return True
++    return False
++
++
++def _install_script_wired(patch: dict, root: Path, body: str) -> bool:
++    """Sound reachability for an install-script patch (a ``delivery_spec``
++    with a ``script``).
++
++    The compose must mount THIS patch's on-disk directory (matched on the
++    mount's source, not just the shared in-container target) and, per the
++    patch's declared ``wired_at``, run its entrypoint invoke. A compose that
++    stops mounting or invoking the patch - or that mounts a *different* patch
++    at the same target - is not reached.
++    """
++    spec = patch.get("delivery_spec") or {}
++    mounted_at = spec.get("mounted_at")
++    source_names = _source_names(patch, root)
++
++    wired_at = spec.get("wired_at")
++    if isinstance(wired_at, str):
++        wired_at = [wired_at]
++    wired_at = set(wired_at or [])
++
++    # Volume: the patch's own source dir is mounted (source-matched). When
++    # the source cannot be resolved, fall back to the declared target.
++    if source_names:
++        vol_ok = _mounts_source(body, source_names)
++    else:
++        vol_ok = bool(mounted_at) and mounted_at in body
++
++    _vol_markers, inv_markers = _spec_wiring_markers(patch)
++    inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
++
++    if wired_at == {"volumes"}:
++        return vol_ok
++    if wired_at == {"entrypoint"}:
++        return inv_ok
++    if "volumes" in wired_at and "entrypoint" in wired_at:
++        return vol_ok and inv_ok
++    # Unknown / empty wired_at: any declared artifact present.
++    return vol_ok or inv_ok
++
++
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
+@@ -510,21 +641,24 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     """Is ``patch`` actually wired into the compose ``name_or_path``?
+ 
+     Sound (correction #4): probes the **comment-stripped service body**
+-    only — never the file header or generator WARNING block — and
+-    validates the patch's **real delivery_spec wiring** (declared mount
+-    target and/or entrypoint invoke), not a substring of its ID.
++    only - never the file header or generator WARNING block - and validates
++    the patch's **real delivery_spec wiring**, not a substring of its ID.
++
++    For an install-script patch the wiring is validated by matching the
++    mount's **SOURCE** to the patch's own on-disk directory (plus its
++    entrypoint invoke), so a compose that has had the patch's mount + invoke
++    removed - or that mounts a *different* patch at the same in-container
++    target - is not reported reached. The deprecated ``delivery:`` block is
++    honoured only for patches carrying no ``delivery_spec``, and never with
++    the old non-identifying markers (a directory's ``patches`` parent or a
++    bare ``install.sh``).
+ 
+     ``name_or_path`` may be a COMPOSE_REGISTRY profile name OR an
+     arbitrary absolute path to a compose file.
+-
+-    The deprecated ``delivery:`` boolean block is still honoured as a
+-    fallback for parity with the existing contract, but every probe runs
+-    against the service body so it cannot be tripped by a header/comment
+-    mention of the patch ID or a PR number.
+     """
+     # CONTRACT-2b-i: a `chat_template` patch's effective coverage MUST be
+     # computed from the REAL merged compose graph (`extends:` resolved with
+-    # Docker Compose merge semantics), not the legacy single-base concat —
++    # Docker Compose merge semantics), not the legacy single-base concat -
+     # a child can `!reset`/override/REMOVE the mount, and the concat would
+     # still see the base's line (a false-negative on coverage loss, the
+     # dangerous direction). Every other mechanism keeps the byte-identical
+@@ -534,24 +668,30 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+         return _spec_wiring_present(patch, body)
+ 
+     body = service_body(compose_text(root, name_or_path))
++    spec = patch.get("delivery_spec") or {}
++    delivery = patch.get("delivery") or {}
++
++    # Install-script patch with a declared spec: the ground truth is that
++    # THIS patch's on-disk source is mounted (source-matched) and its invoke
++    # runs - the legacy entrypoint_invoke fallback (generic filenames / the
++    # shared `patches` parent) must never override a negative here.
++    if delivery.get("entrypoint_invoke") and spec.get("script"):
++        return _install_script_wired(patch, root, body)
+ 
+-    # Primary, sound path: the patch's declared delivery_spec wiring is
+-    # genuinely present at the insertion point(s) it claims.
++    # Primary, sound path for the other delivery classes: the patch's
++    # declared delivery_spec wiring is genuinely present.
+     if _spec_wiring_present(patch, body):
+         return True
+ 
+-    # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
+-    delivery = patch.get("delivery") or {}
++    # Legacy fallback (read-only `delivery:` block) for patches carrying no
++    # delivery_spec. Operates on the service body; matches the patch's own
++    # identifying source names - never the `patches` parent or a bare
++    # `install.sh` - so it cannot answer True for an un-wired patch.
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
+-        if patch["id"] in body:
++        source_names = _source_names(patch, root)
++        if source_names and _mounts_source(body, source_names):
++            return True
++        if not source_names and patch["id"] in body:
+             return True
+     if (
+         delivery.get("genesis")

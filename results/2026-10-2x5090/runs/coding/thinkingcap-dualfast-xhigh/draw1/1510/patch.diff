@@ -1,0 +1,330 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 09ea48e..05f51eb 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -224,15 +224,66 @@ _detect_slots() {
+   echo ""
+ }
+ 
++# Host GPU selectors (indices or UUIDs, comma-separated) behind $CONTAINER — the
++# SAME resolution as container_gpu_ids() in the lib: compose devices: ->
++# HostConfig.DeviceRequests[].DeviceIDs first, then the NVIDIA_VISIBLE_DEVICES
++# env. Empty = unresolvable / "all": callers then fall back to the WHOLE RIG and
++# say so, because rig-wide figures include other services' cards (a container
++# pinned to one RTX 3060 used to read "4× RTX 3090" + 55 GB of a 4-card rig).
++_container_gpus() {
++  [[ -n "${CONTAINER:-}" ]] || { echo ""; return 0; }
++  command -v docker >/dev/null 2>&1 || { echo ""; return 0; }
++  command -v python3 >/dev/null 2>&1 || { echo ""; return 0; }
++  docker inspect "$CONTAINER" 2>/dev/null | python3 -c '
++import json, sys
++try:
++    blob = json.load(sys.stdin)
++except Exception:
++    raise SystemExit(0)
++if isinstance(blob, list):
++    blob = blob[0] if blob else {}
++if not isinstance(blob, dict):
++    raise SystemExit(0)
++base = None
++for req in (blob.get("HostConfig") or {}).get("DeviceRequests") or []:
++    if req.get("DeviceIDs"):
++        base = [str(x) for x in req["DeviceIDs"]]
++        break
++if not base:
++    for e in (blob.get("Config") or {}).get("Env") or []:
++        k, sep, v = e.partition("=")
++        if sep and k == "NVIDIA_VISIBLE_DEVICES" and v.strip():
++            base = [x.strip() for x in v.split(",") if x.strip()]
++            break
++if base and base != ["all"] and "void" not in base and "none" not in base:
++    print(",".join(base))
++' 2>/dev/null || true
++  return 0
++}
++
+ _gpu_fp() {
+-  local names n first
+-  names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null \
+-    | sed 's/^NVIDIA //' || true)"
++  local names n first gpus scope distinct
++  # Scope the LABEL to the container's own cards: the old whole-host query
++  # counted every GPU and named them all after GPU 0 (a pinned 1× RTX 3060 read
++  # "4× RTX 3090"). Unresolvable container -> whole rig, labelled as such.
++  gpus="$(_container_gpus)"
++  if [[ -n "$gpus" ]]; then
++    scope=""
++    names="$(nvidia-smi -i "$gpus" --query-gpu=name --format=csv,noheader 2>/dev/null \
++      | sed 's/^NVIDIA //' || true)"
++  else
++    scope=" (rig-wide)"
++    names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null \
++      | sed 's/^NVIDIA //' || true)"
++  fi
+   [[ -z "$names" ]] && { echo "? GPU"; return; }
+   n="$(printf '%s\n' "$names" | wc -l | tr -d ' ')"
+   first="$(printf '%s\n' "$names" | head -1)"
+-  if [[ "$n" == "1" ]]; then echo "1× ${first}"
+-  else echo "${n}× ${first}"
++  distinct="$(printf '%s\n' "$names" | sort -u | awk 'NF{printf "%s%s", (NR > 1 ? " + " : ""), $0} END{printf "\n"}')"
++  if [[ "$distinct" == "$first" ]]; then
++    echo "${n}× ${first}${scope}"
++  else
++    echo "${distinct}${scope}"
+   fi
+ }
+ 
+@@ -459,11 +510,16 @@ if [[ "$MATRIX" == "1" ]]; then
+   cells_jsonl="$(mktemp /tmp/cprobe-cells.XXXXXX)"
+   trap 'rm -f "$cells_jsonl"' EXIT
+ 
++  # Row arrives as $1 (argv), NOT stdin: `python3 -` reads its PROGRAM from
++  # stdin, and the heredoc below IS that stdin — so a row piped in used to be
++  # swallowed by the heredoc, sys.stdin.read() returned "" and json.loads("")
++  # killed the whole sweep on the first skipped cell (budget/clipped/early-stop)
++  # under set -e. Measured cells were unaffected because they pass data via argv.
+   emit_row() {
+-    python3 - "$cells_jsonl" <<'PY'
++    python3 - "$cells_jsonl" "${1-}" <<'PY'
+ import json, sys
+-path = sys.argv[1]
+-row = json.loads(sys.stdin.read())
++path, row = sys.argv[1], sys.argv[2]
++row = json.loads(row)
+ with open(path, "a", encoding="utf-8") as fh:
+     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+ PY
+@@ -473,17 +529,17 @@ PY
+     [[ -z "${action:-}" ]] && continue
+     if [[ "$budget_hit" == "1" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (budget)"
+-      printf '%s\n' "{\"ctx\":$ctx,\"n\":$n,\"skip\":\"budget\"}" | emit_row
++      emit_row "{\"ctx\":$ctx,\"n\":$n,\"skip\":\"budget\"}"
+       continue
+     fi
+     if [[ "$action" == "skip" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (${reason})"
+-      printf '%s\n' "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":sys.argv[3]}))' "$ctx" "$n" "${reason:-clipped}")" | emit_row
++      emit_row "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":sys.argv[3]}))' "$ctx" "$n" "${reason:-clipped}")"
+       continue
+     fi
+     if [[ "$EARLY_STOP" == "1" && -n "${ROW_DEAD[$ctx]:-}" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (early-stop — N=${ROW_DEAD[$ctx]} failed)"
+-      printf '%s\n' "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":"early-stop"}))' "$ctx" "$n")" | emit_row
++      emit_row "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":"early-stop"}))' "$ctx" "$n")"
+       continue
+     fi
+     echo
+@@ -526,6 +582,8 @@ row = {
+     "agg": fnum("agg_tps"),
+     "ttft_s": (fnum("ttft_ms") / 1000.0) if fnum("ttft_ms") is not None else None,
+     "vram_gb": (fnum("vram_peak") / 1024.0) if fnum("vram_peak") not in (None, -1.0) else None,
++    "vram_peak_gpus": fields.get("vram_peak_gpus", "-"),
++    "vram_scope": fields.get("vram_scope", "rig-wide"),
+     "running": fields.get("running", "-"),
+     "waiting": fields.get("waiting", "-"),
+     "result": line,
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 9e1eb25..80abe2e 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -343,21 +343,124 @@ def engine_stats(container):
+     return (run, wait, run_max, wait_max, hit)
+ 
+ 
+-def vram_used_mb():
++def container_gpu_ids(container):
++    """Host GPU selectors (indices or UUIDs, as strings) behind ``container``.
++
++    Resolves the cards the container is actually pinned to, from ``docker
++    inspect``: ``HostConfig.DeviceRequests[].DeviceIDs`` (compose ``devices:``)
++    first, then the ``NVIDIA_VISIBLE_DEVICES`` env.
++
++    Returns ``None`` when the container is unset, unresolvable, or declares
++    ``all`` (including when docker itself is absent). Callers then fall back
++    to the WHOLE RIG and must say so: the figure then includes other
++    services' memory, and judging the leak gate on it can fail a clean run or
++    hide a real one (a probe pinned to one RTX 3060 read 55 GB across four
++    3090s while an unrelated service ran on the rest of the rig).
++    """
++    if not container:
++        return None
++    try:
++        out = subprocess.run(
++            ["docker", "inspect", container],
++            capture_output=True,
++            text=True,
++            timeout=10,
++            encoding="utf-8",
++            errors="replace",
++        )
++    except Exception:
++        return None
++    if out.returncode != 0:
++        return None
++    try:
++        blob = json.loads(out.stdout)
++    except Exception:
++        return None
++    if isinstance(blob, list):
++        blob = blob[0] if blob else {}
++    if not isinstance(blob, dict):
++        return None
++    base = None
++    for req in (blob.get("HostConfig") or {}).get("DeviceRequests") or []:
++        if req.get("DeviceIDs"):
++            base = [str(x) for x in req["DeviceIDs"]]
++            break
++    if base is None:
++        env = {}
++        for entry in (blob.get("Config") or {}).get("Env") or []:
++            key, sep, value = entry.partition("=")
++            if sep and key:
++                env[key] = value
++        nvd = (env.get("NVIDIA_VISIBLE_DEVICES") or "").strip()
++        if nvd and nvd not in ("all", "void", "none"):
++            base = [v.strip() for v in nvd.split(",") if v.strip()]
++    if not base or base == ["all"]:
++        return None
++    return base
++
++
++def _normalize_gpu_ids(gpu_ids):
++    """List/tuple of selectors or a comma-separated string -> list, or None."""
++    if gpu_ids is None:
++        return None
++    if isinstance(gpu_ids, str):
++        ids = [x.strip() for x in gpu_ids.split(",") if x.strip()]
++    else:
++        ids = [str(x).strip() for x in gpu_ids if str(x).strip()]
++    if not ids or set(ids) <= {"all", "void", "none"}:
++        return None
++    return ids
++
++
++def vram_used_by_gpu_mb(gpu_ids=None):
++    """Per-card ``memory.used`` in MiB, keyed by the nvidia-smi index column.
++
++    ``gpu_ids`` (the container's selectors from :func:`container_gpu_ids`, or a
++    comma-separated string) scopes the query to exactly those cards; ``None``
++    queries EVERY GPU on the host — the old rig-wide behaviour, which sums
++    other services' memory and must not be presented as the container's.
++    Returns ``{}`` when nvidia-smi is absent or fails.
++    """
++    ids = _normalize_gpu_ids(gpu_ids)
++    cmd = ["nvidia-smi"]
++    if ids:
++        cmd += ["-i", ",".join(ids)]
++    cmd += ["--query-gpu=index,memory.used", "--format=csv,noheader,nounits"]
+     try:
+         out = subprocess.run(
+-            [
+-                "nvidia-smi",
+-                "--query-gpu=memory.used",
+-                "--format=csv,noheader,nounits",
+-            ],
++            cmd,
+             capture_output=True,
+             text=True,
+             timeout=10,
+         ).stdout
+-        return sum(int(x) for x in out.split())
+     except Exception:
++        return {}
++    per = {}
++    for line in out.splitlines():
++        line = line.strip()
++        if not line:
++            continue
++        idx, sep, used = line.partition(",")
++        if not sep:
++            continue
++        try:
++            per[idx.strip()] = int(used.strip())
++        except ValueError:
++            continue
++    return per
++
++
++def vram_used_mb(gpu_ids=None):
++    """Sum of ``memory.used`` (MiB) across ``gpu_ids``' cards.
++
++    ``gpu_ids`` scopes to the container's own cards (see
++    :func:`container_gpu_ids`); ``None`` = the whole rig (old behaviour).
++    Returns -1 when nothing can be read.
++    """
++    per = vram_used_by_gpu_mb(gpu_ids)
++    if not per:
+         return -1
++    return sum(per.values())
+ 
+ 
+ def parse_result_line(line):
+@@ -502,6 +605,11 @@ def run_probe():
+         CACHE = "cold"
+     if VALIDATE:
+         CACHE = "cold"
++    # The container's own cards only (DeviceRequests / NVIDIA_VISIBLE_DEVICES).
++    # None = container unresolved: every VRAM figure below is then RIG-WIDE and
++    # the verdict says so, instead of silently attributing the whole host's
++    # memory (other services included) to the service under test.
++    GPUS = container_gpu_ids(CONTAINER)
+     SHARE_FRAC = float(os.environ.get("SHARE_FRAC") or SHARE_FRAC_DEFAULT)
+     UNIQUE_MIN = int(os.environ.get("UNIQUE_MIN") or UNIQUE_MIN_DEFAULT)
+ 
+@@ -607,8 +715,9 @@ def run_probe():
+         f"{'agg_t/s':>8} {'per-strm':>9} {'ttft_ms':>8} {'pf_t/s':>7}"
+         f" {'ttft_p95':>9} {'tps_p05':>8} {'run/wait':>10} {'pfxhit':>6}"
+     )
+-    vram0 = vram_used_mb()
++    vram0 = vram_used_mb(GPUS)
+     vram_by_round = []
++    vram_peak_by_gpu = {}   # per-card PEAK (bench protocol: always capture per-card peak VRAM)
+     mtps_by_round = []
+     agg_by_round = []
+     ttft_by_round = []
+@@ -632,8 +741,12 @@ def run_probe():
+         done = sum(1 for r in res if r["ok"])
+         silent = sum(1 for r in res if r["silent"])
+         errs = sum(1 for r in res if r["err"])
+-        v = vram_used_mb()
++        vram_now = vram_used_by_gpu_mb(GPUS)
++        v = sum(vram_now.values()) if vram_now else -1
+         vram_by_round.append(v)
++        for idx, used in vram_now.items():
++            if used > vram_peak_by_gpu.get(idx, -1):
++                vram_peak_by_gpu[idx] = used
+         agg = sum(r["toks"] for r in res) / wall if wall else 0
+         tps_ok = [r["tps"] for r in res if r["ok"] and r["tps"] > 0]
+         mtps = statistics.median(tps_ok) if tps_ok else 0.0
+@@ -723,6 +836,21 @@ def run_probe():
+         f"-> final {vram_by_round[-1]} MB (post-warm growth {leak} MB / {GROWTH})  "
+         f"peak {vram_peak} MB"
+     )
++    if GPUS:
++        vram_scope = (
++            f"container {CONTAINER}'s cards ({','.join(str(g) for g in GPUS)})"
++        )
++    else:
++        vram_scope = (
++            "RIG-WIDE (container unresolved — includes other services' memory)"
++        )
++    per_card = (
++        "  · per-card peak "
++        + " ".join(f"{k}={v}MB" for k, v in vram_peak_by_gpu.items())
++        if vram_peak_by_gpu
++        else ""
++    )
++    print(f"  VRAM scope: {vram_scope}{per_card}")
+     print(
+         f"  per-stream decode: {report_tps:.1f} tok/s (steady) · aggregate "
+         f"{report_agg:.1f} tok/s "
+@@ -796,6 +924,8 @@ def run_probe():
+         "retention": f"{retention:.3f}",
+         "leak": leak,
+         "vram_peak": vram_peak,
++        "vram_peak_gpus": ",".join(f"{k}={v}" for k, v in vram_peak_by_gpu.items()) or "-",
++        "vram_scope": "container" if GPUS else "rig-wide",
+         "floor_ok": int(floor_ok),
+         "ttft_ms": f"{steady_ttft * 1000:.0f}",
+         "pf_tps": _fmt_num(steady_pf, 1),

@@ -1,0 +1,24 @@
+{
+ "n": 1571,
+ "config": "thinkingcap-dualfast-omp",
+ "draw": 2,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 676.7,
+ "steps": 89,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.875,
+ "checks_passed": 7,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/gpu-select.sh",
+  "scripts/report.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-report-gpu-attribution.sh": 1
+ }
+}

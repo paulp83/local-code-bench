@@ -1,0 +1,139 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..25779a3 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -1327,10 +1327,13 @@ preflight_compose_deps() {
+     # Char-class must NOT exclude `:` or `}` — model paths can be
+     # `/root/.cache/huggingface/${MODEL_SUBDIR:-default}` (vLLM) and excluding
+     # those truncated the token to `${MODEL_SUBDIR` before _preflight_compose_path_default
+-    # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+     # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+-    # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    # (quote / whitespace / comma / backslash); the `${VAR:-default}` resolver runs
++    # downstream. Backslash matters too: escaped-JSON drafter paths
++    # (`--speculative-config "{\"model\":\"/root/.cache/huggingface/<subdir>\",...}"`)
++    # end the path at `\"` — without the exclusion the match swallows the trailing
++    # `\` and the existence check looks for `<subdir>\/config.json` (#1305).
++    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+diff --git a/scripts/tests/test-preflight-extracted-paths.sh b/scripts/tests/test-preflight-extracted-paths.sh
+new file mode 100755
+index 0000000..4f8c8be
+--- /dev/null
++++ b/scripts/tests/test-preflight-extracted-paths.sh
+@@ -0,0 +1,112 @@
++#!/usr/bin/env bash
++# #1305: the vLLM path extractor's char class must stop at a backslash, or an
++# escaped-JSON drafter path (`--speculative-config "{\"model\":\"…/<subdir>\",…}"`)
++# captures `<subdir>\` and the existence check asks for `<subdir>\/config.json`
++# — a path that can never exist, so preflight refuses every such compose.
++#
++# Part 1: regression fixture with the escaped-JSON form (the real gemma shape).
++# Part 2: repo-wide guard — run the extractor over EVERY compose and assert no
++# reported path contains a character that cannot appear in a model directory
++# name (backslash / quote / brace). The general form of the bug: it would also
++# catch a `${MODEL_SUBDIR` truncation regression of the earlier `:-default` fix.
++set -euo pipefail
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++TMP_DIR="$(mktemp -d)"
++trap 'rm -rf "$TMP_DIR"' EXIT
++
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++
++assert_contains() {
++  local hay="$1" needle="$2"
++  if [[ "$hay" != *"$needle"* ]]; then
++    echo "ASSERTION FAILED: expected to find:" >&2
++    echo "  $needle" >&2
++    echo "in:" >&2
++    echo "$hay" >&2
++    exit 1
++  fi
++}
++
++assert_not_contains() {
++  local hay="$1" needle="$2"
++  if [[ "$hay" == *"$needle"* ]]; then
++    echo "ASSERTION FAILED: did NOT expect to find:" >&2
++    echo "  $needle" >&2
++    echo "in:" >&2
++    echo "$hay" >&2
++    exit 1
++  fi
++}
++
++run_deps() {
++  local compose="$1"
++  local model_dir="$2"
++  (
++    export ROOT_DIR MODEL_DIR="$model_dir"
++    export PREFLIGHT_NO_FETCH_PROMPT=1 CLUB3090_WEIGHTS_READER_DISABLE=1
++    source "${ROOT_DIR}/scripts/preflight.sh"
++    preflight_compose_deps "$compose"
++  ) 2>&1
++}
++
++# ── Part 1: escaped-JSON drafter path (the 26b compose shape) ──────────────
++escaped_compose="${TMP_DIR}/escaped-json.yml"
++cat > "$escaped_compose" <<'YAML'
++services:
++  vllm:
++    image: vllm/vllm-openai:v0.24.0
++    command:
++      - --model
++      - /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit
++      - --speculative-config
++      - "{\"model\":\"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\",\"num_speculative_tokens\":4}"
++YAML
++mkdir -p "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit"
++touch "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit/config.json"
++
++if out="$(run_deps "$escaped_compose" "${TMP_DIR}/models")"; then
++  echo "ASSERTION FAILED: expected missing-drafter failure" >&2
++  exit 1
++fi
++assert_contains "$out" "missing: ${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant/config.json (HF model)"
++# the bug: the captured subdir carried the JSON escape's trailing backslash
++assert_not_contains "$out" 'assistant\/config.json'
++assert_not_contains "$out" 'it-assistant\'
++
++# drafter present at the CLEAN path → deps pass
++mkdir -p "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant"
++touch "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant/config.json"
++out="$(run_deps "$escaped_compose" "${TMP_DIR}/models")"
++[[ -z "$out" ]]
++
++# ── Part 2: every compose on disk → no unnameable char in any path ─────────
++# Single subshell sourcing preflight once; for each compose point MODEL_DIR at
++# an EMPTY dir so every referenced model is reported, then assert every
++# "missing:" path is clean.
++empty_models="${TMP_DIR}/empty-models"
++mkdir -p "$empty_models"
++
++bad=0
++while IFS= read -r -d '' compose; do
++  out=""
++  out="$(run_deps "$compose" "$empty_models")" || true
++  while IFS= read -r line; do
++    p="${line#*missing: }"
++    p="${p%% (*}"  # strip the " (reason)" suffix
++    case "$p" in
++      *'\'* | *'"'* | *"'"* | *'{'* | *'}'*)
++        echo "BAD extracted path in ${compose#$ROOT_DIR/}: $p" >&2
++        bad=1
++        ;;
++    esac
++  done < <(printf '%s\n' "$out" | grep 'missing: ' || true)
++done < <(find "${ROOT_DIR}/models" -path '*/compose/*' \( -name '*.yml' -o -name '*.yaml' \) -print0)
++
++if [[ "$bad" -ne 0 ]]; then
++  echo "ASSERTION FAILED: extractor produced paths with characters that" >&2
++  echo "cannot appear in a model directory name (backslash / quote / brace)." >&2
++  exit 1
++fi
++
++echo "test-preflight-extracted-paths: ok"

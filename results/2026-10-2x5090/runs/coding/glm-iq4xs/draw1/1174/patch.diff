@@ -1,0 +1,115 @@
+diff --git a/scripts/lib/profiles/hf_fetch.py b/scripts/lib/profiles/hf_fetch.py
+index c7728f4..93f6e8e 100644
+--- a/scripts/lib/profiles/hf_fetch.py
++++ b/scripts/lib/profiles/hf_fetch.py
+@@ -90,6 +90,7 @@ from pathlib import Path
+ from typing import Any, Callable, Iterable, Optional
+ 
+ _HF = "https://huggingface.co"
++_DASH = "\u2014"   # em dash, for the announcement lines
+ _NET_TIMEOUT = 60
+ _SHA_CHUNK = 8 * 1024 * 1024
+ 
+@@ -144,6 +145,25 @@ def is_xet_refusal(blob: str) -> bool:
+     return all(m in low for m in _XET_REFUSAL_MARKERS)
+ 
+ 
++def is_tool_unavailable(blob: str, rc: Optional[int] = None) -> bool:
++    """True iff a failed rung-1 attempt failed because the `hf` CLI itself is
++    missing or not runnable (rc=127 from the shell, or our own "not on PATH"
++    report) \u2014 NOT because the hub refused the transfer.
++
++    This is a *fallback-eligible* failure: rung 3 (raw resolve + curl) has no
++    dependency on `hf` at all, so a missing CLI must never kill the ladder. It
++    is deliberately narrow \u2014 an ordinary rung-1 error (a network blip, a
++    401, a disk-full) still reports honestly instead of being pushed down the
++    slow path."""
++    if rc is not None and int(rc) == 127:
++        return True
++    low = (blob or "").lower()
++    return ("on path" in low
++            or "command not found" in low
++            or "no such file or directory" in low
++            or "cannot execute" in low)
++
++
+ def hf_xet_importable(python: Optional[str] = None) -> bool:
+     """Is `hf_xet` ALREADY importable in the environment the `hf` CLI runs under?
+ 
+@@ -814,7 +834,9 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+              xet_available: Optional[Callable[[], bool]] = None,
+              tree_fn: Optional[Callable] = None,
+              stall_timeout: int = 300) -> LadderResult:
+-    """Rungs 2 and 3, entered ONLY after rung 1 hit the too-large refusal.
++    """Rungs 2 and 3, entered after rung 1 could not serve the pull \u2014
++    either the client-side too-large refusal, or the `hf` CLI itself being
++    unavailable (rung 3 has no dependency on the CLI).
+ 
+     Each rung announces why the previous one could not deliver, so a log shows
+     the whole decision chain rather than a bare "downloading (again)"."""
+@@ -822,11 +844,24 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+     allow = allow_xet_enabled() if allow_xet is None else allow_xet
+     notes: list[str] = []
+ 
+-    log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: huggingface_hub "
+-        "client-side blocks the plain HTTP path for files over 50 GB. This is "
+-        "a hard policy wall, not flakiness — retrying it cannot succeed.")
++    if is_tool_unavailable(classic_error):
++        # The CLI is missing, not the hub refusing: say THAT, not the 50 GB
++        # wall. Rung 3 needs neither `hf` nor `huggingface_hub`, so this is a
++        # reason to fall through, not a reason to die.
++        notes.append("rung 1 (classic LFS) unavailable: the `hf` CLI is "
++                     "missing/not runnable")
++        log("[hf-fetch] rung 1 (classic LFS) UNAVAILABLE: neither `hf` nor "
++            "`huggingface-cli` could be run, so the classic path cannot serve "
++            "this pull. Falling through to rung 3, which has no dependency on "
++            "the CLI (`pipx install 'huggingface_hub[cli]'` installs it for "
++            "next time).")
++    else:
++        log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: "
++            "huggingface_hub client-side blocks the plain HTTP path for files "
++            "over 50 GB. This is a hard policy wall, not flakiness " + _DASH +
++            " retrying it cannot succeed.")
+     if classic_error:
+-        log(f"[hf-fetch]   hub said: {classic_error.strip()[:300]}")
++        log(f"[hf-fetch]   rung 1 said: {classic_error.strip()[:300]}")
+ 
+     # --- enumerate the concrete files (curl fetches one named file at a time)
+     metas: dict[str, FileMeta] = dict(meta or {})
+@@ -977,9 +1012,15 @@ def fetch(repo_id: str, local_dir: Path, includes: list[str], *,
+             f"on this rung.")
+         return LadderResult(ok=True, rung="classic", files=list(names))
+     if not is_xet_refusal(blob):
+-        return LadderResult(ok=False, failure="fallback-failed",
+-                            detail=f"rung 1 failed (rc={rc}): "
+-                                   f"{blob.strip()[-400:]}")
++        if not is_tool_unavailable(blob, rc):
++            return LadderResult(ok=False, failure="fallback-failed",
++                                detail=f"rung 1 failed (rc={rc}): "
++                                       f"{blob.strip()[-400:]}")
++        # The `hf` CLI is missing/unrunnable: rung 3 needs no CLI, so the
++        # ladder continues instead of dying on a tooling gap.
++        log(f"[hf-fetch] rung 1 (classic LFS) failed rc={rc} "
++            f"{_DASH} the CLI itself is unavailable, so the pull escalates "
++            f"instead of aborting.")
+     try:
+         return escalate(repo_id, local_dir, todo, classic_error=blob,
+                         meta=metas, revision=revision, allow_xet=allow,
+@@ -1031,7 +1072,16 @@ def _main(argv: list[str]) -> int:
+     res = fetch(args.repo, Path(args.local_dir), includes,
+                 revision=args.revision, allow_xet=args.allow_xet or None,
+                 do_verify_in_place=args.verify_in_place or None)
+-    return 0 if res.ok else 1
++    if res.ok:
++        return 0
++    # A bare `exit 1` here is the other half of the bug: the CLI is the only
++    # place the ladder's structured failure reaches a shell script, so the
++    # token + detail go to stderr before the non-zero status (#804/#812:
++    # "every rung announces which rung ran", "logs are auditable") \u2014 at
++    # the one moment it matters most, a rung must not go quiet.
++    default_log(f"[hf-fetch] FAILED ({res.failure or 'failure'}): "
++                f"{res.detail or 'no detail'}".rstrip())
++    return 1
+ 
+ 
+ if __name__ == "__main__":       # pragma: no cover - CLI wrapper

@@ -1,0 +1,25 @@
+id,date,vendor,amount,currency,category
+R01,2026-09-21,Rail Co,88.97,EUR,transport
+R02,2026-09-22,Rail Co,80.35,EUR,supplies
+R03,2026-09-25,Taxi Uno,75.23,USD,lodging
+R04,2026-09-24,Taxi Uno,99.73,EUR,transport
+R05,2026-09-20,Taxi Uno,130.14,GBP,transport
+R06,2026-09-24,Rail Co,45684,JPY,supplies
+R07,2026-09-18,Taxi Uno,25479,JPY,transport
+R23,2026-09-24,Taxi Uno,99.73,EUR,transport
+R08,2026-09-22,Taxi Uno,93.26,GBP,transport
+R09,2026-09-24,Print Shop,35.41,USD,lodging
+R10,2026-09-14,Cafe Nord,53.43,USD,lodging
+R11,2026-09-25,Hotel Aurora,50049,JPY,lodging
+R12,2026-09-20,Bistro Sud,65,GBP,meals
+R13,2026-09-15,Hotel Aurora,31.71,EUR,meals
+R14,2026-09-22,Taxi Uno,120.82,GBP,transport
+R24,2026-09-14,Cafe Nord,53.43,USD,lodging
+R15,2026-09-20,Taxi Uno,186.14,GBP,supplies
+R16,2026-09-18,Taxi Uno,179.87,EUR,lodging
+R17,2026-09-22,Rail Co,14520,JPY,meals
+R18,2026-09-15,Rail Co,180.75,EUR,supplies
+R19,2026-09-16,Taxi Uno,39.06,USD,supplies
+R20,2026-09-17,Cafe Nord,26093,JPY,supplies
+R21,2026-09-24,Taxi Uno,156.36,USD,meals
+R22,2026-09-15,Rail Co,110.48,EUR,meals

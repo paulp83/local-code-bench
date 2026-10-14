@@ -1,0 +1,85 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 2b0d50f..949100d 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -195,8 +195,27 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# best-effort container for VRAM + cmd introspection (name heuristic)
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++# best-effort container for VRAM + cmd + drafter introspection (#1537).
++# The old `grep -m1 -E 'vllm-(qwen|gemma)'` name heuristic only ever matched two
++# vLLM container families: an SGLang (or llama.cpp / ik-llama) container was
++# never found, so its card said "spec ?", listed EVERY GPU on the host, and
++# measured VRAM rig-wide. club-containers.sh is THE single source of truth for
++# "is this container ours?" — registry-derived, so a new engine is covered the
++# moment its slug lands. Prefer the one publishing the port we are probing
++# (a rig can legitimately host two engines at once); fall back to the first
++# container of ours docker has up. CONTAINER= still wins over both.
++source "${ROOT_DIR}/scripts/lib/club-containers.sh"
++# the host port the probe is actually talking to ("http://host:8020" -> 8020)
++_probe_port="${URL#*://}"; _probe_port="${_probe_port%%/*}"; _probe_port="${_probe_port##*:}"
++[[ "$_probe_port" =~ ^[0-9]+$ ]] || _probe_port=""
++CONTAINER="${CONTAINER:-}"
++if [[ -z "$CONTAINER" && -n "$_probe_port" ]]; then
++  CONTAINER="$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
++    | command grep -E -- ":${_probe_port}->" \
++    | command grep -E -- "$(club_container_re_loose)" \
++    | head -1 | cut -d'|' -f1 || true)"
++fi
++CONTAINER="${CONTAINER:-$(club_running_container || true)}"
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ _served_seqs()   { _container_cmd | command grep -oE 'max-num-seqs [0-9]+'  | command grep -oE '[0-9]+' | head -1; }
+@@ -230,13 +249,45 @@ _gpu_fp() {
+   CONTAINER="$CONTAINER" python3 "$PROBE_PY" --gpu-label 2>/dev/null || echo "? GPU"
+ }
+ 
++# The entrypoint array and the environment are evidence too (#1537): the
++# Qwen3.8 vLLM compose (and every SGLang / llama.cpp one) passes SPEC_N through
++# `environment:` and composes `--speculative-config` INSIDE the entrypoint
++# script, so the flag never appears in `.Config.Cmd` — which is what made a
++# drafter-on MTP n=4 boot report "spec off".
++_container_entrypoint() { docker inspect "$CONTAINER" --format '{{join .Config.Entrypoint " "}}' 2>/dev/null || true; }
++_container_env()        { docker inspect "$CONTAINER" --format '{{join .Config.Env "\n"}}' 2>/dev/null || true; }
++# The composes log their own drafter verdict at boot ("[spec] drafter ON
++# (SPEC_N=3)" / "[spec] native MTP ON (n=4)" / "[spec] drafter OFF (SPEC_N=0)"),
++# which is the one signal that does not depend on how the flag reached the
++# engine — it covers an entrypoint that defaults SPEC_N itself.
++_container_spec_logs() { docker logs --tail 2500 "$CONTAINER" 2>&1 | command grep -i '\[spec\]' || true; }
++
+ _spec_fp() {
+-  local cmd
++  local cmd ep cenv logs specn
+   cmd="$(_container_cmd)"
+-  if [[ -z "$cmd" ]]; then echo "spec ?"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'num-speculative|speculative-config|--speculative'; then echo "MTP"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
++  ep="$(_container_entrypoint)"
++  cenv="$(_container_env)"
++  logs="$(_container_spec_logs)"
++  if [[ -z "$cmd$ep$cenv$logs" ]]; then echo "spec ?"; return; fi
++  # The compose's own verdict wins: it knows SPEC_N's default, not just what the
++  # caller exported.
++  if [[ -n "$logs" ]]; then
++    if printf '%s\n' "$logs" | command grep -qiE '\[spec\].*(drafter OFF|OFF \(SPEC_N=0\))'; then echo "spec off"; return; fi
++    if printf '%s\n' "$logs" | command grep -qiE '\[spec\].*(drafter ON|MTP ON|DFlash)'; then
++      if printf '%s\n' "$logs" | command grep -qiE '\[spec\].*DFlash'; then echo "DFlash"; return; fi
++      echo "MTP"; return
++    fi
++  fi
++  specn="$(printf '%s\n' "$cenv" | command grep -oE '^SPEC_N=[0-9]+' | command grep -oE '[0-9]+$' | head -1 || true)"
++  if [[ -n "$specn" && "$specn" == "0" ]]; then echo "spec off"; return; fi
++  local text
++  text="${cmd}
++${ep}
++${cenv}"
++  if printf '%s' "$text" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
++  if printf '%s' "$text" | command grep -qiE 'num-speculative|speculative-config|--speculative|spec-draft'; then echo "MTP"; return; fi
++  if [[ -n "$specn" ]]; then echo "MTP"; return; fi
++  if printf '%s' "$text" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
+   echo "spec off"
+ }
+ 

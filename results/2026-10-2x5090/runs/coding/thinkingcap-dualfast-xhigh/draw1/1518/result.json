@@ -1,0 +1,23 @@
+{
+ "n": 1518,
+ "config": "thinkingcap-dualfast-xhigh",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 399.1,
+ "steps": 41,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 15,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/bench-row-formatter.sh",
+  "scripts/switch.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-switch-orphan-teardown.sh": 0
+ }
+}

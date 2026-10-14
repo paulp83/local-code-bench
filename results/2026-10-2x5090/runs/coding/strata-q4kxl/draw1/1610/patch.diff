@@ -1,0 +1,210 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..d2c8081 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -463,7 +463,133 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     return vol, inv
+ 
+ 
+-def _spec_wiring_present(patch: dict, body: str) -> bool:
++# Generic script filenames that carry NO patch-specific signal: every compose
++# that runs ANY install script mounts/invokes one, and every vendored patch
++# lives under a shared ``patches`` directory. Matching a patch's ``files``
++# entry by such a basename (or by that shared parent) made the legacy wiring
++# test match UNRELATED composes — the bug behind an unwired install-script
++# patch still reported as reached after its mount + invoke were stripped. A
++# patch is identified by its OWN directory name, never its parent or a generic
++# filename.
++_GENERIC_PATCH_FILENAMES = frozenset(
++    {
++        "install",
++        "install.sh",
++        "install.bash",
++        "install.py",
++        "apply",
++        "apply.sh",
++        "apply.py",
++        "patch",
++        "patch.sh",
++        "patch.py",
++        "run.sh",
++        "entrypoint.sh",
++        "setup.sh",
++        "sitecustomize.py",
++        "conftest.py",
++    }
++)
++
++
++def _own_patch_dir_name(rel: str) -> str | None:
++    """The patch's OWN directory name — the path component immediately after
++    the last ``patches`` segment (e.g. ``…/patches/<own>/…`` -> ``<own>``).
++
++    This is the token that appears on a compose volume line identifying THIS
++    patch's mount source (and is unique per patch, unlike the shared
++    ``patches`` parent or a generic ``install.sh`` basename). Returns None when
++    ``rel`` is not under a ``patches`` tree.
++    """
++    parts = Path(rel).parts
++    if "patches" not in parts:
++        return None
++    idx = len(parts) - 1 - parts[::-1].index("patches")
++    if idx + 1 < len(parts):
++        return parts[idx + 1]
++    return None
++
++
++def _patch_source_names(patch: dict) -> set[str]:
++    """Names that identify THIS patch's mount SOURCE on a compose volume line.
++
++    Derived from every ``files`` entry and every declared source path in
++    ``delivery_spec`` (``script``/``sidecar``/``jinja``/``overlay_files[].src``).
++    Binding these to a mount target is what distinguishes this patch's mount
++    from a DIFFERENT patch mounted at the same in-container path. Returns an
++    empty set when no path lives under a ``patches`` tree (callers then fall
++    back to bare target matching, preserving legacy behaviour).
++    """
++    rels = list(patch.get("files") or [])
++    spec = patch.get("delivery_spec") or {}
++    for key in ("script", "sidecar", "jinja"):
++        if spec.get(key):
++            rels.append(spec[key])
++    for of in spec.get("overlay_files") or []:
++        if of.get("src"):
++            rels.append(of["src"])
++
++    names: set[str] = set()
++    for rel in rels:
++        own = _own_patch_dir_name(rel)
++        if own:
++            names.add(own)
++    return names
++
++
++def _volume_wiring_present(
++    vol_markers: list[str], body: str, src_names: set[str]
++) -> bool:
++    """True iff ANY declared mount target appears on a service-body line that
++    ALSO names this patch's mount source.
++
++    Binding the source to the target distinguishes THIS patch's mount from an
++    unrelated patch mounted at the same in-container path (the
++    ``/etc/club3090/w4a8`` collision the attribution test must catch). When no
++    patch-specific source name can be derived, degrade to the legacy
++    bare-target substring so nothing that used to resolve regresses.
++    """
++    lines = body.splitlines()
++    for marker in vol_markers:
++        if not src_names:
++            if marker in body:
++                return True
++            continue
++        for line in lines:
++            if marker in line and any(name in line for name in src_names):
++                return True
++    return False
++
++
++def _legacy_entrypoint_markers(patch: dict, root: Path) -> set[str]:
++    """Patch-specific markers for the deprecated ``delivery.entrypoint_invoke``
++    fallback (used only when the patch declares NO load-bearing mount target,
++    so the sound ``delivery_spec`` check cannot decide).
++
++    Identifies the patch by its OWN directory name — never the shared
++    ``patches`` parent (present in every compose that mounts any patch dir)
++    and never a generic filename like ``install.sh`` (present in every compose
++    that runs any install script). Those generic markers are exactly what made
++    the old fallback report an UNWIRED install-script patch as reached.
++    """
++    markers: set[str] = set()
++    for rel in patch.get("files") or []:
++        own = _own_patch_dir_name(rel)
++        if own:
++            markers.add(own)
++            continue
++        target = root / rel
++        name = Path(rel).name
++        if target.is_dir():
++            markers.add(name)
++        elif name not in _GENERIC_PATCH_FILENAMES:
++            # Not under a patches/ tree and a patch-specific filename — usable.
++            markers.add(name)
++        # A generic filename (install.sh, apply.py, …) contributes NO marker.
++    return markers
++
++
++def _spec_wiring_present(patch: dict, body: str, *, source_bind: bool = False) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+     ``wired_at`` tells us which insertion point(s) the patch claims:
+@@ -471,6 +597,13 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     a matching invoke; ``[volumes, entrypoint]`` requires *both*.
+     A patch whose delivery_mechanism is ``none`` has no spec and is never
+     spec-wired (the legacy fallback below still applies for parity).
++
++    ``source_bind`` (set for the install-script / overlay / sidecar path)
++    requires each mount target to appear on a line that also names THIS
++    patch's mount source, so a different patch mounted at the same
++    in-container target does not count as wiring for this one. The
++    ``chat_template`` path leaves it False (its declared ``mounted_at`` is a
++    shared ``chat_template.jinja`` suffix, not a patch-unique token).
+     """
+     spec = patch.get("delivery_spec")
+     if not spec:
+@@ -480,8 +613,11 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+         wired_at = [wired_at]
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
++    src_names = _patch_source_names(patch) if source_bind else set()
+ 
+-    vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
++    vol_ok = (not vol_markers) or _volume_wiring_present(
++        vol_markers, body, src_names
++    )
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
+ 
+     if wired_at == {"volumes"}:
+@@ -536,21 +672,33 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     body = service_body(compose_text(root, name_or_path))
+ 
+     # Primary, sound path: the patch's declared delivery_spec wiring is
+-    # genuinely present at the insertion point(s) it claims.
+-    if _spec_wiring_present(patch, body):
++    # genuinely present at the insertion point(s) it claims. ``source_bind``
++    # binds each mount target to THIS patch's mount source, so a DIFFERENT
++    # patch mounted at the same in-container target does not count, and an
++    # install-script patch whose mount has been removed is correctly missed.
++    if _spec_wiring_present(patch, body, source_bind=True):
+         return True
+ 
++    # When the delivery_spec declares a load-bearing MOUNT TARGET (a bind
++    # mount / overlay dest), the sound spec check above is AUTHORITATIVE: a
++    # patch that is no longer mounted at that target — or mounted there by a
++    # different patch — is NOT reached. The legacy ``delivery:`` fallback below
++    # must NOT override it: its generic ``install.sh`` / ``patches`` markers
++    # answered True even after the patch's mount + invoke lines were removed.
++    spec = patch.get("delivery_spec") or {}
++    if spec.get("mounted_at") or spec.get("overlay_files"):
++        return False
++
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
++    # service body, so header/comment ID mentions never match. Reached only
++    # when the spec declares no load-bearing mount target (the spec check
++    # above could not decide); matched on the patch's OWN directory name, so
++    # an unwired patch no longer reports reached via generic markers.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
++        markers = _legacy_entrypoint_markers(patch, root)
++        if markers and any(marker in body for marker in markers):
++            return True
+         if patch["id"] in body:
+             return True
+     if (

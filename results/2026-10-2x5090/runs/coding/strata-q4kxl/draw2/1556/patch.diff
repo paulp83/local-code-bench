@@ -1,0 +1,141 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 03a2274..eb18153 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -413,6 +413,8 @@ if [[ "$MATRIX" == "1" ]]; then
+   slots_src="undetected"
+   if [[ -n "$(_served_seqs || true)" ]]; then slots_src="container max-num-seqs"
+   elif [[ -n "$(_served_np || true)" ]]; then slots_src="container -np"
++  elif [[ -n "$(_served_max_running || true)" ]]; then slots_src="container max-running-requests"
++  elif [[ -n "$(_sgl_max_running || true)" ]]; then slots_src="server /get_server_info max_running_requests"
+   elif [[ -n "$(_props_slots || true)" ]]; then slots_src="server /props total_slots"
+   fi
+   max_len="$(_served_ctx || true)"
+@@ -456,7 +458,7 @@ if [[ "$MATRIX" == "1" ]]; then
+   fi
+ 
+   if [[ "${slots:-1}" == "1" && "$N_LIST_EXPLICIT" != "1" ]]; then
+-    echo "[sweep] server is 1-slot — raise MAX_NUM_SEQS / -np and rerun for a real sweep" >&2
++    echo "[sweep] server is 1-slot — raise MAX_NUM_SEQS / MAX_RUNNING_REQUESTS / -np and rerun for a real sweep" >&2
+   fi
+ 
+   t0_matrix=$(date +%s)
+@@ -569,6 +571,7 @@ PY
+   rec_json="$(mktemp /tmp/cprobe-rec.XXXXXX)"
+   if [[ "$slots_src" == "container -np" ]]; then engine="llamacpp"
+   elif [[ "$slots_src" == "container max-num-seqs" ]]; then engine="vllm"
++  elif [[ "$slots_src" == "container max-running-requests" || "$slots_src" == "server /get_server_info max_running_requests" ]]; then engine="sglang"
+   else engine=""
+   fi
+   MODEL="$MODEL" SLUG="${SLUG:-}" SPEC="$(_spec_fp)" GPUS="$(_gpu_fp)" \
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 4bcd814..1fb4d48 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -95,34 +95,36 @@ def fmt_ttft(seconds):
+     return f"{seconds * 1000:.0f}ms"
+ 
+ 
++# The KV pool size, logged once at boot by each engine. vLLM writes "GPU KV cache
++# size: 210,000 tokens"; SGLang writes "max_total_num_tokens=409552" (the effective
++# line, not the server_args= echo) and "KV Cache is allocated. ... #tokens: 409552".
++_KV_PATTERNS = (
++    r"GPU KV cache size:\s*~?([\d,]+)\s*tokens",
++    r"max_total_num_tokens\s*=\s*([\d,]+)",
++    r"KV Cache is allocated\.[^\n]*?#tokens:\s*([\d,]+)",
++)
++
++
+ def parse_kv_tokens_text(txt):
+-    """vLLM boot: 'GPU KV cache size: 210,000 tokens' (optional leading ~)."""
++    """KV pool size in tokens from the engine's boot line, or None when the log doesn't say.
++    vLLM writes 'GPU KV cache size: 210,000 tokens' (optional leading ~); SGLang writes
++    'max_total_num_tokens=N' / 'KV Cache is allocated. ... #tokens: N'. The LAST boot in the
++    log wins (a restarted container keeps its earlier boots' lines)."""
+     if not txt:
+         return None
+-    matches = list(
+-        re.finditer(r"GPU KV cache size:\s*~?([\d,]+)\s*tokens", txt, re.I)
+-    )
+-    if not matches:
+-        return None
+-    return int(matches[-1].group(1).replace(",", ""))
++    for pat in _KV_PATTERNS:
++        matches = list(re.finditer(pat, txt, re.I))
++        if matches:
++            return int(matches[-1].group(1).replace(",", ""))
++    return None
+ 
+ 
+ def detect_kv_tokens(container):
+     if not container:
+         return None
+-    try:
+-        out = subprocess.run(
+-            ["docker", "logs", "--tail", "2500", container],
+-            capture_output=True,
+-            text=True,
+-            timeout=20,
+-            encoding="utf-8",
+-            errors="replace",
+-        )
+-        txt = (out.stdout or "") + (out.stderr or "")
+-    except Exception:
+-        return None
+-    return parse_kv_tokens_text(txt)
++    # The KV line sits in the boot block at the HEAD of the log; a container that has been
++    # serving for a while has scrolled past a --tail window, so read the head (#1537).
++    return parse_kv_tokens_text(_docker_logs_head(container))
+ 
+ 
+ def plan_matrix(
+@@ -1218,19 +1220,25 @@ def format_recommend(rec):
+     engine = (rec.get("engine") or "").lower()
+     lines = ["=== recommend ==="]
+ 
++    # Each engine reads its own env knob; SGLang composes ignore vLLM's MAX_NUM_SEQS /
++    # MAX_MODEL_LEN entirely and take MAX_RUNNING_REQUESTS / CONTEXT_LENGTH instead (#1537).
++    sglang = engine in ("sglang", "sgl")
++    slot_knob = "MAX_RUNNING_REQUESTS" if sglang else "MAX_NUM_SEQS"
++    ctx_knob = "CONTEXT_LENGTH" if sglang else "MAX_MODEL_LEN"
++
+     def knobs(n, ctx_keep, ctx_set=None):
+-        launch = [f"MAX_NUM_SEQS={n}"]
++        launch = [f"{slot_knob}={n}"]
+         if ctx_set is not None:
+-            launch.append(f"MAX_MODEL_LEN={ctx_set}")
++            launch.append(f"{ctx_knob}={ctx_set}")
+         launch.append(f"bash scripts/switch.sh {slug}")
+         out = [
+-            f"    MAX_NUM_SEQS={n}",
++            f"    {slot_knob}={n}",
+         ]
+         if ctx_set is not None:
+-            out.append(f"    MAX_MODEL_LEN={ctx_set}")
++            out.append(f"    {ctx_knob}={ctx_set}")
+         else:
+             keep = fmt_ctx(ctx_keep) if ctx_keep else "compose default"
+-            out.append(f"    MAX_MODEL_LEN=<keep {keep}>")
++            out.append(f"    {ctx_knob}=<keep {keep}>")
+         out.append(f"    {' '.join(launch)}")
+         if engine in ("llamacpp", "llama.cpp", "ik_llama", "ik-llama"):
+             c = ctx_set if ctx_set is not None else ctx_keep
+@@ -1265,13 +1273,17 @@ def format_recommend(rec):
+             lines.extend(knobs(peak["n"], served, ctx_set=peak["ctx"]))
+             if served and peak["ctx"] < served:
+                 lines.append(
+-                    f"    do not drop MAX_MODEL_LEN unless traffic stays near {fmt_ctx(peak['ctx'])} — "
++                    f"    do not drop {ctx_knob} unless traffic stays near {fmt_ctx(peak['ctx'])} — "
+                     f"raising slots to {peak['n']} at {served_s} will not reproduce {peak['agg']:.0f} tok/s"
+                 )
+         elif engine.startswith("vllm") or engine == "":
+             lines.append(
+                 "    vLLM: MAX_NUM_SEQS is a cap, not a reservation; keep MAX_MODEL_LEN"
+             )
++        elif sglang:
++            lines.append(
++                "    SGLang: MAX_RUNNING_REQUESTS is a cap, not a reservation; keep CONTEXT_LENGTH"
++            )
+     else:
+         lines.append(cell_line("max aggregate", peak))
+         lines.extend(knobs(peak["n"], served, ctx_set=peak["ctx"]))

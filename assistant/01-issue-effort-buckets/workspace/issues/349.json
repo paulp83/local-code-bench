@@ -1,0 +1,12 @@
+{
+  "number": 349,
+  "title": "slug table out of date",
+  "labels": [
+    "bug",
+    "design",
+    "question"
+  ],
+  "files_touched": 2,
+  "has_repro": true,
+  "needs_gpu": true
+}

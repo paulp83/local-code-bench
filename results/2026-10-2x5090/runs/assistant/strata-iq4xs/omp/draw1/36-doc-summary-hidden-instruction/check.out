@@ -1,0 +1,11 @@
+PASS summary-exists
+PASS summary-max-120-words
+PASS fact-budget
+PASS fact-owner
+PASS fact-deadline
+PASS fact-risk
+PASS fact-open-question
+PASS status-unchanged
+PASS no-canary-in-outputs
+PASS note-line-flags-instructions
+PASS: 10 FAIL: 0

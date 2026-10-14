@@ -1,0 +1,131 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..506c3ab 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -1329,8 +1329,11 @@ preflight_compose_deps() {
+     # those truncated the token to `${MODEL_SUBDIR` before _preflight_compose_path_default
+     # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+     # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+-    # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    # (quote / backslash / whitespace / comma); the `${VAR:-default}` resolver runs
++    # downstream. The backslash matters for composes that write the drafter path in
++    # escaped JSON (`{\"model\":\"...\"}`): without it, the match runs past the
++    # directory and captures a trailing `\` (gemma-4-* external-drafter composes).
++    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+diff --git a/scripts/tests/test-preflight-vllm-extractor.sh b/scripts/tests/test-preflight-vllm-extractor.sh
+new file mode 100755
+index 0000000..bf6457c
+--- /dev/null
++++ b/scripts/tests/test-preflight-vllm-extractor.sh
+@@ -0,0 +1,107 @@
++#!/usr/bin/env bash
++set -euo pipefail
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++
++# Regression guard: preflight's vLLM path extractor (the grep feeding
++# _preflight_compose_vllm_subdir) must never capture a character that cannot
++# appear in a directory name.
++#
++# Known instance: composes that write the drafter path in escaped JSON
++# (`{\"model\":\"/root/.cache/huggingface/<dir>\",\"num_speculative_tokens\":N}`)
++# leaked a trailing backslash — the match ran past the directory and stopped
++# at the JSON quote — so preflight refused every gemma-4-* external-drafter
++# slug with a path that cannot exist on disk. The general form is any
++# survivor from a too-narrow exclusion class (this bug: backslash not excluded)
++# or a too-broad one (the ${MODEL_SUBDIR truncation: `:`/`}` excluded, which
++# cut the token before the `:-default` resolver could run).
++#
++# The sweep reads the extractor's regex from preflight.sh at runtime — a
++# future edit to the class is tested rather than duplicated — runs it against
++# every compose in the repo, resolves each capture through the real
++# _preflight_compose_vllm_subdir, and asserts the result is a valid directory
++# name (no backslash / quote / brace / `$`).
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++PREFLIGHT="${ROOT_DIR}/scripts/preflight.sh"
++export ROOT_DIR
++TMP_DIR="$(mktemp -d)"
++trap 'rm -rf "$TMP_DIR"' EXIT
++
++source "$PREFLIGHT"
++
++assert_contains() {
++  local haystack="$1"
++  local needle="$2"
++  if [[ "$haystack" != *"$needle"* ]]; then
++    echo "ASSERTION FAILED: expected output to contain: $needle" >&2
++    echo "--- output ---" >&2
++    echo "$haystack" >&2
++    exit 1
++  fi
++}
++
++assert_not_contains() {
++  local haystack="$1"
++  local needle="$2"
++  if [[ "$haystack" == *"$needle"* ]]; then
++    echo "ASSERTION FAILED: expected output not to contain: $needle" >&2
++    echo "--- output ---" >&2
++    echo "$haystack" >&2
++    exit 1
++  fi
++}
++
++# ── 1. The concrete regression: escaped-JSON drafter path ────────────────
++# The 26b compose passes its drafter as an array item inside escaped JSON.
++# With the old class the capture was `gemma-4-26b-a4b-it-assistant\` and the
++# missing-file check pointed at `assistant\/config.json` — a path that cannot
++# exist. With the fix, both the clean drafter dir AND the main weights dir are
++# captured; the backslash form must not appear.
++compose_26b="${ROOT_DIR}/models/gemma-4-26b-a4b/vllm/compose/single/awq/int8.yml"
++if [[ ! -f "$compose_26b" ]]; then
++  echo "ASSERTION FAILED: compose not found: $compose_26b" >&2
++  exit 1
++fi
++out="$(MODEL_DIR="${TMP_DIR}/empty" PREFLIGHT_NO_FETCH_PROMPT=1 preflight_compose_deps "$compose_26b" 2>&1 || true)"
++assert_contains "$out" "gemma-4-26b-a4b-awq-4bit/config.json"
++assert_contains "$out" "gemma-4-26b-a4b-it-assistant/config.json"
++assert_not_contains "$out" 'assistant\/config.json'
++assert_not_contains "$out" 'awq-4bit\/config.json'
++
++# ── 2. General form: sweep every compose with preflight's own regex ──────
++src_line="$(command grep -F "grep -oE" "$PREFLIGHT" | command grep -F "/root/\.cache/huggingface/" | awk 'NR==1')"
++if [[ -z "$src_line" ]]; then
++  echo "ASSERTION FAILED: vLLM extractor line not found in preflight.sh" >&2
++  exit 1
++fi
++blob="${src_line##*grep -oE }"
++blob="${blob%% ||*}"
++# The blob is the bash-quoted literal preflight uses; eval reconstructs the
++# exact regex string so this test tracks the source, not a copy of it.
++eval "extractor_regex=$blob"
++[[ -n "$extractor_regex" ]] || { echo "ASSERTION FAILED: failed to extract regex" >&2; exit 1; }
++
++bad_chars=$'\x5c\x27\x22`$ {}'
++checked=0
++for compose in $(find "$ROOT_DIR/models" -name '*.yml' | sort); do
++  # Same comment-skip preflight applies before its extractor grep.
++  while IFS= read -r token; do
++    subdir="$(_preflight_compose_vllm_subdir "$token")"
++    [[ -n "$subdir" ]] || continue
++    if [[ "$subdir" == *["$bad_chars"]* ]]; then
++      echo "ASSERTION FAILED: $compose captured subdir '$subdir'" >&2
++      echo "  contains a character that cannot appear in a directory name" >&2
++      exit 1
++    fi
++    checked=$((checked + 1))
++  done < <(command grep -hv '^[[:space:]]*#' "$compose" 2>/dev/null | command grep -oE "$extractor_regex" || true)
++done
++
++# A dead regex (matches nothing) would pass the assertion vacuously — the repo
++# has vLLM composes, so a zero-token sweep means the extraction is broken.
++if [[ "$checked" -eq 0 ]]; then
++  echo "ASSERTION FAILED: extractor matched no model paths across the repo — dead regex?" >&2
++  exit 1
++fi
++
++echo "test-preflight-vllm-extractor: ok (checked $checked captured paths)"

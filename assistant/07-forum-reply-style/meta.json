@@ -1,0 +1,9 @@
+{
+  "id": "07-forum-reply-style",
+  "source": "session-derived",
+  "category": "writing",
+  "difficulty": "medium",
+  "est_minutes": 10,
+  "needs_web": false,
+  "notes": "Shape from sessions drafting maintainer/forum replies against the stop-slop style rules."
+}

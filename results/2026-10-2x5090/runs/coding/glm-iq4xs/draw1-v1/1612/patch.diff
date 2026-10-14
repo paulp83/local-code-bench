@@ -1,0 +1,208 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index e69007a..32c1bb4 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -420,6 +420,43 @@ def _install_sources(patch: dict) -> list[str]:
+     return sorted(n for n in names if n and n not in _GENERIC_SCRIPT_NAMES and n != "patches")
+ 
+ 
++# A vendored chat-template artifact name that identifies NOTHING on its own: every
++# engine-side model dir carries one, and `mounted_at` for a mount-over-the-model-dir
++# patch is a SUFFIX of the host-side source path of any other template (#1597 family).
++_GENERIC_TEMPLATE_NAMES = frozenset({"patches", "chat_template.jinja", "chat_template.jinja2", "chat_template.j2"})
++
++# The vLLM/llama.cpp chat-template flags. `--chat-template` is a SUBSTRING of
++# `--chat-template-file`, so a bare substring probe for the former matches the latter
++# (and vice versa) — match on token boundaries only.
++_CHAT_TEMPLATE_FLAG_RE = re.compile(r"--chat-template(?:-file)?(?![\w-])")
++
++
++def _chat_template_sources(patch: dict) -> list[str]:
++    """Host-side names that identify a chat_template patch on its mount line: the
++    vendored `.jinja`'s own name and/or its patch directory (``qwen38-reasoning-effort-template``,
++    ``apex-qwen-chat-template.jinja``, ``glm53-minja-numeric-index/…``).
++
++    The container-side target alone is not this patch's: `mounted_at` may be a plain
++    suffix (``/chat_template.jinja`` — mounted OVER each model dir's own template) and
++    two patches can mount different templates at sibling targets, so — as #1610 did for
++    install scripts — the mount only counts when the patch's OWN source is on the same
++    line as the target (#1610/#1624).
++    """
++    if patch.get("delivery_mechanism") != "chat_template":
++        return []
++    spec = patch.get("delivery_spec") or {}
++    rels = [spec.get("jinja")] + list(patch.get("files") or [])
++    names: set[str] = set()
++    for rel in rels:
++        if not rel:
++            continue
++        path = Path(rel)
++        names.add(path.name)
++        if path.suffix:
++            names.add(path.parent.name)
++    return sorted(n for n in names if n and n not in _GENERIC_TEMPLATE_NAMES)
++
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -475,13 +512,89 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     #     and vLLM auto-loads it; `wired_at: [volumes]`): the mount target
+     #     alone is the load-bearing artifact, no `--chat-template` arg.
+     if patch.get("delivery_mechanism") == "chat_template" and mounted_at:
+-        if "--chat-template" in (spec.get("invoke") or ""):
+-            inv.append("--chat-template")
++        # The vendored template is bind-mounted at `mounted_at`. Two in-tree
++        # wiring styles:
++        #   * explicit `--chat-template <mounted_at>` / `--chat-template-file
++        #     <mounted_at>` arg (froggeric, gemma-canonical, apex, glm53):
++        #     require BOTH tokens in the merged body (rendered as adjacent
++        #     list items, so the joined string never appears — match them
++        #     separately). The bare flag on its own is NOT a marker: every
++        #     template-mounting compose in the repo passes one, for its OWN
++        #     template, so `--chat-template` alone would "wire" this patch
++        #     into all of them (#1597/#1624). The mount target alone is not a
++        #     marker either — the flag must name THIS patch's target.
++        #   * mount-only (carnice mounts over the model dir's chat_template.jinja
++        #     and the engine auto-loads it; qwen38 mounts over the served
++        #     checkpoint's template and only vLLM adds a flag naming the
++        #     per-variant model-dir path, not `mounted_at`): the source-aware
++        #     mount target is the load-bearing artifact, no flag required.
++        invoke = spec.get("invoke") or ""
++        flags = _CHAT_TEMPLATE_FLAG_RE.findall(invoke)
++        if flags and mounted_at in invoke:
++            inv.append(flags[0])
+             inv.append(mounted_at)
+ 
+     return vol, inv
+ 
+ 
++def _chat_template_flag_pair_ok(patch: dict, body: str) -> bool | None:
++    """For an explicit-flag chat_template spec: are the flag AND its target both wired?
++
++    Returns ``None`` when the spec is not the explicit-flag style (mount-only, or the
++    invoke names a per-variant path rather than ``mounted_at``) so the caller falls back
++    to the mount marker alone. Otherwise True iff the flag token and ``mounted_at``
++    appear together — on the SAME line, or on adjacent non-blank lines of the merged
++    body (the compose command list renders them as neighbouring items). The bare flag
++    alone is never enough: it is a substring of ``--chat-template-file`` and every
++    template-mounting compose passes one for its OWN template (#1624).
++    """
++    spec = patch.get("delivery_spec") or {}
++    invoke = spec.get("invoke") or ""
++    flags = _CHAT_TEMPLATE_FLAG_RE.findall(invoke)
++    mounted_at = spec.get("mounted_at")
++    # `mounted_at` must be NAMED by the invoke (a whole path token), not merely a
++    # substring of it: qwen38's `mounted_at` is the suffix `/chat_template.jinja`,
++    # which its `--chat-template <model dir>/chat_template.jinja` invoke contains
++    # without naming the declared target.
++    if not flags or not mounted_at or mounted_at not in re.findall(r"[^\s(),]+", invoke):
++        return None
++    flag = flags[0]
++    lines = [ln for ln in body.splitlines()]
++    for idx, ln in enumerate(lines):
++        if flag not in ln:
++            continue
++        if mounted_at in ln:
++            return True
++        # Adjacent list items: walk over blank (stripped-comment) lines only.
++        for peer in (idx - 1, idx + 1):
++            while 0 <= peer < len(lines) and not lines[peer].strip():
++                peer += 1 if peer > idx else -1
++            if 0 <= peer < len(lines) and mounted_at in lines[peer]:
++                return True
++    return False
++
++
++def _mount_sources_for(patch: dict) -> list[str]:
++    """Host-side names that must share the mount line for THIS patch.
++
++    Source-aware like #1610 did for install scripts, but only where the container
++    target is genuinely ambiguous: a chat_template `mounted_at` that is a plain
++    SUFFIX of the vendored template's own path (``/chat_template.jinja`` — mounted
++    OVER each model dir's own template) also matches every OTHER template's
++    host-side source path, so the patch's own directory/file name must be on the
++    mount line. A specific target (``/etc/club3090/gemma-canonical-template.jinja``)
++    identifies the patch on its own, as before.
++    """
++    if patch.get("delivery_mechanism") != "chat_template":
++        return _install_sources(patch)
++    spec = patch.get("delivery_spec") or {}
++    jinja = spec.get("jinja") or ""
++    mounted_at = spec.get("mounted_at") or ""
++    if not (jinja and mounted_at and jinja.endswith(mounted_at)):
++        return []  # specific target: the mount line is already this patch's
++    return _chat_template_sources(patch)
++
++
+ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+@@ -497,18 +610,29 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = spec.get("wired_at")
+     if isinstance(wired_at, str):
+         wired_at = [wired_at]
+-    wired_at = set(wired_at or [])
++    # `command` and `entrypoint` are the same insertion point (the launch-command
++    # tail): llama.cpp/ik-llama composes insert into `command`, vLLM into
++    # `entrypoint`. Normalise so a spec declaring one is not treated as unknown
++    # (the permissive "any declared marker" branch below) (#1624).
++    wired_at = {("entrypoint" if w == "command" else w) for w in (wired_at or [])}
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+     vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
+-    sources = _install_sources(patch)
++    sources = _install_sources(patch) or _mount_sources_for(patch)
+     if vol_markers and sources:
+         # The container target alone is not this patch's: two patches can mount at the same
+-        # path (the vLLM and SGLang W4A8 patches both use /etc/club3090/w4a8), so require the
+-        # patch's own source on the SAME line as the target (#1597).
++        # path (the vLLM and SGLang W4A8 patches both use /etc/club3090/w4a8), and a
++        # chat_template `mounted_at` may be a plain suffix (`/chat_template.jinja`) that any
++        # other template's host-side source path contains — so require the patch's own
++        # source on the SAME line as the target (#1597, #1610, #1624).
+         vol_ok = any(any(m in ln for m in vol_markers) and any(src in ln for src in sources)
+                      for ln in body.splitlines())
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
++    # An explicit-flag chat_template spec needs the flag AND its target (see
++    # _chat_template_flag_pair_ok); mount-only specs fall back to the mount marker.
++    pair_ok = _chat_template_flag_pair_ok(patch, body)
++    if pair_ok is not None:
++        inv_ok = inv_ok and pair_ok
+ 
+     # Where the invoke decides on its own (entrypoint-only, or wired_at unknown), a generic
+     # script name such as "install.sh" matches every compose that runs ANY installer, so it
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 9db6fc1..0046b66 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -171,6 +171,29 @@ for _pid, _slug in (("qwen-w4a8-int8-act", "sgl/qwen38-27b-dual-fast"),
+     if reaches(_pmap[_pid], str(_path)):
+         errors.append(f"#1597: {_pid} 'reaches' {_slug}, which mounts a DIFFERENT patch at the same target")
+ 
++# ---------------------------------------------------------------------------
++# #1624 — a chat_template patch must NOT reach composes that mount a DIFFERENT
++# template. The bare `--chat-template` flag is on every template-mounting compose,
++# and a mount-over-the-model-dir `mounted_at` (`/chat_template.jinja`) is a suffix
++# of every other template's host-side source path.
++# ---------------------------------------------------------------------------
++_CT_NEG = [
++    # The Qwen3.8 mount-over-checkpoint template must not reach a Gemma compose.
++    ("qwen38-reasoning-effort-template", "vllm/gemma-31b-dual"),
++    # apex / glm53 must not reach a vLLM compose that only passes --chat-template
++    # for its OWN template (their wired_at is [volumes, command]).
++    ("apex-qwen-chat-template", "vllm/qwen-35b-a3b-dual"),
++    ("glm53-minja-numeric-index", "vllm/qwen-27b-dual-max"),
++]
++for _pid, _slug in _CT_NEG:
++    _src = COMPOSE_REGISTRY.get(_slug)
++    if _pmap.get(_pid) is None or _src is None:
++        errors.append(f"#1624 negative control: {_pid} / {_slug} no longer exist — pick another pair")
++        continue
++    _path = root / (_src["compose_path"] if isinstance(_src, dict) else _src)
++    if reaches(_pmap[_pid], str(_path)):
++        errors.append(f"#1624: {_pid} 'reaches' {_slug}, which mounts a DIFFERENT chat template")
++
+ # ---------------------------------------------------------------------------
+ # CONTRACT-2b-i — chat_template delivery class + REAL extends merge.
+ # ---------------------------------------------------------------------------

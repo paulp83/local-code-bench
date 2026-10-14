@@ -1,0 +1,7 @@
+PASS header-exact
+PASS row-count
+PASS rows-exact-in-order
+PASS all-emails-lowercase
+PASS all-phones-e164-or-empty
+PASS summary-exact
+PASS: 6 FAIL: 0

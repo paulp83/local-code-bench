@@ -1,0 +1,11 @@
+{
+  "number": 328,
+  "title": "bench script crashes on empty file",
+  "labels": [
+    "design",
+    "docs"
+  ],
+  "files_touched": 1,
+  "has_repro": true,
+  "needs_gpu": true
+}

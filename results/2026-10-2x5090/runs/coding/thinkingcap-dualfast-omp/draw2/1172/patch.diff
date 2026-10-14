@@ -1,0 +1,73 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..fdac392 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,12 +6,25 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
++Traps this encodes:
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+-    double-counts (measured 13,947 against a live 6,820 -- 2.05x).
++    double-counts (measured 13,947 against a live 6,820 -- 2.05x, 2026-08-31).
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
++  * model buffer: SUM per device. A drafter pinned to a device logs the same
++    `load_tensors` line shape AFTER the target; last-wins reported the drafter's
++    656 MiB as the model and the target's 3,313 MiB silently became unaccounted
++    (glm53-flash-dual, 2026-10-12).
++  * recurrent state: the family emits TWO line shapes -- DeepSeek's
++    `_comp_state: CUDA<n> <tok> <tok> state buffer size` and GLM's
++    `llama_memory_recurrent: ... RS buffer size`. Matching only the first tag
++    dropped GLM's recurrent state entirely (2026-10-12).
++  * compute stays LAST-WINS on purpose: the target re-reserves AFTER the drafter
++    loads, so one device logs one buffer's two values plus the drafter's, and
++    the lines carry no context label. Summing double-counts the re-reservation;
++    splitting target from drafter is indistinguishable without engine-side
++    labeling (tracked separately, 2026-10-12).
+ 
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+@@ -30,6 +43,24 @@ def _per_dev(text, pat, agg=False):
+     return out
+ 
+ 
++# Recurrent state, both line shapes the llama.cpp family emits (see the
++# module docstring). Line-scoped on purpose: one value per line, so a line
++# that carries both anchors cannot be counted twice.
++_STATE_PAT = re.compile(
++    r"(?:_comp_state|llama_memory_recurrent):\s+(CUDA\d)\s"
++    r".*?\b(?:state|RS) buffer size =\s+([\d.]+) MiB"
++)
++
++
++def _state_per_dev(text):
++    out = {}
++    for line in text.splitlines():
++        m = _STATE_PAT.search(line)
++        if m:
++            dev, val = m.group(1), float(m.group(2))
++            out[dev] = out.get(dev, 0.0) + val
++    return out
++
+ def main() -> int:
+     if len(sys.argv) < 2:
+         return 1
+@@ -38,10 +69,13 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    # model SUMS: target + drafter each log a `load_tensors` line on the device
++    # they live on (last-wins silently dropped the target, 2026-10-12)
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
++    # compute keeps LAST-WINS on purpose -- re-reservation trap, see docstring
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    state = _state_per_dev(text)
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

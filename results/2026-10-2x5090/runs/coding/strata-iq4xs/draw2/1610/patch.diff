@@ -1,0 +1,194 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..7e0edb8 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -463,6 +463,120 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     return vol, inv
+ 
+ 
++# --------------------------------------------------------------------------
++# Mount-source matching: a container-side mount target (e.g.
++# ``/etc/club3090/effort-budget``) is NOT unique to a patch — a compose can
++# bind-mount a DIFFERENT patch's tree at the SAME in-container target. The
++# load-bearing artifact is identified by the mount's SOURCE (this patch's
++# own directory / script), not merely its target, so a foreign patch parked
++# at this target must never satisfy the wiring check.
++# --------------------------------------------------------------------------
++#: File basenames shared by every install-script / overlay patch; seeing one
++#: in a compose body says nothing about WHICH patch is wired — non-identifying.
++NON_IDENTIFYING_NAMES = {
++    "patches",
++    "install.sh",
++    "apply.sh",
++    "apply.py",
++    "patch.sh",
++    "patch.py",
++    "setup.sh",
++    "run.sh",
++    "main.py",
++    "overlay",
++    "local",
++}
++
++
++def _patch_source_idents(patch: dict) -> list[str]:
++    """Concrete substrings that identify THIS patch on the SOURCE side of a
++    bind mount — derived from the declared host paths (``files`` /
++    ``delivery_spec.script`` / ``sidecar`` / ``overlay_files[].src``).
++
++    For a file path the identifying token is its containing directory name
++    (the patch dir, e.g. ``vllm-effort-budget``); for a directory path it is
++    the directory's own name. Generic basenames (``install.sh``, ``patches``,
++    …) are dropped — they appear in every compose and would re-open the
++    false-positive this guards against.
++    """
++    spec = patch.get("delivery_spec") or {}
++    raw: list[str] = list(patch.get("files") or [])
++    for key in ("script", "sidecar"):
++        v = spec.get(key)
++        if v:
++            raw.append(v)
++    for of in spec.get("overlay_files") or []:
++        s = of.get("src")
++        if s:
++            raw.append(s)
++
++    idents: list[str] = []
++
++    def _add(ident: str) -> None:
++        if ident and ident not in NON_IDENTIFYING_NAMES and ident not in idents:
++            idents.append(ident)
++
++    for rel in raw:
++        parts = Path(rel).parts
++        # Every patch artifact lives under a `…/patches/<patch-dir>/…` tree;
++        # the component right after the (last) `patches` segment is the patch
++        # directory and is the most reliable, extension-proof identifier
++        # (dotted dir names like `vllm-pr42006-v0.22.0` survive a `Path.suffix`
++        # check being fooled by the trailing `.0`).
++        if "patches" in parts:
++            i = len(parts) - 1 - parts[::-1].index("patches")
++            if i + 1 < len(parts):
++                _add(parts[i + 1])
++        p = Path(rel)
++        if p.suffix:  # file entry -> its containing patch dir
++            _add(p.parent.name)
++        else:  # directory entry -> its own name
++            _add(p.name)
++    return idents
++
++
++def _mount_target_from_source(body: str, target: str, source_idents: list[str]) -> bool:
++    """True iff ``target`` is bind-mounted in ``body`` from a SOURCE that
++    names one of ``source_idents`` (i.e. THIS patch, not a foreign patch
++    sharing the same container-side path).
++
++    Only short-form ``source:target[:mode]`` mount lines count; the source is
++    the text preceding the target token on such a line. The patch's own
++    entrypoint invoke line (``bash <target>/install.sh``) carries no source
++    component and so never satisfies this on its own.
++    """
++    if not source_idents:
++        return False
++    for line in body.splitlines():
++        if target not in line:
++            continue
++        source_side = line.split(target)[0]
++        if any(ident in source_side for ident in source_idents):
++            return True
++    return False
++
++
++def _volume_marker_present(patch: dict, marker: str, body: str) -> bool:
++    """A declared volume marker is present only when the mount is genuinely
++    this patch's.
++
++    For an ``install_script`` patch the marker is its ``mounted_at`` target —
++    require the mount's SOURCE to name this patch (a foreign patch mounted at
++    the same target is not this patch's wiring). Every other marker (overlay
++    ``dest``s, chat-template targets) keeps the simple presence test.
++    """
++    spec = patch.get("delivery_spec") or {}
++    if (
++        patch.get("delivery_mechanism") == "install_script"
++        and marker
++        and marker == spec.get("mounted_at")
++    ):
++        idents = _patch_source_idents(patch)
++        if idents:
++            return _mount_target_from_source(body, marker, idents)
++    return marker in body
++
++
+ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+@@ -481,7 +595,9 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+-    vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
++    vol_ok = (not vol_markers) or any(
++        _volume_marker_present(patch, m, body) for m in vol_markers
++    )
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
+ 
+     if wired_at == {"volumes"}:
+@@ -536,20 +652,48 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     body = service_body(compose_text(root, name_or_path))
+ 
+     # Primary, sound path: the patch's declared delivery_spec wiring is
+-    # genuinely present at the insertion point(s) it claims.
+-    if _spec_wiring_present(patch, body):
++    # genuinely present at the insertion point(s) it claims. When a patch
++    # declares a delivery_spec that verdict is AUTHORITATIVE — the legacy
++    # `delivery:` fallback below is unsound (a directory entry matched its
++    # parent's name `patches`, a file entry matched a bare `install.sh`), so
++    # it must never override a negative from the sound spec check. A patch
++    # whose mount + invoke were stripped from a compose, or whose target is
++    # occupied by a DIFFERENT patch, is reported not-reached.
++    spec_present = _spec_wiring_present(patch, body)
++    # The spec verdict is authoritative when it declares a concrete
++    # in-container mount target (`mounted_at` / overlay `dest`s): the
++    # source-aware mount check then fully determines wiring, so the unsound
++    # legacy fallback below must NOT be able to override a negative (its
++    # generic `patches` / `install.sh` markers matched every compose and made
++    # install-script patches look wired after their mount + invoke were
++    # removed). Specs that declare NO concrete target (e.g. an
++    # install_script that omits `mounted_at`) cannot decide coverage on their
++    # own — those keep the (now source-aware) legacy fallback for parity.
++    _spec = patch.get("delivery_spec") or {}
++    if _spec.get("mounted_at") or _spec.get("overlay_files"):
++        return spec_present
++    if spec_present:
+         return True
+ 
+-    # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
++    # Legacy fallback (read-only `delivery:` block) — reachable only for
++    # entries whose delivery_spec cannot decide coverage on its own (none, or
++    # one without a concrete mount target). Operates on the service body, so
++    # header/comment ID mentions never match.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
++        # Identify a patch by its OWN directory name only. The parent dir is
++        # always `patches` and generic filenames (`install.sh`, `apply.py`,
++        # …) are shared by every install-script patch — both are
++        # non-identifying and must not be matched (they made this branch
++        # effectively always-True). A file entry is identified by its patch
++        # directory (the parent), never its basename.
+         for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
++            p = Path(rel)
++            if (root / rel).is_dir():
++                marker = p.name
++            else:
++                marker = p.parent.name
++            if marker and marker not in NON_IDENTIFYING_NAMES and marker in body:
+                 return True
+         if patch["id"] in body:
+             return True

@@ -1,0 +1,42 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..2f2976b 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,10 +6,15 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
++Traps this encodes (first batch paid for on 2026-08-31):
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+     double-counts (measured 13,947 against a live 6,820 -- 2.05x).
++  * A drafter on the SAME device as its target emits its own "load_tensors: ... model
++    buffer size" line. model must SUM (agg=True) so the target's weights aren't
++    silently overwritten by the drafter's (#1118). recurrent state likewise has TWO
++    log shapes (_comp_state: for DeepSeek, llama_memory_recurrent: ... RS buffer size
++    for GLM/Mamba) -- both must count or they fall into "unaccounted".
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
+ 
+@@ -38,10 +43,19 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    # agg=True: a drafter on the same device emits its own "model buffer size" line.
++    # Summing (not last-wins) keeps the target's weights from being silently overwritten
++    # by the drafter's -- see #1118 vram breakdown forensics.
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
++    # Two distinct recurrent-state log shapes feed the same "state" bucket:
++    #   _comp_state:               ... <kind> <kind> state buffer size (DeepSeek)
++    #   llama_memory_recurrent:    ... RS buffer size             (GLM / Mamba-family)
++    # The old regex only caught the former, so the latter fell into "unaccounted".
+     state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    for _dev, _val in _per_dev(text, r"llama_memory_recurrent:\s+(CUDA\d) RS buffer size =\s+([\d.]+) MiB", agg=True).items():
++        state[_dev] = state.get(_dev, 0.0) + _val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

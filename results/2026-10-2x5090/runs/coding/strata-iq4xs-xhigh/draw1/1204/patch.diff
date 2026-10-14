@@ -1,0 +1,788 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 6e4b76f..0379d83 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -228,7 +228,7 @@ When testing a new model, create the directory hierarchy from the start: `models
+ Read that doc before catalog work; the at-a-glance for agents:
+ 
+ - **⚠️ FIRST — ASK WHICH REGISTRY, and never write the curated catalog on a user's checkout.** Three destinations, not interchangeable. c3's Bring & Validate lane already states them verbatim — reuse its wording: `⏎ Write LOCAL layer · C WRITE CORE REGISTRY (needs C3_ALLOW_CORE_PROMOTE=1) · E Export as PR bundle`.
+-  - **This rig only** — the default, and right for nearly all BYOM. `python3 scripts/lib/profiles/promote.py --spec-file <spec>` writes the **gitignored** `scripts/lib/profiles-local/` layer (`models.d/<id>.yml` + `composes/<id>/…` + `registry.local.json`, slugs namespaced `local/`). Nothing tracked is touched, so `git pull` and branch switches can never conflict with it. `get_registry()` merges it into the catalog every launcher reads, and a local entry can never become a curated default.
++  - **This rig only** — the default, and right for nearly all BYOM. `python3 scripts/lib/profiles/promote.py --spec-file <spec>` writes the **gitignored** `scripts/lib/profiles-local/` layer (`models.d/<id>.yml` + `composes/<id>/…` + `registry.local.json`, slugs namespaced `local/`). Nothing tracked is touched, so `git pull` and branch switches can never conflict with it. `get_registry()` merges it into the catalog every launcher reads, and a local entry can never become a curated default. Provenance is the entry's `origin` field (`"core"` / `"local"`, loader-derived — **core wins**), not the slug prefix: read `entry["origin"]`, never `slug.startswith("local/")`, and never write `origin` into catalog data.
+   - **Into the club catalog** — promote LOCAL first, validate on the rig, then `python3 scripts/lib/profiles/export_pr.py --spec-file <spec> --out <dir>` emits the ready-to-commit bundle (`models/<id>.yml` + core-layout compose + `registry-entry.yaml`), writing only under `--out`. It **refuses (exit 3)** when the model lacks what a maintainer would bounce a PR for — real `display_name`/`family`, a well-formed weights map, complete registry kwargs, a vLLM `kvcalc_key`, the compose's `Status:` header; `--check` runs that validation and writes nothing. **The local layer is the staging ground for a contribution, not a dead end.**
+   - **Maintainer, on the canonical rig** — `promote.py --layer core`, gated on **both** `--layer core` and `C3_ALLOW_CORE_PROMOTE=1`. That gate is a plain env var and **`.env` is not read by these tools** (no shell wrapper sources it) — `export` it or pass it per-invocation. **The curated-catalog steps below are this row only.**
+ - **Just serving, not cataloging?** Safetensors → `scripts/pull.sh <org/Model> --profile-like vllm/minimal`; a self-grabbed **GGUF** → copy an ik/llama compose and point `--model` at it (no registry/profile needed — see ADDING_MODELS "Run a local GGUF without the catalog"). The steps below are only for promoting a model into the **curated catalog**.
+diff --git a/docs/ADDING_MODELS.md b/docs/ADDING_MODELS.md
+index 68c9647..60cf55e 100644
+--- a/docs/ADDING_MODELS.md
++++ b/docs/ADDING_MODELS.md
+@@ -38,6 +38,7 @@ A large fraction of this workflow used to be hand-edited boilerplate. It isn't a
+ | Weight-shard integrity | `scripts/preflight.sh` (sourced by `setup.sh` **and** `launch.sh`) runs the #1042 **shard check**: diffs each sharded-safetensors `index.json` weight_map against disk and hard-fails on absent shards *before* boot surfaces it as a 53 KB vLLM traceback. Bypassed by `FORCE=1` / `PREFLIGHT_NO_SHARD_CHECK=1`. | nothing | runs on every setup/launch |
+ | Reasoning-mode sampler | Models whose card publishes per-mode sampler rows declare `sampler_profiles={"instruct": {…}, "thinking": {…}}` on their `_entry`. Composes DERIVE the sampler from that data: `ENABLE_THINKING=true` (vLLM) / `THINKING=1` (llama.cpp) alone selects the card's thinking row; explicit env still wins. Discussion #993's four-variable ritual is retired. | the `sampler_profiles` kwarg (see [_entry kwargs reference](#contract--compose_registry-entry-kwargs)) | `test-compose-sampler-profiles` |
+ | Local (community) layer | `scripts/lib/profiles-local/` is a gitignored layer (except its README) loaded with the SAME schema/factories as core: `models.d/<id>.yml` + `composes/<id>/…` + plain-dict `registry.local.json` entries under the enforced `local/` slug namespace. Nothing core is ever touched; delete the files to revert. | run `promote.py --layer local` (the default) | loader refuses non-`local/` slugs; invalid local profiles raise loudly |
++| Catalog provenance | Every entry carries **`origin`** (`"core"` \| `"local"`) — the loader stamps it from the catalog the row lives in, so provenance is a field instead of a slug prefix four consumers re-derive (#1202 P2). Publishing a validated local model is a provenance **flip** (its row moves into registry.yaml), not a slug rename. Core wins: a local row can neither claim `"core"` nor shadow a curated slug. | nothing — it is derived (`_DERIVED_ENTRY_KEYS`) | `test_catalog_origin.py` |
+ | PR export | Validated LOCAL model → ready-to-commit CORE bundle via `export_pr.py`: emits `models/<id>.yml`, the core-layout compose, and a `registry-entry.yaml` entry file into `--out` (the `entries:` map in exactly the registry.yaml data subset — **not** a `compose_registry.py` source patch). | run it after LOCAL validation | `--check` mode; `test_export_pr.py` |
+ 
+ And the **c3 Bring→Promote lane** ties the whole producer path together: the cockpit's Bring & Validate pipeline (**① Bring** fit-check → ② Serve → ③ Tune → ④ Validate → **⑤ Promote**) computes the promotion scaffold from your measured config, writes the chosen layer via `promote.py`, then chains `diagnose-profile` + `preflight-add-model.sh` automatically as one confirmed action plan. Scaffold→write→diagnose→preflight is one button press; the *judgment* that remains is exactly what the MANUAL sections below mark.
+@@ -179,9 +180,21 @@ One compose per validated config at `models/<id>/<engine>/compose/<topology>/<qu
+     serve_aliases=(),                  # extra stable served-names on the same route (#1073)
+     sampler_profiles=None,             # {"instruct": {…}, "thinking": {…}} — enables sampler coupling + c3 toggle
+     weights_companions=(),
++    # origin="core" — LOADER-DERIVED, never written here (#1202 P2)
+ )
+ ```
+ 
++**`origin` — catalog provenance is a field, not a slug fact (#1202 P2).** Every
++entry the loaders hand back carries `origin`: `"core"` for a row read out of
++`registry.yaml`, `"local"` for one read out of `registry.local.json`. Consumers
++read `entry["origin"]` — never a `local/` prefix test — so a slug is free to be
++the same string before and after a model is published. Like `pp` and
++`gpu_assignment_mode` it is in `_DERIVED_ENTRY_KEYS`: the file a row lives in is
++the only witness that cannot lie, so stating `origin:` in registry.yaml is
++refused, and a `registry.local.json` row claiming `"core"` is refused too
++(**core wins** — the community layer can never launder itself into the curated
++catalog, nor shadow a curated row).
++
+ Policy maps live beside the entries and are **core-only**: `DEFAULTS` (one functional row per `(model, engine, topology)` you want `<model>/default` to resolve), `ENGINE_PREFERENCE`, `RECOMMENDED_DEFAULT_MODELS`. Local-layer entries can never appear in them.
+ 
+ ## CONTRACT — moe-cache / CPU-offload models (extra gates)
+diff --git a/docs/BRING_YOUR_OWN.md b/docs/BRING_YOUR_OWN.md
+index e2480f9..904b950 100644
+--- a/docs/BRING_YOUR_OWN.md
++++ b/docs/BRING_YOUR_OWN.md
+@@ -266,7 +266,11 @@ and `registry.local.json`, with slugs namespaced under `local/`. The directory i
+ - `get_registry()` merges your entries into the catalog every launcher reads, so
+   `switch.sh --list` and `launch.sh <slug>` just work;
+ - a local entry can never become a *curated* default, and a broken local layer
+-  fails loudly rather than silently shrinking the catalog.
++  fails loudly rather than silently shrinking the catalog;
++- provenance is the entry's `origin` field (`"local"` here, `"core"` once the
++  row lives in `registry.yaml`), stamped by the loader — the `local/` prefix is
++  a namespace, not the fact itself (#1202 P2). Publishing in §5 flips that
++  value and leaves your slug alone.
+ 
+ > **Ports: your models live in the 202xx band.** The curated catalog occupies
+ > **8010–8199**, and it grows — so a local model parked in that range can collide
+@@ -313,6 +317,12 @@ missing what a maintainer would bounce the PR for: a real `display_name` /
+ `kvcalc_key`, and the compose's mandatory `Status:` header. Fix what it names,
+ re-run, then open the PR with the bundle's contents.
+ 
++What a published entry actually changes is its **provenance**: the row moves
++from `registry.local.json` into `registry.yaml`, and `origin` (the field every
++entry carries — see §4) follows the file it lives in. Your scripts, notes and
++compose pins that name the slug keep working; provenance was never a fact the
++slug had to carry.
++
+ Writing the curated catalog **directly** is maintainer-only and double-gated
+ (`promote.py --layer core` **plus** `C3_ALLOW_CORE_PROMOTE=1`). Note that gate is
+ a plain environment variable and **`.env` is not read by these tools** — `export`
+diff --git a/scripts/lib/profiles-local/README.md b/scripts/lib/profiles-local/README.md
+index 76b6523..d202e72 100644
+--- a/scripts/lib/profiles-local/README.md
++++ b/scripts/lib/profiles-local/README.md
+@@ -89,6 +89,14 @@ named is unregistered.
+   anything else, and refuses any slug or model id that collides with a core
+   catalog row (loudly — a broken `registry.local.json` fails the launch rather
+   than silently shrinking the catalog).
++- **Provenance is a field, not your slug:** every entry the loader hands back
++  carries `origin` — `"local"` for a row read out of `registry.local.json`,
++  `"core"` for one read out of `scripts/lib/profiles/registry.yaml` (#1202 P2).
++  It is stamped by the loader from the FILE the row was read, so never write it
++  in your entry (a row declaring `origin: core` is refused: a local model
++  cannot launder itself into the curated catalog). That is also why exporting a
++  PR bundle later does not rename your slug — publishing flips the provenance
++  by moving the row, and the slug you have been typing keeps working.
+ - **Status:** local entries start at `"incubating"` — hidden from
+   `switch.sh --list`, launched only with `--force` (see the Status enum in
+   `compose_registry.py`). Promote up the enum locally as your model validates.
+diff --git a/scripts/lib/profiles/compat.py b/scripts/lib/profiles/compat.py
+index 2e5a039..9ed64e4 100644
+--- a/scripts/lib/profiles/compat.py
++++ b/scripts/lib/profiles/compat.py
+@@ -26,7 +26,7 @@ except ImportError as exc:  # pragma: no cover - exercised only on missing dep
+ # COMPOSE_REGISTRY (CORE-ONLY — a local entry references a models.d profile and
+ # is validated when diagnosed, not here). Runtime slug consumers use
+ # compose_registry.get_registry() instead.
+-from .compose_registry import COMPOSE_REGISTRY, get_registry
++from .compose_registry import COMPOSE_REGISTRY, ORIGIN_VALUES, get_registry
+ 
+ 
+ SUPPORTED_SCHEMA_VERSIONS = {1}
+@@ -801,6 +801,15 @@ def _validate_cross_refs(profiles: Profiles) -> None:
+             failures.append(f"COMPOSE_REGISTRY[{name!r}] missing default_port")
+         if "gpu_assignment_mode" not in entry:
+             failures.append(f"COMPOSE_REGISTRY[{name!r}] missing gpu_assignment_mode")
++        # Catalog provenance (#1202 P2) — loader-derived, so its presence is a
++        # contract on _entry(), not a data convention: a merged catalog row
++        # without a valid origin means a consumer is about to guess (the slug
++        # prefix was the old guess), so fail the cross-reference gate.
++        if entry.get("origin") not in ORIGIN_VALUES:
++            failures.append(
++                f"COMPOSE_REGISTRY[{name!r}] origin={entry.get('origin')!r} "
++                f"is not one of {list(ORIGIN_VALUES)}"
++            )
+ 
+     if failures:
+         msg = "cross-reference validation failed:\n  " + "\n  ".join(failures)
+@@ -816,13 +825,17 @@ def load_profiles(root: Path = PROFILE_ROOT) -> Profiles:
+     profiles = Profiles(
+         hardware=_load_dir(root, "hardware", _hardware),
+         models={
+-            **_load_dir(root, "models", _model),
+             # C4-rev: merge the gitignored LOCAL layer's models.d profiles so
+             # every profile consumer (diagnose-profile, the weights catalog,
+-            # registry-emit's model facet) sees community models. Local model
+-            # ids are collision-checked by the registry loader, and a local
+-            # profile SHADOWING a core id is impossible by that check.
++            # registry-emit's model facet) sees community models.
++            #
++            # CORE WINS (#1202 P2): the curated profiles are merged LAST so a
++            # LOCAL profile can never replace one. The registry loader already
++            # refuses a colliding model id — but that check lives in a
++            # different file, and a catalog whose community layer can overwrite
++            # the curated one is a provenance bug waiting for the check to move.
+             **_load_local_models(root),
++            **_load_dir(root, "models", _model),
+         },
+         workloads=_load_dir(root, "workloads", _workload),
+         engines=_load_dir(root, "engines", _engine),
+diff --git a/scripts/lib/profiles/compose_registry.py b/scripts/lib/profiles/compose_registry.py
+index 31b69e8..094aba5 100644
+--- a/scripts/lib/profiles/compose_registry.py
++++ b/scripts/lib/profiles/compose_registry.py
+@@ -52,6 +52,26 @@ COMPOSE_STATUS_EMOJI = {
+     "🗑️": "deprecated",
+ }
+ 
++# Catalog PROVENANCE — which catalog a row lives in (#1202 P2).
++#
++# Provenance used to be encoded in the SLUG (`local/…` = the gitignored LOCAL
++# layer) and every consumer re-derived it with its own prefix test
++# (promote.py, demote.py, export_pr.py, the cockpit). `origin` makes it a field
++# on the entry itself, so the slug stops carrying a fact it has to encode:
++# publishing a validated LOCAL model into the curated catalog FLIPS THIS VALUE
++# (its row moves from registry.local.json into registry.yaml) instead of
++# renaming the slug — scripts, notes and compose pins survive the promotion.
++#
++# ⚠️ LOADER-DERIVED, never data: the file a row was read from is the only
++# witness that cannot lie, so the loader passes `origin` explicitly to _entry()
++# and it joins _DERIVED_ENTRY_KEYS (a registry.yaml row that states it is
++# refused, exactly like `pp`). A LOCAL row can never launder itself into the
++# curated catalog by declaring `origin: core` — the loader refuses it, and the
++# merged view is built core-first: **core wins**.
++ORIGIN_CORE = "core"
++ORIGIN_LOCAL = "local"
++ORIGIN_VALUES = (ORIGIN_CORE, ORIGIN_LOCAL)
++
+ 
+ def _entry(
+     *,
+@@ -188,6 +208,14 @@ def _entry(
+     # Those slugs keep `drafter=None` by design, so consumers deriving a label
+     # from `drafter` alone would report 'no speculation' while it is running.
+     spec_method=None,
++    # Catalog provenance (#1202 P2): "core" (the curated registry.yaml) or
++    # "local" (a row the user promoted into the gitignored
++    # scripts/lib/profiles-local/ layer on their own rig). Pass it EXPLICITLY
++    # from the loader that is reading the file — never as row data: a row's
++    # provenance is a fact about the FILE it lives in, and data can be copied.
++    # Callers that build a synthetic row (tests, a PR bundle's entry file) get
++    # the curated default.
++    origin=ORIGIN_CORE,
+     category=None,
+     weights_companions=None,
+ ):
+@@ -195,11 +223,18 @@ def _entry(
+         raise ValueError(
+             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
+         )
++    if origin not in ORIGIN_VALUES:
++        raise ValueError(
++            f"{compose_path}: origin={origin!r} not in {ORIGIN_VALUES}"
++        )
+     entry = {
+         "model": model,
+         "weights_variant": weights_variant,
+         "workload": workload,
+         "engine": engine,
++        # Provenance of THIS row — "core" | "local" (see ORIGIN_VALUES). Always
++        # present, so no consumer has to re-derive it from a slug prefix again.
++        "origin": origin,
+         "drafter": drafter,
+         "spec_method": spec_method,
+         "kv_format": kv_format,
+@@ -340,7 +375,12 @@ _REGISTRY_YAML_SCHEMA = 1
+ 
+ # Built-entry keys that _entry() DERIVES (never kwargs): stripped before entry
+ # kwargs are written back to YAML — the migrator and promote.py share this.
+-_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode"})
++#
++# `origin` belongs here for the same reason `pp` does: provenance is a property
++# of the FILE a row lives in, so the loader states it and the data must not
++# (a curated row declaring `origin: local`, or a copied-out local row
++# declaring `origin: core`, would be a lie that outlives the copy).
++_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode", "origin"})
+ 
+ # Top-level keys the schema allows — anything else is a loud error, not a
+ # silently ignored section.
+@@ -415,8 +455,10 @@ _REGISTRY_YAML_HEADER = """\
+ #     (compat.load_profiles / UnknownProfileKeyError) does not apply to this
+ #     file; it has its own stdlib-only reader (#584: no PyYAML dependency).
+ #   * Entry rows are `_entry(**kwargs)` argument maps — the same schema as
+-#     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` are
+-#     derived by _entry() and MUST NOT appear here.
++#     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` /
++#     `origin` are derived by _entry() and MUST NOT appear here. A row in THIS
++#     file is curated by definition: origin="core" is the loader's verdict, not
++#     data that can be copied around.
+ # ===========================================================================
+ """
+ 
+@@ -729,11 +771,15 @@ def _build_core_catalog(data, source):
+ 
+     Every row is wrapped through _entry(**kwargs) so a YAML row carries
+     EXACTLY the shape (and validation) the pre-migration Python rows had —
+-    an unknown kwarg or bad status fails the import loudly, never silently."""
++    an unknown kwarg or bad status fails the import loudly, never silently.
++
++    Provenance is stamped HERE, not read: a row parsed out of registry.yaml is
++    `origin="core"` because this file IS the curated catalog (and
++    load_registry_data() already refused a row that tried to state it)."""
+     entries = {}
+     for slug, kwargs in data["entries"].items():
+         try:
+-            entries[slug] = _entry(**kwargs)
++            entries[slug] = _entry(**kwargs, origin=ORIGIN_CORE)
+         except TypeError as exc:
+             raise RegistryDataError(
+                 f"{source}: entry {slug!r}: bad _entry kwargs: {exc}"
+@@ -781,6 +827,10 @@ RECOMMENDED_DEFAULT_MODELS = _CORE_RECOMMENDED_MODELS
+ #   composes/<id>/...        the compose files
+ #   registry.local.json      plain-dict registry entries ({slug: _entry-kwargs})
+ #
++# Rows from BOTH catalogs carry `origin` once loaded — "core" for a row read
++# out of registry.yaml, "local" for one read out of this file (#1202 P2). It is
++# the provenance field that replaces re-deriving it from a slug prefix.
++#
+ # get_registry() below is the SINGLE merged view every runtime consumer reads
+ # (launch / switch / diagnose / emit / estate / cockpit). The local layer can
+ # NEVER leak into DEFAULTS / ENGINE_PREFERENCE / RECOMMENDED_DEFAULT_MODELS —
+@@ -788,8 +838,13 @@ RECOMMENDED_DEFAULT_MODELS = _CORE_RECOMMENDED_MODELS
+ 
+ LOCAL_LAYER_DIR_REL = "scripts/lib/profiles-local"
+ LOCAL_REGISTRY_REL = "scripts/lib/profiles-local/registry.local.json"
+-# The slug namespace every LOCAL entry lives under (promote.py --layer local
+-# enforces it at write time; the loader refuses anything else).
++# The slug namespace every LOCAL entry lives under TODAY (promote.py --layer
++# local enforces it at write time; the loader refuses anything else).
++#
++# ⚠️ It is a NAMESPACE, not the provenance: read `entry["origin"]` (#1202 P2),
++# never this prefix. Provenance wearing a slug is what made `local/…` a fact
++# four consumers had to re-derive, and why publishing used to mean renaming the
++# slug. The prefix is expected to go away; `origin` will not.
+ LOCAL_SLUG_PREFIX = "local/"
+ 
+ 
+@@ -813,10 +868,12 @@ def load_local_registry(root=None):
+ 
+     Plain-dict entries (the JSON form of _entry kwargs) are wrapped through
+     _entry(**kwargs) so a local row carries EXACTLY the same shape + defaults
+-    as a core row. ANY problem — unreadable JSON, a non-object, an unknown
+-    kwarg, a bad status, a slug outside the `local/` namespace, or a slug /
+-    model-id colliding with a core row (or another local row) — raises
+-    LocalRegistryError. Loud, never a silent partial catalog."""
++    as a core row — including provenance: every row read out of THIS file is
++    stamped `origin="local"`. ANY problem — unreadable JSON, a non-object, an
++    unknown kwarg, a bad status, a row claiming a provenance it cannot have, a
++    slug outside the `local/` namespace, or a slug / model-id colliding with a
++    core row (or another local row) — raises LocalRegistryError. Loud, never a
++    silent partial catalog."""
+     root = Path(root) if root is not None else local_layer_root()
+     path = root / LOCAL_REGISTRY_REL
+     if not path.exists():
+@@ -842,6 +899,8 @@ def load_local_registry(root=None):
+                 f"{LOCAL_SLUG_PREFIX!r} namespace"
+             )
+         if slug in core_slugs or slug in local:
++            # CORE WINS: a curated row is never duplicated, let alone shadowed,
++            # by the community layer — refuse so the user renames theirs.
+             raise LocalRegistryError(f"{path}: local slug collides: {slug!r}")
+         model = kwargs.get("model")
+         if model in core_models:
+@@ -850,8 +909,29 @@ def load_local_registry(root=None):
+             )
+         if model in local_models:
+             raise LocalRegistryError(f"{path}: duplicate local model id {model!r}")
++        # Provenance is the loader's verdict, never the row's claim: a row in
++        # registry.local.json is local, whatever it declares. An `origin: core`
++        # claim is refused (not quietly rewritten) because laundering a local
++        # row into the curated catalog's provenance is exactly the misreport
++        # this field exists to make impossible.
++        row_kwargs = dict(kwargs)
++        declared_origin = row_kwargs.pop("origin", None)
++        if declared_origin is not None and declared_origin not in ORIGIN_VALUES:
++            raise LocalRegistryError(
++                f"{path}: local entry {slug!r} declares origin "
++                f"{declared_origin!r} — not one of {ORIGIN_VALUES}; drop the "
++                "key and let the loader stamp it"
++            )
++        if declared_origin == ORIGIN_CORE:
++            raise LocalRegistryError(
++                f"{path}: local entry {slug!r} declares origin "
++                f"{ORIGIN_CORE!r}; every row of "
++                f"{Path(LOCAL_REGISTRY_REL).name} is {ORIGIN_LOCAL!r} — "
++                f"curated provenance belongs to registry.yaml (core wins). "
++                "export_pr.py turns this row into a PR bundle for that"
++            )
+         try:
+-            entry = _entry(**kwargs)
++            entry = _entry(**row_kwargs, origin=ORIGIN_LOCAL)
+         except TypeError as exc:
+             raise LocalRegistryError(
+                 f"{path}: local entry {slug!r} has bad _entry kwargs: {exc}"
+@@ -869,13 +949,22 @@ def get_registry(root=None):
+     With no local layer present this IS COMPOSE_REGISTRY (the identical object
+     — zero behavior change on a pristine checkout). Slug lookups at runtime
+     read THIS; DEFAULTS / ENGINE_PREFERENCE / RECOMMENDED_DEFAULT_MODELS stay
+-    core-only. Raises LocalRegistryError when a present local layer is broken —
+-    a half-working catalog is worse than a loud failure."""
++    core-only. CORE WINS: a curated row is never replaced by a local one (the
++    loader refuses the collision outright, and the merge below would keep the
++    core row even if it did not). Per-row provenance is `entry["origin"]`.
++    Raises LocalRegistryError when a present local layer is broken — a
++    half-working catalog is worse than a loud failure."""
+     local = load_local_registry(root)
+     if not local:
+         return COMPOSE_REGISTRY
++    # CORE WINS. Built core-first and merged with setdefault so a local row can
++    # never REPLACE a curated one — not by slug, and (now that provenance is a
++    # field instead of a slug namespace) not by looking like one either. Insert
++    # order stays core rows first, then local, exactly as the tab/JSON emitters
++    # have always listed them.
+     merged = dict(COMPOSE_REGISTRY)
+-    merged.update(local)
++    for slug, entry in local.items():
++        merged.setdefault(slug, entry)
+     return merged
+ 
+ 
+diff --git a/scripts/lib/profiles/export_pr.py b/scripts/lib/profiles/export_pr.py
+index 4369d89..4748d0d 100755
+--- a/scripts/lib/profiles/export_pr.py
++++ b/scripts/lib/profiles/export_pr.py
+@@ -23,6 +23,12 @@ documented promote-style command (``load_registry_data`` + ``dump_registry_yaml`
+ canonical rewrite — the same path promote.py --layer core uses); nothing in
+ THIS repo is touched (the export writes only under ``--out``).
+ 
++Provenance rides with the FILE, not the row: an entry's ``origin`` ("local" in
++the LOCAL layer, "core" once its row lives in registry.yaml — #1202 P2) is
++loader-derived, so this export drops it instead of restating it. The bundle's
++slug is the same slug the user has been typing; publishing flips the provenance
++by moving the row, never by renaming it.
++
+ Refusals (exit 3, nothing written) fire when the local id lacks REQUIRED core
+ fields — the checks a maintainer would bounce the PR for: a real
+ display_name/family, a well-formed weights map, complete registry-entry kwargs,
+@@ -50,6 +56,12 @@ _LOCAL_MODELS_REL = f"{_LOCAL_DIR_REL}/models.d"
+ _LOCAL_COMPOSES_REL = f"{_LOCAL_DIR_REL}/composes"
+ _LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
+ _LOCAL_SLUG_PREFIX = "local/"
++# What _entry() DERIVES — `origin` among them (#1202 P2). Never data: the
++# catalog a row lands in states its provenance. Keep in sync with
++# compose_registry._DERIVED_ENTRY_KEYS (the bundle is meant for another
++# checkout's registry.yaml, so this file must not depend on the target's
++# module).
++_LOADER_DERIVED_KEYS = frozenset({"pp", "gpu_assignment_mode", "origin"})
+ 
+ # Filesystem engine dir under composes/<id>/ → the registry SLUG prefix
+ # (docs/ADDING_MODELS.md Step 3: llamacpp, NOT llama-cpp).
+@@ -271,9 +283,19 @@ def core_compose_rel(mid: str, local_compose_rel: str) -> str:
+ 
+ def translated_entry(state: dict, entry: dict) -> dict:
+     """One LOCAL registry entry → its CORE ``_entry(...)`` kwargs (pure copy —
+-    the local JSON is never mutated)."""
++    the local JSON is never mutated).
++
++    PROVENANCE NEVER TRAVELS (#1202 P2): the loader derives ``origin`` from the
++    catalog a row lives in, so the LOCAL layer's ``origin: "local"`` is dropped
++    here — the exported row lands in registry.yaml and is ``core`` because that
++    file says so. Publishing is that flip, nothing else: the slug is carried
++    across (the ``local/`` strip below is the pre-#1202 spelling of the
++    namespace and collapses to identity once local slugs are ``<engine>/<name>``
++    like core ones)."""
+     mid = state["model_id"]
+     kw = dict(entry["kwargs"])
++    for derived in _LOADER_DERIVED_KEYS:
++        kw.pop(derived, None)
+     cpath = str(kw["compose_path"])
+     kw["compose_path"] = core_compose_rel(mid, cpath)
+     ns = compose_slug_namespace(cpath)
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index bea1bd7..b855bd8 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -37,6 +37,11 @@ The slug MUST carry the ``local/`` namespace prefix and the entry is written
+ with ``status="incubating"`` (hidden from ``switch.sh --list``, ``--force`` to
+ launch — see compose_registry.STATUS_VALUES).
+ 
++Provenance is NOT written: every entry gains ``origin`` ("core" | "local") when
++the loader reads it, derived from the catalog the row lives in
++(#1202 P2 — see compose_registry.ORIGIN_VALUES). A spec that carries ``origin``
++has it dropped, so promoting later is a provenance FLIP, not a slug rename.
++
+ **core** (maintainer-only).  Today's curated-catalog behavior:
+   1. ``scripts/lib/profiles/models/<model_id>.yml``
+   2. the compose file anywhere under ``models/``
+@@ -84,6 +89,12 @@ _LOCAL_MODELS_REL = f"{_LOCAL_DIR_REL}/models.d"
+ _LOCAL_COMPOSES_REL = f"{_LOCAL_DIR_REL}/composes"
+ _LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
+ _LOCAL_SLUG_PREFIX = "local/"
++# Keys _entry() DERIVES — including catalog provenance (`origin`, #1202 P2):
++# the loader stamps them from the catalog a row lives in, so a spec never
++# carries them. Keep in sync with compose_registry._DERIVED_ENTRY_KEYS (this
++# tool runs against --root copies, where importing the module's constant would
++# read the wrong tree).
++_LOADER_DERIVED_KEYS = frozenset({"pp", "gpu_assignment_mode", "origin"})
+ # Local entries ALWAYS land here (the enum's pre-experimental rung: hidden from
+ # switch.sh --list, --force to launch). Not user-selectable — promote up the
+ # enum by editing registry.local.json once the model validates.
+@@ -389,6 +400,22 @@ def _check_common_shape(spec: Any) -> dict:
+         raise Refusal("spec.registry_entry.kwargs must be a dict incl. model + compose_path")
+     if kwargs.get("model") != mid:
+         raise Refusal(f"registry kwargs.model {kwargs.get('model')!r} != model_id {mid!r}")
++
++    # Strip what the loader DERIVES — `origin` above all (#1202 P2): provenance
++    # is the verdict of the catalog this write lands in (--layer local ⇒
++    # "local", --layer core ⇒ "core"), never something the spec gets to claim.
++    # Dropping it here also closes a real hole: writing `origin` into
++    # registry.yaml passes the write and only fails at the NEXT import of the
++    # catalog — post-write, i.e. exit 2 on a curated catalog that no longer
++    # loads.
++    derived = sorted(_LOADER_DERIVED_KEYS.intersection(kwargs))
++    for key in derived:
++        kwargs.pop(key, None)
++    if derived:
++        _info(
++            f"dropped loader-derived registry kwargs: {', '.join(derived)} "
++            "(origin is which catalog the row lives in — the loader states it)"
++        )
+     return spec
+ 
+ 
+diff --git a/scripts/lib/profiles/registry.yaml b/scripts/lib/profiles/registry.yaml
+index 5ed92b9..88b0521 100644
+--- a/scripts/lib/profiles/registry.yaml
++++ b/scripts/lib/profiles/registry.yaml
+@@ -13,8 +13,10 @@
+ #     (compat.load_profiles / UnknownProfileKeyError) does not apply to this
+ #     file; it has its own stdlib-only reader (#584: no PyYAML dependency).
+ #   * Entry rows are `_entry(**kwargs)` argument maps — the same schema as
+-#     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` are
+-#     derived by _entry() and MUST NOT appear here.
++#     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` /
++#     `origin` are derived by _entry() and MUST NOT appear here. A row in THIS
++#     file is curated by definition: origin="core" is the loader's verdict, not
++#     data that can be copied around.
+ # ===========================================================================
+ 
+ schema: 1
+diff --git a/scripts/tests/test_catalog_origin.py b/scripts/tests/test_catalog_origin.py
+new file mode 100644
+index 0000000..20682dd
+--- /dev/null
++++ b/scripts/tests/test_catalog_origin.py
+@@ -0,0 +1,295 @@
++#!/usr/bin/env python3
++"""#1202 P2 — catalog provenance is a first-class `origin` field; core wins.
++
++Exercises the loader (compose_registry), the writers (promote.py / export_pr.py)
++and the merged view against a THROWAWAY repo copy (the same harness as
++test_local_registry.py): the real checkout stays pristine.
++
++    pytest scripts/tests/test_catalog_origin.py
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++REPO = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(REPO))
++
++_COPY_TREES = ("scripts/lib", "tools/tui-core", "models")
++
++MID = "my-model"
++QUANT = "autoround-int4"
++LOCAL_SLUG = f"local/{MID}-dual-{QUANT}"
++LOCAL_COMPOSE_REL = (
++    f"scripts/lib/profiles-local/composes/{MID}/vllm/compose/dual/{QUANT}/base.yml"
++)
++
++GOOD_KWARGS = {
++    "model": MID,
++    "weights_variant": QUANT,
++    "workload": "long-ctx-single",
++    "engine": "vllm-stable",
++    "drafter": None,
++    "kv_format": "fp8_e5m2",
++    "tp": 2,
++    "max_ctx": 131072,
++    "max_num_seqs": 2,
++    "mem_util": 0.92,
++    "compose_path": LOCAL_COMPOSE_REL,
++    "default_port": 20242,
++    "kvcalc_key": f"{MID}:dual",
++    "status": "incubating",
++}
++
++
++@pytest.fixture()
++def root(tmp_path):
++    for rel in _COPY_TREES:
++        shutil.copytree(
++            REPO / rel,
++            tmp_path / rel,
++            ignore=shutil.ignore_patterns("__pycache__", "cache"),
++        )
++    return tmp_path
++
++
++def _write_local(root, payload):
++    p = root / "scripts/lib/profiles-local/registry.local.json"
++    p.parent.mkdir(parents=True, exist_ok=True)
++    p.write_text(
++        payload if isinstance(payload, str) else json.dumps(payload, indent=2),
++        encoding="utf-8",
++    )
++    return p
++
++
++def _py(root, snippet):
++    return subprocess.run(
++        [sys.executable, "-c", snippet], cwd=str(root), capture_output=True, text=True
++    )
++
++
++class TestFieldShape:
++    def test_every_core_row_is_core(self, root):
++        r = _py(
++            root,
++            "from scripts.lib.profiles.compose_registry import (\n"
++            "    COMPOSE_REGISTRY, ORIGIN_CORE, ORIGIN_LOCAL, ORIGIN_VALUES,\n"
++            ")\n"
++            "assert ORIGIN_VALUES == (ORIGIN_CORE, ORIGIN_LOCAL) == ('core', 'local')\n"
++            "assert COMPOSE_REGISTRY and all(\n"
++            "    e['origin'] == ORIGIN_CORE for e in COMPOSE_REGISTRY.values()\n"
++            ")\n",
++        )
++        assert r.returncode == 0, r.stderr
++
++    def test_bogus_origin_rejected_by_entry(self, root):
++        r = _py(
++            root,
++            "from scripts.lib.profiles.compose_registry import _entry\n"
++            "try:\n"
++            "    _entry(model='m', weights_variant='w', workload='fast-chat',\n"
++            "           engine='vllm-stable', drafter=None, kv_format='bf16', tp=1,\n"
++            "           max_ctx=8192, max_num_seqs=1, mem_util=0.9,\n"
++            "           compose_path='models/x/vllm/compose/single/q/base.yml',\n"
++            "           default_port=8010, origin='somewhere-else')\n"
++            "except ValueError as exc:\n"
++            "    assert 'origin' in str(exc), exc\n"
++            "else:\n"
++            "    raise SystemExit('origin was not validated')\n",
++        )
++        assert r.returncode == 0, r.stderr
++
++    def test_origin_is_derived_never_yaml_data(self, root):
++        """registry.yaml rows may NOT state it — the file is the provenance."""
++        r = _py(
++            root,
++            "import scripts.lib.profiles.compose_registry as cr\n"
++            "assert 'origin' in cr._DERIVED_ENTRY_KEYS\n"
++            "raw = cr.load_registry_data()\n"
++            "assert all('origin' not in kw for kw in raw['entries'].values())\n"
++            "assert all(e['origin'] == 'core' for e in cr.COMPOSE_REGISTRY.values())\n",
++        )
++        assert r.returncode == 0, r.stderr
++
++    def test_yaml_row_stating_origin_refused(self, root):
++        reg = root / "scripts/lib/profiles/registry.yaml"
++        text = reg.read_text(encoding="utf-8")
++        reg.write_text(
++            text.replace("    model: qwen3.6-27b\n",
++                         "    model: qwen3.6-27b\n    origin: local\n", 1),
++            encoding="utf-8",
++        )
++        r = _py(root, "import scripts.lib.profiles.compose_registry")
++        assert r.returncode != 0
++        assert "origin" in r.stderr and "derived" in r.stderr
++
++
++class TestLocalLayer:
++    def test_local_row_is_stamped_local(self, root):
++        _write_local(root, {LOCAL_SLUG: dict(GOOD_KWARGS)})
++        r = _py(
++            root,
++            "from scripts.lib.profiles.compose_registry import get_registry\n"
++            f"e = get_registry()['{LOCAL_SLUG}']\n"
++            "assert e['origin'] == 'local', e['origin']\n",
++        )
++        assert r.returncode == 0, r.stderr
++
++    def test_local_row_may_restate_its_own_origin(self, root):
++        _write_local(root, {LOCAL_SLUG: dict(GOOD_KWARGS, origin="local")})
++        r = _py(
++            root,
++            "from scripts.lib.profiles.compose_registry import get_registry\n"
++            f"assert get_registry()['{LOCAL_SLUG}']['origin'] == 'local'\n",
++        )
++        assert r.returncode == 0, r.stderr
++
++    def test_local_row_claiming_core_refused(self, root):
++        """A row cannot launder itself into the curated catalog's provenance."""
++        _write_local(root, {LOCAL_SLUG: dict(GOOD_KWARGS, origin="core")})
++        r = _py(
++            root,
++            "from scripts.lib.profiles.compose_registry import get_registry\n"
++            "get_registry()\n",
++        )
++        assert r.returncode != 0
++        assert "origin" in r.stderr and "core" in r.stderr
++
++    def test_local_row_claiming_unknown_origin_refused(self, root):
++        _write_local(root, {LOCAL_SLUG: dict(GOOD_KWARGS, origin="curated")})
++        r = _py(
++            root,
++            "from scripts.lib.profiles.compose_registry import get_registry\n"
++            "get_registry()\n",
++        )
++        assert r.returncode != 0
++        assert "origin" in r.stderr
++
++    def test_merged_view_keeps_core_precedence(self, root):
++        """CORE WINS at the merge: a local row is never able to replace one."""
++        _write_local(root, {LOCAL_SLUG: dict(GOOD_KWARGS)})
++        r = _py(
++            root,
++            "import scripts.lib.profiles.compose_registry as cr\n"
++            "core_slug = next(iter(cr.COMPOSE_REGISTRY))\n"
++            "shadow = dict(cr.COMPOSE_REGISTRY[core_slug], status='experimental')\n"
++            "merged = dict(cr.load_local_registry())\n"
++            "cr_local = merged\n"
++            "out = dict(cr.COMPOSE_REGISTRY)\n"
++            "for s, e in cr_local.items():\n"
++            "    out.setdefault(s, e)\n"
++            "assert out[core_slug] is cr.COMPOSE_REGISTRY[core_slug]\n"
++            "assert out[core_slug]['status'] != 'experimental'\n",
++        )
++        assert r.returncode == 0, r.stderr
++
++
++class TestWriters:
++    def test_promote_strips_origin_and_loads_local(self, root):
++        spec = _promote_spec()
++        spec["registry_entry"]["kwargs"]["origin"] = "core"
++        f = root / "spec.json"
++        f.write_text(json.dumps(spec), encoding="utf-8")
++        r = subprocess.run(
++            [sys.executable, str(REPO / "scripts/lib/profiles/promote.py"),
++             "--spec-file", str(f), "--root", str(root), "--layer", "local", "--yes"],
++            cwd=str(root), capture_output=True, text=True,
++        )
++        assert r.returncode == 0, r.stdout + r.stderr
++        raw = json.loads(
++            (root / "scripts/lib/profiles-local/registry.local.json").read_text()
++        )
++        assert "origin" not in raw[LOCAL_SLUG]
++        r = _py(
++            root,
++            "from scripts.lib.profiles.compose_registry import get_registry\n"
++            f"assert get_registry()['{LOCAL_SLUG}']['origin'] == 'local'\n",
++        )
++        assert r.returncode == 0, r.stderr
++
++
++def _promote_spec():
++    return {
++        "model_id": MID,
++        "display_name": "My Model",
++        "family": "generic-dense",
++        "arch": {"hidden_size": 5120, "num_hidden_layers": 40, "num_attn_heads": 24,
++                 "num_kv_heads": 4, "head_dim_attn": 256, "max_ctx_supported": 131072},
++        "weights": {QUANT: {"path": f"{MID}-{QUANT}", "local_subdir": f"{MID}-{QUANT}",
++                            "size_gb": 12.5, "format": "autoround", "status": "incubating",
++                            "hf_repo": "org/model", "engine": "vllm", "kind": "main",
++                            "verify_glob": "*.safetensors"}},
++        "default_weight_variant": QUANT,
++        "compatible_drafters": [],
++        "vision_capable": False,
++        "compose": {
++            "path": LOCAL_COMPOSE_REL,
++            "content": (
++                "# Profile (at-a-glance):\n"
++                "#   Status: 🐣 Incubating\n"
++                "# ---\n"
++                "services:\n"
++                "  vllm:\n"
++                "    image: vllm/vllm-openai:v0.27.1\n"
++                "    container_name: vllm-my-model-dual\n"
++                "    ports:\n"
++                '      - "${PORT:-20242}:8000"\n'
++            ),
++        },
++        "registry_entry": {"slug": LOCAL_SLUG, "kwargs": dict(GOOD_KWARGS)},
++    }
++
++
++class TestExport:
++    def test_local_origin_never_rides_into_the_bundle(self, tmp_path):
++        """Publishing flips provenance; it never restates the local one."""
++        repo = tmp_path / "repo"
++        repo.mkdir()
++        for rel in ("scripts/lib",):
++            shutil.copytree(REPO / rel, repo / rel, ignore=shutil.ignore_patterns("__pycache__", "cache"))
++        (repo / "scripts/lib/profiles-local/models.d").mkdir(parents=True, exist_ok=True)
++        (repo / "scripts/lib/profiles-local/models.d" / f"{MID}.yml").write_text(
++            "schema_version: 1\n"
++            f"id: {MID}\n"
++            "display_name: My Model\n"
++            "family: generic-dense\n"
++            "weights:\n"
++            f"  {QUANT}:\n"
++            "    hf_repo: org/model\n"
++            '    files: ["*.safetensors"]\n'
++            '    format: "autoround"\n'
++            '    verify_glob: "*.safetensors"\n'
++            f"default_weight_variant: {QUANT}\n",
++            encoding="utf-8",
++        )
++        comp = repo / LOCAL_COMPOSE_REL
++        comp.parent.mkdir(parents=True, exist_ok=True)
++        comp.write_text(
++            "# Profile (at-a-glance):\n"
++            "#   Status: 🐣 Incubating\n"
++            "services:\n  vllm:\n    image: x\n",
++            encoding="utf-8",
++        )
++        _write_local(repo, {LOCAL_SLUG: dict(GOOD_KWARGS, origin="local")})
++        spec = repo / "spec.json"
++        spec.write_text(json.dumps({"model_id": MID}), encoding="utf-8")
++        out = tmp_path / "bundle"
++        r = subprocess.run(
++            [sys.executable, str(REPO / "scripts/lib/profiles/export_pr.py"),
++             "--spec-file", str(spec), "--root", str(repo), "--out", str(out)],
++            cwd=str(repo), capture_output=True, text=True,
++        )
++        assert r.returncode == 0, r.stdout + r.stderr
++        text = (out / "registry-entry.yaml").read_text(encoding="utf-8")
++        assert "\n    origin:" not in text     # provenance never travels
++
++
++if __name__ == "__main__":  # pragma: no cover
++    raise SystemExit(pytest.main([__file__, "-q"]))

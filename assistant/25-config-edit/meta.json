@@ -1,0 +1,9 @@
+{
+  "id": "25-config-edit",
+  "source": "novel",
+  "category": "config",
+  "difficulty": "easy",
+  "est_minutes": 5,
+  "needs_web": false,
+  "notes": "Novel: state change that must preserve comments."
+}

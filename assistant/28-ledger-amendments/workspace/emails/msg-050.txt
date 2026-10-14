@@ -1,0 +1,8 @@
+From: rina@example.net
+Date: 2026-07-14T07:55:00Z
+Subject: ledger amendment
+
+Please correct T-00091: the right figure is -$578.49.
+
+Thanks,
+rina

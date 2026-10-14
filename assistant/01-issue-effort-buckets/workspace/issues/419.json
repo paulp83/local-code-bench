@@ -1,0 +1,10 @@
+{
+  "number": 419,
+  "title": "log rotation missing",
+  "labels": [
+    "bug"
+  ],
+  "files_touched": 5,
+  "has_repro": false,
+  "needs_gpu": false
+}

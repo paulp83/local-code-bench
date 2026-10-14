@@ -1,0 +1,50 @@
+[
+  {
+    "id": "BK-001",
+    "room": "Aspen",
+    "who": "Marta Voss",
+    "date": "2026-10-14",
+    "start": "09:00",
+    "end": "10:00"
+  },
+  {
+    "id": "BK-002",
+    "room": "Birch",
+    "who": "Dana Whit",
+    "date": "2026-10-14",
+    "start": "10:00",
+    "end": "12:00"
+  },
+  {
+    "id": "BK-003",
+    "room": "Cedar",
+    "who": "Priya Shah",
+    "date": "2026-10-14",
+    "start": "13:00",
+    "end": "15:00"
+  },
+  {
+    "id": "BK-004",
+    "room": "Dogwood",
+    "who": "Lee Park",
+    "date": "2026-10-14",
+    "start": "09:30",
+    "end": "10:30"
+  },
+  {
+    "id": "BK-005",
+    "room": "Aspen",
+    "who": "Omar Reyes",
+    "date": "2026-10-15",
+    "start": "11:00",
+    "end": "12:00"
+  },
+  {
+    "id": "BK-006",
+    "room": "Cedar",
+    "who": "Dana Whit",
+    "date": "2026-10-15",
+    "start": "09:00",
+    "end": "17:00"
+  }
+]

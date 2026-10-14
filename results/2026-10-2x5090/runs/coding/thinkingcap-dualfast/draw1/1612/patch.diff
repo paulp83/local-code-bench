@@ -1,0 +1,122 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index e69007a..49fc6c8 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -420,6 +420,49 @@ def _install_sources(patch: dict) -> list[str]:
+     return sorted(n for n in names if n and n not in _GENERIC_SCRIPT_NAMES and n != "patches")
+ 
+ 
++# The model-dir default chat-template filename. When a `chat_template` patch's
++# declared mount target is JUST this bare name (e.g. `/chat_template.jinja`,
++# mounted OVER each model dir's own template, as qwen38 does), the target alone
++# cannot identify the patch — every model dir ships a `chat_template.jinja` — so
++# the vendored SOURCE (this patch's own directory or filename) must appear on the
++# same mount line to attribute the mount to the patch (#1610 follow-up).
++_GENERIC_TEMPLATE_BASENAMES = {
++    "chat_template.jinja",
++    "chat_template.jinja2",
++    "chat_template.j2",
++    "chat_template",
++}
++
++
++def _template_source_identity(patch: dict) -> list[str]:
++    """Distinctive token(s) that identify this patch's VENDORED template on its
++    mount line: the vendored jinja's own directory name (e.g.
++    ``qwen38-reasoning-effort-template``, ``glm53-minja-numeric-index``,
++    ``google-canonical-chat-template``), or its filename when the file lives
++    directly under a generic ``patches/`` dir (e.g. ``apex-qwen-chat-template.jinja``).
++
++    A compose mounts the whole vendored path (``.../patches/<id>/chat_template.jinja``),
++    so this token appears on the mount line for this patch's template and on no
++    other patch's mount line.
++    """
++    spec = patch.get("delivery_spec") or {}
++    jinja = spec.get("jinja")
++    if not jinja:
++        for rel in patch.get("files") or []:
++            if Path(rel).suffix in CHAT_TEMPLATE_ARTIFACT_SUFFIXES:
++                jinja = rel
++                break
++    if not jinja:
++        return []
++    p = Path(jinja)
++    parent = p.parent.name
++    if parent and parent != "patches":
++        return [parent]
++    if p.name:
++        return [p.name]
++    return []
++
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -497,7 +540,10 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = spec.get("wired_at")
+     if isinstance(wired_at, str):
+         wired_at = [wired_at]
+-    wired_at = set(wired_at or [])
++    # `command` and `entrypoint` are the same launch-command insertion point
++    # (apex/glm53 declare `command`, the rest `entrypoint`) — normalise so the
++    # dispatch below need not special-case the spelling (#1610 follow-up).
++    wired_at = {("entrypoint" if w == "command" else w) for w in (wired_at or [])}
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+     vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
+@@ -529,6 +575,46 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     return (bool(vol_markers) and vol_ok) or (bool(specific_inv) and specific_inv_ok)
+ 
+ 
++# --------------------------------------------------------------------------
++# chat_template wiring — source-aware (the #1610 install-script rule, extended
++# to vendored templates).
++# --------------------------------------------------------------------------
++def _chat_template_wired(patch: dict, body: str) -> bool:
++    """True iff the compose wires in THIS ``chat_template`` patch's vendored
++    template (``body`` is the comment-stripped, REAL-merged service body).
++
++    The load-bearing artifact for a ``chat_template`` patch is the bind mount of
++    its vendored ``.jinja``, and attribution must be SOURCE-AWARE so one patch's
++    template never counts for another's (the #1610 install-script rule, extended
++    here). The declared mount target (``mounted_at``) must appear on a line, and
++    when that target is the bare model-dir default (``chat_template.jinja`` — a
++    suffix shared by every model dir's own template, e.g. qwen38's
++    ``/chat_template.jinja`` mounted over each checkpoint's) the line must ALSO
++    carry the patch's own vendored source (its directory or filename). A
++    distinctive container path (e.g. ``/etc/apex-qwen-chat-template.jinja``) is
++    unique to the patch, so its mere presence — on the mount line or the
++    ``--chat-template[-file]`` line that names it — is enough.
++
++    This is what stops a compose that mounts *some* other template (whose path
++    merely ends in ``/chat_template.jinja``) from "reaching" the patch, and stops
++    a bare ``--chat-template`` flag (or one matched as a prefix of
++    ``--chat-template-file``) from counting on its own: the flag only matters
++    when it names *this* patch's mounted path, which the source-aware target
++    match already enforces.
++    """
++    spec = patch.get("delivery_spec") or {}
++    target = spec.get("mounted_at")
++    if not target:
++        return False
++    lines = body.splitlines()
++    if Path(target).name in _GENERIC_TEMPLATE_BASENAMES:
++        sources = _template_source_identity(patch)
++        if not sources:
++            return any(target in ln for ln in lines)
++        return any(target in ln and any(src in ln for src in sources) for ln in lines)
++    return any(target in ln for ln in lines)
++
++
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
+@@ -564,7 +650,7 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     # legacy substrate so shipped attribution is unchanged.
+     if patch.get("delivery_mechanism") == "chat_template":
+         body = service_body(compose_effective_text(root, name_or_path))
+-        return _spec_wiring_present(patch, body)
++        return _chat_template_wired(patch, body)
+ 
+     body = service_body(compose_text(root, name_or_path))
+ 

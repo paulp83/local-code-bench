@@ -1,0 +1,202 @@
+diff --git a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+index 81a4f45..a0acde7 100644
+--- a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
++++ b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+@@ -275,6 +275,9 @@ services:
+         _gmu="$${GPU_MEMORY_UTILIZATION:-$$_gmu_tier}"; _seqs="$${MAX_NUM_SEQS:-$$_seqs_tier}"
+         _mnbt="$${MAX_NUM_BATCHED_TOKENS:-$$_mnbt_tier}"; _lptt="$${LONG_PREFILL_TOKEN_THRESHOLD:-$$_lptt_tier}"
+         _mml="$${MAX_MODEL_LEN:-$$_mml_tier}"
++        # Pre-initialise: every case arm below assigns it (or exits), but
++        # initialising here makes the assignment dominate every path to the exec.
++        LM_ONLY_ARGS=()
+         case "$$VISION" in
+           on) LM_ONLY_ARGS=() ;;
+           off) LM_ONLY_ARGS=(--language-model-only) ;;
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..0cdab8f 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -16,6 +16,13 @@
+ # ⚠️ Indentation is NOT a sufficient proxy: in these composes the branch execs sit
+ # at the same column as a block nudged inside the branch. Depth is tracked from the
+ # shell keywords instead.
++#
++# `case` (#1540 / false failure on qwen3.8-27b vllm single): an assignment written
++# on a case-arm line (`on) ARR=() ;;`) is now SEEN at all (the matcher is no longer
++# anchored to the start of the line), and an arm assignment is only dominant when
++# the whole `case` is exhaustive -- every arm assigns the array or exits, and a `*)`
++# catch-all guarantees no input can match nothing and fall through. Such a case
++# assigns the array on every path to its `esac`, so it dominates any later exec.
+ set -uo pipefail
+ export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
+ # #779: this gate parses compose YAML through python3; without PYTHONUTF8 a
+@@ -50,12 +57,33 @@ def script_of(path):
+ OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
+ CLOSE = re.compile(r'^\s*(fi|done|esac)\b')
+ ALT   = re.compile(r'^\s*(else|elif)\b')
++CASE  = re.compile(r'^\s*case\b')
++ESAC  = re.compile(r'^\s*esac\b')
+ ONELINE = re.compile(r'\b(fi|done|esac)\s*;?\s*$')
+ 
++def is_case_arm(ln):
++    """A `case` arm opener: an indented line whose leading text terminates in a
++    `)` with no `(` or `=` before it. So `on) ARR=() ;;` and `*) exit 1 ;;` count
++    (the array-assignment paren comes AFTER the arm's `)`), while a bare
++    `ARR=(--x) ;;`, a `;;` separator or a plain command line do not."""
++    s = ln.lstrip()
++    if not s or s.startswith('#') or s.startswith(';'): return False
++    close = s.find(')')
++    if close < 0: return False
++    head = s[:close]
++    return '(' not in head and '=' not in head
++
++def arm_head(ln):
++    s = ln.lstrip()
++    return s[:s.find(')')].strip() if ')' in s else ''
++
+ def scope_paths(lines):
+     """Path of enclosing BRANCH ids per line.  `else`/`elif` starts a NEW id at the
+     same depth, so an assignment in the then-branch does not dominate the
+-    else-branch -- which plain depth counting cannot express."""
++    else-branch -- which plain depth counting cannot express. A `case` is left as a
++    single nested scope: a lone arm's assignment is therefore inside a scope the
++    post-esac exec does not share and correctly does NOT dominate (exhaustive-case
++    dominance is decided separately, by exhaustive_case_assigns below)."""
+     paths, stack, nxt = [], [], [0]
+     def fresh():
+         nxt[0] += 1
+@@ -67,31 +95,121 @@ def scope_paths(lines):
+         if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+     return paths
+ 
+-checked = refs = 0
+-problems = []
++def find_esac(lines, start):
++    depth = 0
++    for j in range(start, len(lines)):
++        if CASE.match(lines[j]): depth += 1
++        if ESAC.match(lines[j]):
++            depth -= 1
++            if depth == 0: return j
++    return None
+ 
+-for p in sorted(pathlib.Path("models").rglob("*.yml")):
+-    if "compose" not in str(p): continue
+-    s = script_of(p)
+-    if not s: continue
+-    checked += 1
+-    lines = s.splitlines()
++def case_arms(lines, start, end):
++    """Line-index list per arm for a multi-line case spanning [start..end]."""
++    arms, cur = [], None
++    for j in range(start + 1, end):
++        if is_case_arm(lines[j]):
++            if cur is not None: arms.append(cur)
++            cur = [j]
++        elif cur is not None:
++            cur.append(j)
++    if cur is not None: arms.append(cur)
++    return arms
++
++def exhaustive_case_assigns(lines, paths, arr, i):
++    """A `case` whose EVERY arm assigns `arr` or exits, and which carries a `*)`
++    catch-all (so no pattern can match nothing and fall through), assigns `arr`
++    on every path reaching past its `esac`. When the case itself dominates the
++    exec at line i, the array is therefore definitely set for that exec."""
++    target = re.compile(rf'(?<![A-Za-z0-9_.]){arr}=\(')
++    for start, ln in enumerate(lines):
++        if not CASE.match(ln) or ONELINE.search(ln): continue
++        end = find_esac(lines, start)
++        if end is None or end >= i: continue
++        if paths[i][:len(paths[start])] != paths[start]: continue
++        arms = case_arms(lines, start, end)
++        if not arms: continue
++        if not any(arm_head(lines[a[0]]) == '*' for a in arms): continue
++        if all(any(target.search(lines[k]) or re.search(r'\bexit\b', lines[k])
++                   for k in a) for a in arms):
++            return True
++    return False
++
++def analyze(script):
++    """-> (refs, [problems]) for one entrypoint script."""
++    lines = script.splitlines()
+     paths = scope_paths(lines)
++    refs, problems = 0, []
+     for i, ln in enumerate(lines):
+         if not re.match(r'^\s*exec\b', ln): continue
+         for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+             refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
++            asg = [j for j, l in enumerate(lines)
++                   if re.search(rf'(?<![A-Za-z0-9_.]){arr}=\(', l)]
+             if not asg:
+-                problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
+-            # an assignment dominates the exec iff it comes first AND its branch
+-            # path is a prefix of the exec's (same scope, or an enclosing one)
++                problems.append(f"exec uses ${{{arr}[@]}} but it is never assigned"); continue
+             ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
++            if not ok and exhaustive_case_assigns(lines, paths, arr, i):
++                ok = True
+             if not ok:
+                 problems.append(
+-                    f"{p}: {arr} is assigned only inside a branch that the exec on line "
++                    f"{arr} is assigned only inside a branch that the exec on line "
+                     f"{i+1} does not share -- that path expands an unset array, silently "
+                     f"dropping the feature")
++    return refs, problems
++
++checked = refs = 0
++problems = []
++
++for p in sorted(pathlib.Path("models").rglob("*.yml")):
++    if "compose" not in str(p): continue
++    s = script_of(p)
++    if not s: continue
++    checked += 1
++    r, probs = analyze(s)
++    refs += r
++    for m in probs: problems.append(f"{p}: {m}")
++
++# ---- self-test: prove the case/branch dominance rules on known-good & known-bad
++# scripts (the #1540 case-arm false-failure, and the dead-knob bug #1170).  Kept
++# inline so the gate cannot quietly rot into accepting a dead-branch assignment.
++def _case_script(arms, pre=None):
++    body = []
++    if pre is not None: body.append(pre)
++    body.append('case "$$V" in')
++    body += arms
++    body.append('esac')
++    body.append('exec serve "${LM_ONLY_ARGS[@]}"')
++    return "\n".join(body)
++
++_SELF = [
++    # (name, should_pass, script)
++    ("exhaustive case assigns-or-exits (no pre-init)", True,
++     _case_script(['  on) LM_ONLY_ARGS=() ;;',
++                   '  off) LM_ONLY_ARGS=(--language-model-only) ;;',
++                   '  *) exit 1 ;;'])),
++    ("exhaustive case + pre-init", True,
++     _case_script(['  on) LM_ONLY_ARGS=() ;;', '  *) exit 1 ;;'],
++                  pre='LM_ONLY_ARGS=()')),
++    ("case: one arm neither assigns nor exits", False,
++     _case_script(['  on) LM_ONLY_ARGS=() ;;', '  off) echo off ;;', '  *) exit 1 ;;'])),
++    ("case: every arm assigns but no catch-all", False,
++     _case_script(['  on) LM_ONLY_ARGS=() ;;', '  off) LM_ONLY_ARGS=(--lm) ;;'])),
++    ("assigned in one if-branch only (#1170 dead knob)", False,
++     'if [ "$$N" = 1 ]; then\n  LM_ONLY_ARGS=(--lm)\nelse\n  exec serve "${LM_ONLY_ARGS[@]}"\nfi'),
++    ("never assigned", False, 'exec serve "${LM_ONLY_ARGS[@]}"'),
++]
++_self_failed = []
++for name, should_pass, sc in _SELF:
++    _, probs = analyze(sc)
++    if bool(probs) == should_pass:
++        _self_failed.append(
++            f"  fixture '{name}': expected {'pass' if should_pass else 'FAIL'} "
++            f"but got {'FAIL' if probs else 'pass'}")
++if _self_failed:
++    print("FAIL: self-test regression (the dominance rules changed behaviour):", file=sys.stderr)
++    for x in _self_failed: print(x, file=sys.stderr)
++    sys.exit(1)
+ 
+ if checked == 0 or refs == 0:
+     print(f"FAIL: vacuous run (checked={checked}, refs={refs}) -- extraction is broken", file=sys.stderr); sys.exit(1)

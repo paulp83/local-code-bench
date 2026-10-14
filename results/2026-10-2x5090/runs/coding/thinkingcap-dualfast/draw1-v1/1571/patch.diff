@@ -1,0 +1,115 @@
+diff --git a/scripts/report.sh b/scripts/report.sh
+index 133e585..7acfd84 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -203,6 +203,69 @@ gpu_power_caps() {
+       done
+ }
+ 
++# Per-GPU VRAM attribution (#1537). A single running club container used to be
++# credited with EVERY card over the idle threshold, including cards it cannot
++# even see. These instead attribute each card to the process nvidia-smi
++# actually reports on it.
++#
++# gpu_holders_build — populate the global associative arrays _GPU_HOLDERS
++# (index -> space-joined process names) and _GPU_PIDS (index -> space-joined
++# PIDs). Each --query-compute-apps row carries a gpu_uuid; it is joined to a
++# physical index via --query-gpu=index,uuid. Leaves both empty when nvidia-smi
++# is absent or reports no compute apps; callers then fall back to
++# gpu_holder_names_by_idx (a per-GPU -i query) and, failing that, the generic
++# "something is using this GPU" warning.
++gpu_holders_build() {
++  declare -gA _GPU_HOLDERS=() _GPU_PIDS=()
++  have nvidia-smi || return 0
++  local uuid_rows app_rows a_pid a_name a_uuid a_idx g_idx g_uuid
++  uuid_rows="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)"
++  app_rows="$(nvidia-smi --query-compute-apps=pid,process_name,gpu_uuid --format=csv,noheader,nounits 2>/dev/null || true)"
++  [[ -n "$app_rows" ]] || return 0
++  while IFS=, read -r a_pid a_name a_uuid; do
++    a_pid="${a_pid// /}"; a_name="${a_name# }"; a_uuid="${a_uuid# }"
++    [[ -n "$a_pid" && -n "$a_name" ]] || continue
++    a_idx=""
++    if [[ -n "$a_uuid" ]]; then
++      while IFS=, read -r g_idx g_uuid; do
++        g_idx="${g_idx// /}"; g_uuid="${g_uuid# }"
++        if [[ -n "$g_uuid" && "$g_uuid" == "$a_uuid" ]]; then a_idx="$g_idx"; break; fi
++      done <<< "$uuid_rows"
++    fi
++    [[ -n "$a_idx" ]] || continue
++    _GPU_HOLDERS[$a_idx]="${_GPU_HOLDERS[$a_idx]:-}${_GPU_HOLDERS[$a_idx]:+ }$a_name"
++    _GPU_PIDS[$a_idx]="${_GPU_PIDS[$a_idx]:-}${_GPU_PIDS[$a_idx]:+ }$a_pid"
++  done <<< "$app_rows"
++  return 0
++}
++
++# gpu_holder_names_by_idx <idx> — process names on ONE card via a per-GPU
++# --query-compute-apps -i query. Fallback for a driver whose compute-apps rows
++# carry no gpu_uuid to join on. Space-joined; empty when the card is idle.
++gpu_holder_names_by_idx() {
++  local idx="$1" line out=""
++  have nvidia-smi || return 0
++  while IFS= read -r line; do
++    line="${line# }"; line="${line% }"
++    [[ -n "$line" ]] || continue
++    out="${out}${out:+ }$line"
++  done < <(nvidia-smi -i "$idx" --query-compute-apps=process_name --format=csv,noheader 2>/dev/null)
++  printf '%s' "$out"
++  return 0
++}
++
++# gpu_held_by <pids> <idx> — true when any of the given (space-joined) PIDs is
++# the process holding this card.
++gpu_held_by() {
++  local pids="$1" idx="$2" p our
++  for p in ${_GPU_PIDS[$idx]:-}; do
++    for our in $pids; do
++      [[ "$p" == "$our" ]] && return 0
++    done
++  done
++  return 1
++}
++
+ # ---------------------------------------------------------------------------
+ # Header
+ # ---------------------------------------------------------------------------
+@@ -763,12 +826,39 @@ section "Display / desktop state"
+     if have docker && docker info >/dev/null 2>&1; then
+       our_container=$(club_running_container)
+     fi
++
++    # The host PIDs owned by our container (main process + workers). A card is
++    # credited to our container ONLY when one of its own PIDs is actually on
++    # that card — never merely because it is the one running club container.
++    # (#1537: a single running club container was credited with every busy
++    # card, including cards it cannot even see.)
++    our_pids=""
++    if [[ -n "$our_container" ]]; then
++      our_pids="$(docker top "$our_container" 2>/dev/null | awk 'NR>1{print $2}')"
++      our_pids="${our_pids//$'\n'/ }"
++      [[ "$our_pids" == " " ]] && our_pids=""
++      if [[ -z "$our_pids" ]]; then
++        our_pids="$(docker inspect "$our_container" --format '{{.State.Pid}}' 2>/dev/null || true)"
++      fi
++    fi
++
++    # Attribute each card to the process nvidia-smi actually reports on it.
++    gpu_holders_build
++
+     nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
+       | while IFS=, read -r idx used; do
+           idx="${idx# }"; used="${used# }"
+           if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
+-            if [[ -n "$our_container" ]]; then
++            holders="${_GPU_HOLDERS[$idx]:-}"
++            if [[ -z "$holders" ]]; then
++              # compute-apps carried no gpu_uuid to join on (older driver): ask
++              # for just this card's processes directly.
++              holders="$(gpu_holder_names_by_idx "$idx")"
++            fi
++            if [[ -n "$holders" && -n "$our_container" ]] && gpu_held_by "$our_pids" "$idx"; then
+               echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
++            elif [[ -n "$holders" ]]; then
++              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by \`${holders}\`)"
+             else
+               echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+             fi

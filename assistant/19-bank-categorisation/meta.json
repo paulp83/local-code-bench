@@ -1,0 +1,9 @@
+{
+  "id": "19-bank-categorisation",
+  "source": "novel",
+  "category": "finance",
+  "difficulty": "hard",
+  "est_minutes": 25,
+  "needs_web": false,
+  "notes": "Novel: ordered rules (SUPERMARKET before MARKET), transfers excluded, split rows."
+}

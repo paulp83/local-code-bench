@@ -1,0 +1,119 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..b026b41 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -957,6 +957,25 @@ _preflight_compose_vllm_subdir() {
+   printf '%s' "$value"
+ }
+ 
++# _preflight_compose_hf_tokens <compose-file>... — emit every in-container
++# `/root/.cache/huggingface/<path>` token the vLLM deps check extracts, raw
++# (unresolved `${VAR:-default}` text included). Char-class must NOT exclude `:`
++# or `}` — model paths can be `/root/.cache/huggingface/${MODEL_SUBDIR:-default}`
++# (vLLM) and excluding those truncated the token to `${MODEL_SUBDIR` before
++# _preflight_compose_path_default could resolve the `:-default`, causing a false
++# "missing" (the gemma-4-12b MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). It MUST
++# exclude `\` — the assistant-drafter composes write the spec config as escaped
++# JSON (`SPEC_ARGS=(--speculative-config "{\"model\":\"/root/.cache/huggingface/<drafter>\"…}")`),
++# and without `\` the match ran past the dir name and consumed the trailing
++# backslash, capturing `<drafter>\` and demanding a `<MODEL_DIR>/<drafter>\/config.json`
++# that can never exist (the gemma-4-12b / 26b-a4b / 31b assistant composes).
++# Stop only at real delimiters (quote / backslash / whitespace / comma); the
++# `${VAR:-default}` resolver runs downstream.
++_preflight_compose_hf_tokens() {
++  command grep -hv '^[[:space:]]*#' "$@" 2>/dev/null \
++    | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true
++}
++
+ _preflight_missing_rel() {
+   local model_dir="$1"
+   local item="$2"
+@@ -1324,13 +1343,9 @@ preflight_compose_deps() {
+           shard_dirs+=("${model_dir}/${subdir}")
+         fi
+       fi
+-    # Char-class must NOT exclude `:` or `}` — model paths can be
+-    # `/root/.cache/huggingface/${MODEL_SUBDIR:-default}` (vLLM) and excluding
+-    # those truncated the token to `${MODEL_SUBDIR` before _preflight_compose_path_default
+-    # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+-    # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+-    # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    # Token char-class rules live on _preflight_compose_hf_tokens above — they
++    # are load-bearing (see the false "missing" history there).
++    done < <(_preflight_compose_hf_tokens "${compose_files[@]}")
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+diff --git a/scripts/tests/test-preflight-compose-deps.sh b/scripts/tests/test-preflight-compose-deps.sh
+index 1a44e11..376129f 100755
+--- a/scripts/tests/test-preflight-compose-deps.sh
++++ b/scripts/tests/test-preflight-compose-deps.sh
+@@ -193,4 +193,67 @@ touch "${TMP_DIR}/bl-models/qwen3.6-27b-gguf/anbeeld-dflash-iq4xs/Qwen3.6-27B-DF
+ out="$(run_deps "$beellama_compose" "${TMP_DIR}/bl-models")"
+ [[ -z "$out" ]]
+ 
++# ── Escaped-JSON spec-config extractor (#1305) ───────────────────────────────
++# The assistant-drafter composes write the drafter path inside escaped JSON in
++# the entrypoint (SPEC_ARGS=(--speculative-config "{\"model\":\"…\"}")). The
++# extractor's char class excluded quotes / whitespace / comma but NOT backslash,
++# so the match ran past the dir name, consumed the trailing `\`, and preflight
++# demanded <MODEL_DIR>/<drafter>\/config.json — a path that can never exist,
++# refusing every boot even with the drafter on disk (the gemma-4-12b / 26b-a4b /
++# 31b assistant composes).
++escaped_compose="${TMP_DIR}/escaped-spec.yml"
++cat > "$escaped_compose" <<'YAML'
++services:
++  vllm:
++    image: vllm/vllm-openai:v0.21.0
++    entrypoint:
++      - /bin/bash
++    command:
++      - -c
++      - |
++        SPEC_ARGS=()
++        if [ "$${SPEC_N:-4}" -gt 0 ]; then
++          SPEC_ARGS=(--speculative-config "{\"model\":\"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\",\"num_speculative_tokens\":$${SPEC_N:-4}}")
++          echo "[spec] drafter ON - draft-model gemma-4-26b-a4b-it-assistant" >&2
++        fi
++        exec vllm serve /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit "${SPEC_ARGS[@]}"
++YAML
++out="$(expect_missing "$escaped_compose" "${TMP_DIR}/empty-models")"
++assert_contains "$out" "gemma-4-26b-a4b-awq-4bit/config.json"
++assert_contains "$out" "gemma-4-26b-a4b-it-assistant/config.json"
++# The captured subdir must NOT carry the trailing backslash — that path form can
++# never exist on disk, so the check would be unsatisfiable for the user.
++assert_not_contains "$out" "it-assistant\\/config.json"
++assert_not_contains "$out" "awq-4bit\\/config.json"
++# And the false "missing" must not survive the drafter being present:
++mkdir -p "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit" "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant"
++touch "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit/config.json" "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant/config.json"
++out="$(run_deps "$escaped_compose" "${TMP_DIR}/models")"
++[[ -z "$out" ]]
++
++# ── Extractor output hygiene across the whole catalog (#1305) ────────────────
++# General form of the bug above: a captured HF subdir is later joined into an
++# existence check, so any character a directory name can never contain (a
++# backslash from escaped JSON, a quote, a brace from an unresolved ${VAR:-…},
++# or whitespace) means the check demands an impossible path. Run the extractor +
++# resolver over every compose in the catalog and assert every subdir is a
++# plausible directory name. This also guards the ${MODEL_SUBDIR-truncation
++# failure mode the char-class comment documents.
++source "${ROOT_DIR}/scripts/preflight.sh"
++sweep_failures=0
++while IFS= read -r compose_file; do
++  while IFS= read -r token; do
++    sub="$(_preflight_compose_vllm_subdir "$token")"
++    [[ -n "$sub" ]] || continue
++    if [[ "$sub" =~ [\\\"\'\{\}\$[:space:]] ]]; then
++      echo "ASSERTION FAILED: extractor captured unusable subdir [$sub] from $compose_file" >&2
++      sweep_failures=$((sweep_failures + 1))
++    fi
++  done < <(_preflight_compose_hf_tokens "$compose_file")
++done < <(find "${ROOT_DIR}/models" -name '*.yml' -type f | sort)
++if [[ "$sweep_failures" -ne 0 ]]; then
++  echo "ASSERTION FAILED: $sweep_failures compose(s) yield unusable HF subdirs" >&2
++  exit 1
++fi
++
+ echo "test-preflight-compose-deps: ok"

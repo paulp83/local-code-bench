@@ -1,0 +1,33 @@
+[
+  {
+    "id": "T1",
+    "title": "fetch weights",
+    "status": "done"
+  },
+  {
+    "id": "T2",
+    "title": "write quant recipe",
+    "status": "done"
+  },
+  {
+    "id": "T3",
+    "title": "run quality gate",
+    "status": "blocked"
+  },
+  {
+    "id": "T4",
+    "title": "bench two configs",
+    "status": "in_progress",
+    "detail": "tp2-fp8 finished, tp2-awq not started"
+  },
+  {
+    "id": "T5",
+    "title": "write results doc",
+    "status": "todo"
+  },
+  {
+    "id": "T6",
+    "title": "reply on thread",
+    "status": "todo"
+  }
+]

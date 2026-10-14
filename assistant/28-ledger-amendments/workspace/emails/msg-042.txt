@@ -1,0 +1,8 @@
+From: sol@example.net
+Date: 2026-07-15T14:36:00Z
+Subject: ledger amendment
+
+Please correct T-02954: the right figure is -$617.55.
+
+Thanks,
+sol

@@ -1,0 +1,12 @@
+{
+  "number": 307,
+  "title": "preflight misreports free VRAM",
+  "labels": [
+    "design",
+    "docs",
+    "enhancement"
+  ],
+  "files_touched": 6,
+  "has_repro": false,
+  "needs_gpu": true
+}

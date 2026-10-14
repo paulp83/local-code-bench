@@ -1,0 +1,3 @@
+rina@example.net
+sol@example.net
+tess@example.net

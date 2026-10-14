@@ -1,0 +1,14 @@
+{
+ "task": "38-trip-plan-revised",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 34.8,
+ "tool_calls": 10,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 8,
+ "checks_total": 8,
+ "partial": 1.0
+}

@@ -1,0 +1,8 @@
+From: tess@example.net
+Date: 2026-07-08T08:37:00Z
+Subject: ledger amendment
+
+T-02879 was entered with the wrong sign; the debit and credit are swapped.
+
+Thanks,
+tess

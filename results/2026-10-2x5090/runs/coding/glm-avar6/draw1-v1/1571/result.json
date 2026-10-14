@@ -1,0 +1,24 @@
+{
+ "n": 1571,
+ "config": "glm-avar6",
+ "draw": 1,
+ "exit_status": "ContextWindowExceededError",
+ "error": "\n        ^^^^^\n    ...<3 lines>...\n        native=call_hook,\n        ^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"<bench>/coding/.venv/lib/python3.13/site-packages/litellm/rust_bridge/dispatch.py\", line 81, in run\n    return python(*args, **kwargs)\n  File \"<bench>/coding/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1954, in wrapper\n    raise e\n  File \"<bench>/coding/.venv/lib/python3.13/site-packages/litellm/utils.py\", line 1795, in wrapper\n    result = original_function(*args, **kwargs)\n  File \"<bench>/coding/.venv/lib/python3.13/site-packages/litellm/main.py\", line 6038, in completion\n    raise exception_type(\n          ~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<3 lines>...\n        extra_kwargs=kwargs,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"<bench>/coding/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2719, in exception_type\n    raise e  # it's already mapped\n    ^^^^^^^\n  File \"<bench>/coding/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 2466, in exception_type\n    _map_openai_exception(\n    ~~~~~~~~~~~~~~~~~~~~~^\n        model=model,\n        ^^^^^^^^^^^^\n    ...<5 lines>...\n        extra_information=extra_information,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"<bench>/coding/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/exception_mapping_utils.py\", line 318, in _map_openai_exception\n    raise ContextWindowExceededError(\n    ...<5 lines>...\n    )\nlitellm.exceptions.ContextWindowExceededError: litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - request (250644 tokens) exceeds the available context size (204800 tokens), try increasing it\n",
+ "agent_s": 759.1,
+ "steps": 43,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 0.5,
+ "files_touched": [
+  "scripts/lib/vram-holders.sh",
+  "scripts/report.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-report-gpu-attribution.sh": 1
+ }
+}

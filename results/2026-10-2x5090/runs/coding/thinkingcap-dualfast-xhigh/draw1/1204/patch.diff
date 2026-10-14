@@ -1,0 +1,1256 @@
+diff --git a/scripts/lib/profiles-local/README.md b/scripts/lib/profiles-local/README.md
+index 76b6523..cca984a 100644
+--- a/scripts/lib/profiles-local/README.md
++++ b/scripts/lib/profiles-local/README.md
+@@ -64,6 +64,7 @@ named is unregistered.
+    {
+      "local/my-model-dual-autoround-int4": {
+        "model": "my-model",
++       "origin": "local",
+        "weights_variant": "autoround-int4",
+        "workload": "long-ctx-single",
+        "engine": "vllm-stable",
+@@ -86,9 +87,16 @@ named is unregistered.
+ ## Rules
+ 
+ - **Slug namespace:** local slugs MUST start with `local/`. The loader refuses
+-  anything else, and refuses any slug or model id that collides with a core
+-  catalog row (loudly — a broken `registry.local.json` fails the launch rather
+-  than silently shrinking the catalog).
++  anything else, and refuses a model id duplicated by ANOTHER local row (loudly
++  — a broken `registry.local.json` fails the launch rather than silently
++  shrinking the catalog).
++- **Provenance is first-class:** every row carries `origin` — `"local"` here,
++  `"core"` in the curated catalog (#1202 P2). A publish FLIPS that value
++  (local → core) and leaves the slug alone; publishing is a value flip, never
++  a rename. A slug or model id the core catalog ALSO carries is not refused:
++  the merged view is **CORE-WINS** — the curated entry shadows your local row,
++  so a `git pull` that lands your model upstream can never be clobbered (or
++  refused) by this layer.
+ - **Status:** local entries start at `"incubating"` — hidden from
+   `switch.sh --list`, launched only with `--force` (see the Status enum in
+   `compose_registry.py`). Promote up the enum locally as your model validates.
+diff --git a/scripts/lib/profiles/compat.py b/scripts/lib/profiles/compat.py
+index 2e5a039..a78e0b3 100644
+--- a/scripts/lib/profiles/compat.py
++++ b/scripts/lib/profiles/compat.py
+@@ -816,13 +816,18 @@ def load_profiles(root: Path = PROFILE_ROOT) -> Profiles:
+     profiles = Profiles(
+         hardware=_load_dir(root, "hardware", _hardware),
+         models={
+-            **_load_dir(root, "models", _model),
+             # C4-rev: merge the gitignored LOCAL layer's models.d profiles so
+             # every profile consumer (diagnose-profile, the weights catalog,
+-            # registry-emit's model facet) sees community models. Local model
+-            # ids are collision-checked by the registry loader, and a local
+-            # profile SHADOWING a core id is impossible by that check.
++            # registry-emit's model facet) sees community models.
+             **_load_local_models(root),
++            # CORE WINS (#1202 P2): a local profile whose id the curated
++            # catalog already carries is inert — the core profile stays
++            # canonical (a local row with a core model id is a local-origin
++            # variant, stamped origin="local" by the registry loader). Core
++            # goes LAST so it overwrites any shadowing local id and the
++            # cross-reference validation below always sees the complete core
++            # model, whatever the user keeps in models.d/.
++            **_load_dir(root, "models", _model),
+         },
+         workloads=_load_dir(root, "workloads", _workload),
+         engines=_load_dir(root, "engines", _engine),
+@@ -856,7 +861,9 @@ def _load_local_models(root: Path) -> dict[str, Any]:
+ 
+     Loaded with the SAME schema/factory as core models; an invalid local
+     profile raises loudly like a broken core one (a half-loaded catalog is
+-    worse than a failure). Absent layer → {} (pristine checkout unchanged)."""
++    worse than a failure). Absent layer → {} (pristine checkout unchanged).
++    A row whose id a CORE profile already carries is inert (#1202 P2: CORE
++    WINS) — load_profiles() merges it under the core row, never the reverse."""
+     local_dir = Path(root).parent / "profiles-local" / "models.d"
+     if not local_dir.is_dir():
+         return {}
+diff --git a/scripts/lib/profiles/compose_registry.py b/scripts/lib/profiles/compose_registry.py
+index 31b69e8..bc9f84c 100644
+--- a/scripts/lib/profiles/compose_registry.py
++++ b/scripts/lib/profiles/compose_registry.py
+@@ -52,10 +52,25 @@ COMPOSE_STATUS_EMOJI = {
+     "🗑️": "deprecated",
+ }
+ 
++# PROVENANCE of a registry entry — FIRST-CLASS field (#1202 P2): which catalog
++# the entry lives in. "core" = the curated catalog (registry.yaml, this
++# checkout's git-tracked data); "local" = the gitignored community layer
++# (scripts/lib/profiles-local/registry.local.json). Publishing a local model
++# FLIPS this value (local → core) and leaves the slug alone; and whenever a
++# slug exists in BOTH layers the merged view is CORE-WINS — the curated entry
++# shadows the local one, never the reverse, so a local layer can never
++# overwrite the catalog a git pull just delivered.
++ORIGIN_VALUES = ("core", "local")
++
+ 
+ def _entry(
+     *,
+     model,
++    # Provenance (#1202 P2): which catalog this entry lives in — "core" (the
++    # curated registry.yaml; the default, so pre-P2 data files stay valid) or
++    # "local" (the gitignored community layer). The local loader stamps "local"
++    # onto every row it loads; a publish flips the value, never the slug.
++    origin="core",
+     weights_variant,
+     workload,
+     engine,
+@@ -195,8 +210,14 @@ def _entry(
+         raise ValueError(
+             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
+         )
++    if origin not in ORIGIN_VALUES:
++        raise ValueError(
++            f"{compose_path}: origin={origin!r} not in {ORIGIN_VALUES}"
++        )
+     entry = {
+         "model": model,
++        # First-class provenance (#1202 P2) — always present, both layers.
++        "origin": origin,
+         "weights_variant": weights_variant,
+         "workload": workload,
+         "engine": engine,
+@@ -417,6 +438,11 @@ _REGISTRY_YAML_HEADER = """\
+ #   * Entry rows are `_entry(**kwargs)` argument maps — the same schema as
+ #     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` are
+ #     derived by _entry() and MUST NOT appear here.
++#   * Every row carries `origin: core` — the FIRST-CLASS provenance field
++#     (#1202 P2): which catalog the entry lives in. Rows in the gitignored
++#     local layer carry `origin: local`; publishing a local model flips the
++#     value (core) and leaves the slug alone. Where a slug exists in both
++#     layers the merged view is CORE-WINS.
+ # ===========================================================================
+ """
+ 
+@@ -785,6 +811,13 @@ RECOMMENDED_DEFAULT_MODELS = _CORE_RECOMMENDED_MODELS
+ # (launch / switch / diagnose / emit / estate / cockpit). The local layer can
+ # NEVER leak into DEFAULTS / ENGINE_PREFERENCE / RECOMMENDED_DEFAULT_MODELS —
+ # those stay core-only, so a local entry can never become a curated default.
++#
++# Provenance is a first-class entry field (#1202 P2): every entry — core OR
++# local — carries ``origin`` ("core" / "local", see ORIGIN_VALUES). The local
++# loader stamps "local" onto every row it loads. A slug (or model id) that
++# exists in BOTH layers no longer refuses: get_registry() is CORE-WINS — the
++# curated entry shadows the local one, so a git pull that lands the same slug
++# in the catalog can never be clobbered (or refused) by the local layer.
+ 
+ LOCAL_LAYER_DIR_REL = "scripts/lib/profiles-local"
+ LOCAL_REGISTRY_REL = "scripts/lib/profiles-local/registry.local.json"
+@@ -813,10 +846,20 @@ def load_local_registry(root=None):
+ 
+     Plain-dict entries (the JSON form of _entry kwargs) are wrapped through
+     _entry(**kwargs) so a local row carries EXACTLY the same shape + defaults
+-    as a core row. ANY problem — unreadable JSON, a non-object, an unknown
+-    kwarg, a bad status, a slug outside the `local/` namespace, or a slug /
+-    model-id colliding with a core row (or another local row) — raises
+-    LocalRegistryError. Loud, never a silent partial catalog."""
++    as a core row — with its provenance stamped: every row comes back with
++    origin="local" (the FIRST-CLASS provenance field, #1202 P2), whatever the
++    file says.
++
++    ANY problem — unreadable JSON, a non-object, an unknown kwarg, a bad
++    status, a slug outside the `local/` namespace, or a model-id duplicated
++    by ANOTHER LOCAL row — raises LocalRegistryError. Loud, never a silent
++    partial catalog. A slug or model-id that ALSO exists in the curated
++    catalog is NOT a problem anymore (#1202 P2: CORE WINS): the local row is
++    loaded and the merged view resolves the shared slug to the curated entry.
++    That is what makes a publish a value-flip (origin local→core, slug
++    untouched) instead of a checkout-breaking collision: after the model
++    lands upstream, the user's local row quietly defers to the curated one.
++    """
+     root = Path(root) if root is not None else local_layer_root()
+     path = root / LOCAL_REGISTRY_REL
+     if not path.exists():
+@@ -831,8 +874,6 @@ def load_local_registry(root=None):
+         raise LocalRegistryError(
+             f"{path}: expected a JSON object of {{slug: {{_entry kwargs}}}}"
+         )
+-    core_slugs = set(COMPOSE_REGISTRY)
+-    core_models = {e.get("model") for e in COMPOSE_REGISTRY.values()}
+     local: dict = {}
+     local_models: set = set()
+     for slug, kwargs in raw.items():
+@@ -841,15 +882,27 @@ def load_local_registry(root=None):
+                 f"{path}: local slug {slug!r} must live under the "
+                 f"{LOCAL_SLUG_PREFIX!r} namespace"
+             )
+-        if slug in core_slugs or slug in local:
++        if slug in local:
+             raise LocalRegistryError(f"{path}: local slug collides: {slug!r}")
+         model = kwargs.get("model")
+-        if model in core_models:
+-            raise LocalRegistryError(
+-                f"{path}: local model id {model!r} collides with a core model"
+-            )
++        # A model id the curated catalog already carries is fine (#1202 P2):
++        # the local row is a LOCAL-origin variant and every resolution of
++        # that model id stays core-first — CORE WINS. Only a duplicate among
++        # the user's OWN local rows is still refused (no winner to pick).
+         if model in local_models:
+             raise LocalRegistryError(f"{path}: duplicate local model id {model!r}")
++        # A declared origin must at least be a real value — garbage fails
++        # loudly like any other bad field. (A valid declaration is then
++        # stamped to the truth below.)
++        if "origin" in kwargs and kwargs["origin"] not in ORIGIN_VALUES:
++            raise LocalRegistryError(
++                f"{path}: local entry {slug!r}: origin {kwargs['origin']!r} "
++                f"not in {ORIGIN_VALUES}"
++            )
++        kwargs = dict(kwargs)
++        # Provenance is fixed by WHERE the row lives, not by what it claims:
++        # the gitignored layer is local, full stop (#1202 P2).
++        kwargs["origin"] = "local"
+         try:
+             entry = _entry(**kwargs)
+         except TypeError as exc:
+@@ -869,13 +922,21 @@ def get_registry(root=None):
+     With no local layer present this IS COMPOSE_REGISTRY (the identical object
+     — zero behavior change on a pristine checkout). Slug lookups at runtime
+     read THIS; DEFAULTS / ENGINE_PREFERENCE / RECOMMENDED_DEFAULT_MODELS stay
+-    core-only. Raises LocalRegistryError when a present local layer is broken —
+-    a half-working catalog is worse than a loud failure."""
++    core-only.
++
++    A slug present in BOTH layers resolves to the CURATED entry — CORE WINS
++    (#1202 P2): the local row is shadowed, never the reverse, so a git pull
++    that lands a slug in the catalog can never be clobbered (or refused) by
++    the local layer.
++
++    Raises LocalRegistryError when a present local layer is broken — a
++    half-working catalog is worse than a loud failure."""
+     local = load_local_registry(root)
+     if not local:
+         return COMPOSE_REGISTRY
+-    merged = dict(COMPOSE_REGISTRY)
+-    merged.update(local)
++    # Insert local FIRST so COMPOSE_REGISTRY's values win any shared slug.
++    merged = dict(local)
++    merged.update(COMPOSE_REGISTRY)
+     return merged
+ 
+ 
+diff --git a/scripts/lib/profiles/export_pr.py b/scripts/lib/profiles/export_pr.py
+index 4369d89..67a2a13 100755
+--- a/scripts/lib/profiles/export_pr.py
++++ b/scripts/lib/profiles/export_pr.py
+@@ -13,8 +13,10 @@ translated to the CORE layout per docs/ADDING_MODELS.md:
+     <out>/models/<id>/<engine>/compose/<topology>/<quant>/<serving>.yml
+     <out>/registry-entry.yaml     the registry ENTRY FILE — the ``entries:``
+                                   map (slug → _entry kwargs) in exactly the
+-                                  registry.yaml DATA subset, headed by the
+-                                  canonical merge command
++                                  registry.yaml DATA subset, each row carrying
++                                  the provenance flip ``origin: core``
++                                  (#1202 P2), headed by the canonical merge
++                                  command
+ 
+ The catalog is DATA now (registry.yaml; compose_registry.py is the loader
+ shim), so artifact 3 is an entry FILE, not a source patch: the contributor
+@@ -279,6 +281,13 @@ def translated_entry(state: dict, entry: dict) -> dict:
+     ns = compose_slug_namespace(cpath)
+     if not kw.get("kvcalc_key"):
+         kw["kvcalc_key"] = "SKIP"  # llama.cpp family default; vLLM was gated above
++    # Provenance FLIP (#1202 P2): the row becomes a CORE entry — the FIRST-
++    # CLASS origin value flips local→core, no matter what the local file said.
++    # This is publish: a value flip. The slug arithmetic below is the
++    # transitional half — once the P3 hard-cut gives local slugs the
++    # <engine>/<name> shape it collapses to identity and publishing is the
++    # origin flip alone, so user slugs/pins survive it.
++    kw["origin"] = "core"
+     core_slug = f"{ns}/{str(entry['slug'])[len(_LOCAL_SLUG_PREFIX):]}"
+     return {"slug": core_slug, "kwargs": kw}
+ 
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index bea1bd7..66a749e 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -47,11 +47,14 @@ environment. Anything else refuses BEFORE writing — community users can never
+ reach the core catalog through this tool.
+ 
+ Refuses (exit 3, writes NOTHING) on any collision: existing model yml, existing
+-compose path, existing registry slug (core OR local), a bad model-id/slug shape,
+-or a namespace violation. Internal failures AFTER a write started exit 2 — there
+-is NO rollback; git is the rollback for core writes and "delete the file(s)" for
+-local ones (stated in every run's output). ``--dry-run`` prints the plan and
+-writes nothing.
++compose path, an existing registry slug, a DUPLICATE local model id, a bad
++model-id/slug shape, or a namespace violation. A model id the CURATED catalog
++already carries is NOT a refusal anymore (#1202 P2: CORE WINS) — a local row is
++a local-origin variant of that model, it is stamped ``origin: "local"`` and
++every resolution of the model stays core-first. Internal failures AFTER a write
++started exit 2 — there is NO rollback; git is the rollback for core writes and
++"delete the file(s)" for local ones (stated in every run's output).
++``--dry-run`` prints the plan and writes nothing.
+ 
+ Success marker (the c3 parser hook)::
+ 
+@@ -426,6 +429,10 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+             )
+         # Force the incubating rung — a local entry never ships functional.
+         kwargs["status"] = _LOCAL_FORCED_STATUS
++        # Stamp the FIRST-CLASS provenance field (#1202 P2): the value the
++        # local layer's rows carry. A publish flips it to "core" and leaves
++        # the slug alone — the file never needs a rename to become core.
++        kwargs["origin"] = "local"
+ 
+         profile_path = root / _LOCAL_MODELS_REL / f"{mid}.yml"
+         if profile_path.exists():
+@@ -434,17 +441,17 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+         if compose_abs.exists():
+             raise Refusal(f"compose path already exists: {compose_abs}")
+ 
+-        # Collide against EVERYTHING (core + local) via the merged accessor…
++        # Collide against EVERYTHING (core + local) via the merged accessor —
++        # a local slug can only ever equal ANOTHER LOCAL slug here (core slugs
++        # never carry the local/ namespace), so this is the duplicate-slug gate.
+         registry = _import_compose_registry(root, merged=True)
+         if slug in registry:
+             raise Refusal(f"registry slug already exists: {slug}")
+-        # …and against core/local MODEL IDS (the loader refuses these loudly, so
+-        # refuse here where the message can name the exact fix).
+-        core_models = {e.get("model") for e in _import_compose_registry(root, merged=False).values()}
+-        if mid in core_models:
+-            raise Refusal(
+-                f"model_id {mid!r} collides with a CORE model — pick another id"
+-            )
++        # A model id the CURATED catalog already carries is allowed
++        # (#1202 P2: CORE WINS) — the new row is a local-origin variant,
++        # stamped origin="local" above, and the merged view keeps the curated
++        # entries canonical for that model. Only a duplicate among the user's
++        # OWN local rows is refused (there is no winner to pick).
+         local_raw = _load_local_raw(root)
+         if any(k.get("model") == mid for k in local_raw.values()):
+             raise Refusal(f"local model id already exists in {_LOCAL_REGISTRY_REL}: {mid!r}")
+@@ -502,6 +509,9 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+             f"the {_LOCAL_SLUG_PREFIX!r} namespace belongs to the LOCAL layer — "
+             "core slugs are <engine>/<name>"
+         )
++    # Stamp the FIRST-CLASS provenance field (#1202 P2): registry.yaml is
++    # canonical form, and its rows carry origin explicitly (core).
++    kwargs["origin"] = "core"
+     profile_path = root / _MODELS_DIR_REL / f"{mid}.yml"
+     if profile_path.exists():
+         raise Refusal(f"model profile already exists: {profile_path}")
+diff --git a/scripts/lib/profiles/registry.yaml b/scripts/lib/profiles/registry.yaml
+index 5ed92b9..1a106a7 100644
+--- a/scripts/lib/profiles/registry.yaml
++++ b/scripts/lib/profiles/registry.yaml
+@@ -15,6 +15,11 @@
+ #   * Entry rows are `_entry(**kwargs)` argument maps — the same schema as
+ #     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` are
+ #     derived by _entry() and MUST NOT appear here.
++#   * Every row carries `origin: core` — the FIRST-CLASS provenance field
++#     (#1202 P2): which catalog the entry lives in. Rows in the gitignored
++#     local layer carry `origin: local`; publishing a local model flips the
++#     value (core) and leaves the slug alone. Where a slug exists in both
++#     layers the merged view is CORE-WINS.
+ # ===========================================================================
+ 
+ schema: 1
+@@ -22,6 +27,7 @@ schema: 1
+ entries:
+   vllm/minimal:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -51,6 +57,7 @@ entries:
+     serve_aliases: []
+   vllm/dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -80,6 +87,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-fast:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -109,6 +117,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-max:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -138,6 +147,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-lmcache:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-lmcache
+@@ -167,6 +177,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-balanced:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: awq-bf16-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -196,6 +207,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-multi-fast:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -225,6 +237,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-multi-max:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -254,6 +267,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-single-nvfp4:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -285,6 +299,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-27b-dual-nvfp4:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -316,6 +331,7 @@ entries:
+     fallback_sm: 7.5
+   llamacpp/default:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -345,6 +361,7 @@ entries:
+     serve_aliases: []
+   llamacpp/mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -374,6 +391,7 @@ entries:
+     serve_aliases: []
+   llamacpp/bounded-thinking:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: tool-heavy
+     engine: llama-cpp-local
+@@ -403,6 +421,7 @@ entries:
+     serve_aliases: []
+   llamacpp/mtp-vision:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -433,6 +452,7 @@ entries:
+     serve_aliases: []
+   ik-llama/iq4ks-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ubergarm-iq4ks
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -462,6 +482,7 @@ entries:
+     serve_aliases: []
+   ik-llama/iq4ks-mtp-vision:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ubergarm-iq4ks
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -492,6 +513,7 @@ entries:
+     serve_aliases: []
+   ik-llama/iq4ks-two-stage:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ubergarm-iq4ks
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -521,6 +543,7 @@ entries:
+     serve_aliases: []
+   beellama/dflash:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: beellama-q5ks-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -553,6 +576,7 @@ entries:
+       - "8.6"
+   beellama/qwopus-coder:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: qwopus-coder-mtp-q5km
+     workload: fast-chat
+     engine: beellama-local
+@@ -582,6 +606,7 @@ entries:
+     serve_aliases: []
+   beellama/carnice-v2-single-q5km-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: carnice-v2-q5km
+     workload: fast-chat
+     engine: beellama-local
+@@ -611,6 +636,7 @@ entries:
+     serve_aliases: []
+   beellama/carnice-v2-dual-q8-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: carnice-v2-q8
+     workload: fast-chat
+     engine: beellama-local
+@@ -640,6 +666,7 @@ entries:
+     serve_aliases: []
+   llamacpp/qwen27b-pi-reasoning-single:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: pi-reasoning-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -669,6 +696,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -698,6 +726,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-long:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -727,6 +756,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-two-stage:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: tool-heavy
+     engine: llama-cpp-local
+@@ -756,6 +786,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: tool-heavy
+     engine: llama-cpp-local
+@@ -785,6 +816,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-dual-vision:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -815,6 +847,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-mtp-compact:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-compact
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -844,6 +877,7 @@ entries:
+     serve_aliases: []
+   ik-llama/byteshape-iq4xs-mtp:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: byteshape-iq4xs
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -873,6 +907,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-mtp-compact-long:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-compact
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -902,6 +937,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-fit-q8q5:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-compact
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -931,6 +967,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-mtp-quality-dual:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-quality
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -960,6 +997,7 @@ entries:
+     serve_aliases: []
+   llamacpp/hauhaucs-35ba3b-dual:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: morikomorizz-q6kp
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -989,6 +1027,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-mtp-tp1:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-gemma-stable
+@@ -1019,6 +1058,7 @@ entries:
+     required_sm: 9.0
+   vllm/gemma-bf16-mtp:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-gemma-stable
+@@ -1048,6 +1088,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-int8-mtp:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: autoround-int4
+     workload: multi-stream-tenant
+     engine: vllm-gemma-stable
+@@ -1078,6 +1119,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-31b-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: qat-awq-int4
+     workload: multi-stream-tenant
+     engine: vllm-stable
+@@ -1108,6 +1150,7 @@ entries:
+       - gemma-4-31b-autoround
+   vllm/gemma-31b-multi-google-qat-w4a16:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: google-qat-w4a16
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -1137,6 +1180,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-31b-qat-w4a16-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: qat-w4a16
+     workload: multi-stream-tenant
+     engine: vllm-gemma-stable
+@@ -1167,6 +1211,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-12b-dual-bf16-mtp:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: bf16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1196,6 +1241,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-12b-single-int8-mtp:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: autoround-int8
+     workload: fast-chat
+     engine: vllm-gemma4-unified
+@@ -1225,6 +1271,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-12b-qat-w4a16-single:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: qat-w4a16
+     workload: fast-chat
+     engine: vllm-gemma4-unified
+@@ -1254,6 +1301,7 @@ entries:
+     serve_aliases: []
+   beellama/gemma-12b-single-q8kxl:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: beellama-q8kxl
+     workload: fast-chat
+     engine: beellama-local
+@@ -1283,6 +1331,7 @@ entries:
+     serve_aliases: []
+   llamacpp/gemma-12b-single-q8kxl:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: unsloth-q8kxl
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -1312,6 +1361,7 @@ entries:
+     serve_aliases: []
+   beellama/gemma-dflash:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: beellama-q4ks-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1344,6 +1394,7 @@ entries:
+       - "8.6"
+   beellama/gemma-dflash-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: beellama-q4ks-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1374,6 +1425,7 @@ entries:
+     serve_aliases: []
+   beellama/qwen-mtp-dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: beellama-q8kxl-mtp
+     workload: fast-chat
+     engine: beellama-local
+@@ -1403,6 +1455,7 @@ entries:
+     serve_aliases: []
+   beellama/qwen-dflash-dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: beellama-q8kxl-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1433,6 +1486,7 @@ entries:
+     serve_aliases: []
+   beellama/gemma-q8-dflash-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: beellama-q8kxl-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1463,6 +1517,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-26ba4b-single:
+     model: gemma-4-26b-a4b
++    origin: core
+     weights_variant: awq
+     workload: fast-chat
+     engine: vllm-gemma-stable
+@@ -1492,6 +1547,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-26ba4b-dual:
+     model: gemma-4-26b-a4b
++    origin: core
+     weights_variant: awq
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1521,6 +1577,7 @@ entries:
+     serve_aliases: []
+   vllm/diffusiongemma-dual:
+     model: diffusiongemma-26b-a4b
++    origin: core
+     weights_variant: fp8
+     workload: fast-chat
+     engine: vllm-diffusion-gemma
+@@ -1550,6 +1607,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-a3b-preview-single:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1579,6 +1637,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-35b-a3b-dual:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1608,6 +1667,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-35b-a3b-single-nvfp4:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1639,6 +1699,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-35b-a3b-dual-nvfp4:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1670,6 +1731,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-35b-a3b-dual-nvfp4-fast:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: nvfp4-fast
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1701,6 +1763,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-agentworld-35b-a3b-dual-awq-int4:
+     model: qwen-agentworld-35b-a3b
++    origin: core
+     weights_variant: cyankiwi-awq-int4
+     workload: multi-stream-tenant
+     engine: vllm-stable
+@@ -1730,6 +1793,7 @@ entries:
+     serve_aliases: []
+   vllm/agents-a1-dual:
+     model: agents-a1
++    origin: core
+     weights_variant: fp8-dynamic
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -1759,6 +1823,7 @@ entries:
+     serve_aliases: []
+   llamacpp/deckard40B-dual-mtp:
+     model: qwen3.6-40b-deckard
++    origin: core
+     weights_variant: piehsoft-q6k
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -1789,6 +1854,7 @@ entries:
+     category: uncensored
+   llamacpp-club3090/inkling-small-dual-iq4xs-moecache:
+     model: inkling-small
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -1820,6 +1886,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/inkling-small-dual-iq4xs-residency:
+     model: inkling-small
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -1851,6 +1918,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/inkling-small-multi4-iq4xs-moecache:
+     model: inkling-small
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -1882,6 +1950,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-dual-iq4xs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -1915,6 +1984,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi4-iq4xs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -1948,6 +2018,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi8-iq4xs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -1981,6 +2052,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-dual-iq3xxs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq3xxs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2014,6 +2086,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi4-iq3xxs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq3xxs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2047,6 +2120,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi8-iq3xxs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq3xxs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2080,6 +2154,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/qwen38-flash-next-dual-q4kxl-moecache:
+     model: qwen3.8-flash-next
++    origin: core
+     weights_variant: unsloth-ud-q4kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2128,6 +2203,7 @@ entries:
+     sampler_default_mode: instruct
+   llamacpp-club3090/qwen38-flash-next-multi4-q4kxl-moecache:
+     model: qwen3.8-flash-next
++    origin: core
+     weights_variant: unsloth-ud-q4kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2176,6 +2252,7 @@ entries:
+     sampler_default_mode: instruct
+   llamacpp-club3090/qwen38-flash-next-multi8-q4kxl-moecache:
+     model: qwen3.8-flash-next
++    origin: core
+     weights_variant: unsloth-ud-q4kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2224,6 +2301,7 @@ entries:
+     sampler_default_mode: instruct
+   llamacpp-club3090/deepseek-flash-multi4-q8-moecache:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -2256,6 +2334,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/deepseek-flash-vision-dual-q8-moecache:
+     model: deepseek-v4-flash-vision-exp
++    origin: core
+     weights_variant: unsloth-ud-q8kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2287,6 +2366,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/deepseek-flash-vision-multi4-q8-moecache:
+     model: deepseek-v4-flash-vision-exp
++    origin: core
+     weights_variant: unsloth-ud-q8kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2318,6 +2398,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/deepseek-flash-dual-q8-moecache:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -2350,6 +2431,7 @@ entries:
+     category: frontier
+   llamacpp/deepseek-flash-dual-q8:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2382,6 +2464,7 @@ entries:
+     category: frontier
+   llamacpp/deepseek-flash-dual-iq2:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-iq2-xxs
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2414,6 +2497,7 @@ entries:
+     category: frontier
+   llamacpp/deepseek-flash-multi4-q8:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2446,6 +2530,7 @@ entries:
+     category: frontier
+   llamacpp/tess-dual-mtp:
+     model: tess-4-27b
++    origin: core
+     weights_variant: migtissera-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -2475,6 +2560,7 @@ entries:
+     serve_aliases: []
+   vllm/tess-dual-nvfp4:
+     model: tess-4-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2506,6 +2592,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/tess-dual-w4a16:
+     model: tess-4-27b
++    origin: core
+     weights_variant: leaderboard-w4a16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2536,6 +2623,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/thinkingcap-dual-w4a8:
+     model: thinkingcap-27b
++    origin: core
+     weights_variant: w4a16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2566,6 +2654,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/nemotron-75b-multi-mtp:
+     model: nemotron-3-puzzle-75b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2597,6 +2686,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/nemotron-75b-dual-w4a16:
+     model: nemotron-3-puzzle-75b
++    origin: core
+     weights_variant: w4a16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2628,6 +2718,7 @@ entries:
+     fallback_sm: 7.5
+   ik-llama/ornith9b-single:
+     model: ornith-1.0-9b
++    origin: core
+     weights_variant: deepreinforce-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -2657,6 +2748,7 @@ entries:
+     serve_aliases: []
+   ik-llama/ornith35b-dual:
+     model: ornith-1.0-35b
++    origin: core
+     weights_variant: deepreinforce-q8
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -2686,6 +2778,7 @@ entries:
+     serve_aliases: []
+   vllm/vibethinker-3b-single:
+     model: vibethinker-3b
++    origin: core
+     weights_variant: bf16
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2715,6 +2808,7 @@ entries:
+     serve_aliases: []
+   llamacpp/vibethinker-3b-single:
+     model: vibethinker-3b
++    origin: core
+     weights_variant: prithivmlmods-q8
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2744,6 +2838,7 @@ entries:
+     serve_aliases: []
+   llamacpp/qwen38-27b-single-iq4xs:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: unsloth-iq4xs
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -2790,6 +2885,7 @@ entries:
+     sampler_default_mode: thinking
+   llamacpp/qwen38-27b-dual-q8kxl:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: unsloth-q8kxl
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2835,6 +2931,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-max:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2880,6 +2977,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-max:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2925,6 +3023,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-max:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2970,6 +3069,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-supermax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3015,6 +3115,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-supermax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3060,6 +3161,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-supermax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3105,6 +3207,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-ultramax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3150,6 +3253,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-ultramax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3195,6 +3299,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-ultramax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3240,6 +3345,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-fast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3285,6 +3391,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-fast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3330,6 +3437,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-fast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3375,6 +3483,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-superfast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3420,6 +3529,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-superfast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3465,6 +3575,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-superfast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3510,6 +3621,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-ultrafast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3555,6 +3667,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-ultrafast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3600,6 +3713,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-ultrafast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3645,6 +3759,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-single-nvfp4:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3690,6 +3805,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-nvfp4:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable
+diff --git a/tools/serve-cockpit/club3090_cockpit/data.py b/tools/serve-cockpit/club3090_cockpit/data.py
+index af68047..dcd278d 100644
+--- a/tools/serve-cockpit/club3090_cockpit/data.py
++++ b/tools/serve-cockpit/club3090_cockpit/data.py
+@@ -2800,6 +2800,11 @@ def compute_promote_scaffold(
+     port = 20200 + (zlib.crc32(mid.encode("utf-8")) % 100)
+     entry_kwargs: dict[str, Any] = {
+         "model": mid,
++        # FIRST-CLASS provenance (#1202 P2): the value the row will carry in
++        # the target layer's registry — "local" for the gitignored layer,
++        # "core" for the curated catalog. A publish flips this value; the
++        # slug stays put.
++        "origin": "local" if layer == "local" else "core",
+         "weights_variant": quant,
+         "workload": "long-ctx-single",
+         "engine": "vllm-stable",

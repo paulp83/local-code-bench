@@ -1,0 +1,9 @@
+{
+  "id": "11-gpu-job-schedule",
+  "source": "session-derived",
+  "category": "planning",
+  "difficulty": "hard",
+  "est_minutes": 20,
+  "needs_web": false,
+  "notes": "Shape from sessions scheduling chains of eval/quant/bench jobs around two GPUs (chain-*.sh), rebuilt as a pure scheduling problem."
+}

@@ -1,0 +1,6 @@
+PASS buckets-is-object
+PASS buckets-keys-complete
+PASS buckets-all-correct
+PASS buckets-at-least-14-correct
+PASS junior-exact
+PASS: 5 FAIL: 0

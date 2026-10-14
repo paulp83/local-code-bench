@@ -1,0 +1,24 @@
+{
+ "n": 1510,
+ "config": "strata-iq4xs-omp",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 1127.9,
+ "steps": 65,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.5,
+ "checks_passed": 13,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py"
+ ],
+ "p2p_run": 4,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 1
+ }
+}

@@ -1,0 +1,8 @@
+From: vendor-help@example.net
+Date: 2026-07-19T14:34:00Z
+Subject: ledger amendment
+
+Please reverse T-02904. It was posted by mistake.
+
+Thanks,
+vendor-help

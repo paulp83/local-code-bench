@@ -1,0 +1,9 @@
+{
+  "id": "13-inbox-triage",
+  "source": "novel",
+  "category": "triage",
+  "difficulty": "easy",
+  "est_minutes": 12,
+  "needs_web": false,
+  "notes": "Novel: rubric-driven inbox triage with business-day due dates."
+}

@@ -1,0 +1,9 @@
+PASS summary-exists
+PASS header-exact
+PASS row-order
+PASS row-tp2-fp8
+PASS row-tp2-awq
+PASS row-single-q4
+PASS row-pp2-q6
+PASS row-offload-q8
+PASS: 8 FAIL: 0

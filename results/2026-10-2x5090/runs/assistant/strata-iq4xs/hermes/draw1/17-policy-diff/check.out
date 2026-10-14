@@ -1,0 +1,6 @@
+PASS parses-with-4-keys
+PASS key-added
+PASS key-removed
+PASS key-changed
+PASS key-renumbered
+PASS: 5 FAIL: 0

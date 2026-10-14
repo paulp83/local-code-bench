@@ -1,0 +1,401 @@
+pr,model,serving,harness,effort,draw,task_text,solved,partial,right_files,regressions,minutes,steps,exit_status,config_tag
+1172,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,3.6,12,Submitted,glm-iq4xs
+1172,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,3.0,18,Submitted,glm-avar6
+1172,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,27.4,54,Submitted,glm-avar6-xhigh
+1172,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,6.7,29,Submitted,glm-avar6-omp
+1172,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,23.2,46,Submitted,glm-avar6-omp-xhigh
+1172,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,9.4,20,Submitted,strata-iq4xs
+1172,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,2.3,15,Submitted,strata-iq4xs
+1172,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,8.3,30,Submitted,strata-iq4xs-xhigh
+1172,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,6.0,23,Submitted,strata-iq4xs-omp
+1172,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,13.0,31,Submitted,strata-iq4xs-omp-xhigh
+1172,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,4.8,17,Submitted,strata-q4kxl
+1172,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,3.3,14,Submitted,strata-q4kxl
+1172,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,2.3,21,Submitted,thinkingcap-dualfast
+1172,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,1.6,27,Submitted,thinkingcap-dualfast
+1172,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,4.1,22,Submitted,thinkingcap-dualfast-xhigh
+1172,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,5.7,44,Submitted,thinkingcap-dualfast-omp
+1172,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,3.4,29,Submitted,thinkingcap-dualfast-omp
+1172,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,4.9,29,Submitted,thinkingcap-dualfast-omp-xhigh
+1174,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.6,1.0,0,11.3,23,Submitted,glm-iq4xs
+1174,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.6,1.0,0,9.3,20,Submitted,glm-avar6
+1174,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,0,0.8,1.0,0,34.0,68,Submitted,glm-avar6-xhigh
+1174,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.8,1.0,0,7.0,15,Submitted,glm-avar6-omp
+1174,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.6,1.0,0,41.9,64,Submitted,glm-avar6-omp-xhigh
+1174,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,0,0.8,1.0,0,10.1,21,Submitted,strata-iq4xs
+1174,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,0,0.8,1.0,0,8.8,32,Submitted,strata-iq4xs
+1174,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,0,0.6,1.0,0,22.1,60,Submitted,strata-iq4xs-xhigh
+1174,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,0,0.6,1.0,0,7.4,22,Submitted,strata-iq4xs-omp
+1174,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,0,0.8,1.0,0,10.7,29,Submitted,strata-iq4xs-omp-xhigh
+1174,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.6,1.0,0,13.4,30,Submitted,strata-q4kxl
+1174,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,0,0.6,1.0,0,7.2,28,Submitted,strata-q4kxl
+1174,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.6,1.0,0,2.5,32,Submitted,thinkingcap-dualfast
+1174,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.8,1.0,0,2.3,24,Submitted,thinkingcap-dualfast
+1174,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.8,1.0,0,7.8,48,Submitted,thinkingcap-dualfast-xhigh
+1174,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,0,0.8,1.0,0,4.3,32,Submitted,thinkingcap-dualfast-omp
+1174,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.6,1.0,0,9.9,52,Submitted,thinkingcap-dualfast-omp
+1174,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.8,1.0,0,5.9,27,Submitted,thinkingcap-dualfast-omp-xhigh
+1203,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,6.9,30,Submitted,glm-iq4xs
+1203,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,8.6,45,Submitted,glm-avar6
+1203,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,30.5,74,Submitted,glm-avar6-xhigh
+1203,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,6.1,29,Submitted,glm-avar6-omp
+1203,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,25.6,69,Submitted,glm-avar6-omp-xhigh
+1203,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,15.9,44,Submitted,strata-iq4xs
+1203,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,5.0,62,Submitted,strata-iq4xs
+1203,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,14.3,52,Submitted,strata-iq4xs-xhigh
+1203,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,6.0,33,Submitted,strata-iq4xs-omp
+1203,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,14.5,51,Submitted,strata-iq4xs-omp-xhigh
+1203,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,3.4,48,Submitted,strata-q4kxl
+1203,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,11.9,37,Submitted,strata-q4kxl
+1203,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,2.1,33,Submitted,thinkingcap-dualfast
+1203,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,1.6,29,Submitted,thinkingcap-dualfast
+1203,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,4.7,54,Submitted,thinkingcap-dualfast-xhigh
+1203,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,3.7,52,Submitted,thinkingcap-dualfast-omp
+1203,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,4.6,67,Submitted,thinkingcap-dualfast-omp
+1203,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,6.1,70,Submitted,thinkingcap-dualfast-omp-xhigh
+1204,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,1.0,0,33.3,63,Submitted,glm-iq4xs
+1204,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,28.5,93,Submitted,glm-avar6
+1204,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,41.6,100,LimitsExceeded,glm-avar6-xhigh
+1204,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,58.3,118,Submitted,glm-avar6-omp
+1204,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,60.1,121,omp-rc-1,glm-avar6-omp-xhigh
+1204,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,0,0.333,1.0,0,20.6,58,Submitted,strata-iq4xs
+1204,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,13.1,59,Submitted,strata-iq4xs
+1204,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,43.6,100,LimitsExceeded,strata-iq4xs-xhigh
+1204,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,60.1,149,omp-rc-1,strata-iq4xs-omp
+1204,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,49.8,143,Submitted,strata-iq4xs-omp-xhigh
+1204,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.333,1.0,0,28.0,80,Submitted,strata-q4kxl
+1204,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,0,0.333,1.0,0,21.0,57,Submitted,strata-q4kxl
+1204,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.333,1.0,0,9.2,48,Submitted,thinkingcap-dualfast
+1204,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.333,1.0,0,8.8,56,Submitted,thinkingcap-dualfast
+1204,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.333,1.0,0,16.5,100,LimitsExceeded,thinkingcap-dualfast-xhigh
+1204,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,12.7,101,Submitted,thinkingcap-dualfast-omp
+1204,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.333,1.0,0,30.0,140,Submitted,thinkingcap-dualfast-omp
+1204,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.0,1.0,0,36.4,244,Submitted,thinkingcap-dualfast-omp-xhigh
+1209,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,18.3,30,Submitted,glm-iq4xs
+1209,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,0,32.4,67,Submitted,glm-iq4xs
+1209,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,0.667,0,29.0,69,Submitted,glm-avar6
+1209,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,0,18.5,59,Submitted,glm-avar6
+1209,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,62.2,79,TimeExceeded,glm-avar6-xhigh
+1209,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,0.333,0,16.0,52,Submitted,glm-avar6-omp
+1209,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,60.1,109,Submitted,glm-avar6-omp-xhigh
+1209,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,12.9,42,Submitted,strata-iq4xs
+1209,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,0.667,0,9.4,41,Submitted,strata-iq4xs
+1209,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,0,21.0,80,Submitted,strata-iq4xs
+1209,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,39.5,85,Submitted,strata-iq4xs-xhigh
+1209,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,33.1,69,Submitted,strata-iq4xs-omp
+1209,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,25.8,62,Submitted,strata-iq4xs-omp-xhigh
+1209,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,16.3,42,Submitted,strata-q4kxl
+1209,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,0.667,0,10.8,34,Submitted,strata-q4kxl
+1209,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,0,19.0,45,Submitted,strata-q4kxl
+1209,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,0.667,0,4.1,35,Submitted,thinkingcap-dualfast
+1209,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,0.333,0,4.4,36,Submitted,thinkingcap-dualfast
+1209,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,0,4.0,45,Submitted,thinkingcap-dualfast
+1209,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,0.333,0,8.8,60,Submitted,thinkingcap-dualfast-xhigh
+1209,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,0.667,0,8.1,83,Submitted,thinkingcap-dualfast-omp
+1209,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,0.667,0,7.0,74,Submitted,thinkingcap-dualfast-omp
+1209,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,0.667,0,13.5,101,Submitted,thinkingcap-dualfast-omp-xhigh
+1307,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,2.4,13,Submitted,glm-iq4xs
+1307,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,6.2,19,Submitted,glm-avar6
+1307,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,0,0.0,0.0,0,61.0,91,TimeExceeded,glm-avar6-xhigh
+1307,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,6.3,28,Submitted,glm-avar6-omp
+1307,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,21.4,38,Submitted,glm-avar6-omp-xhigh
+1307,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,7.2,18,Submitted,strata-iq4xs
+1307,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,2.1,17,Submitted,strata-iq4xs
+1307,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,16.6,54,Submitted,strata-iq4xs-xhigh
+1307,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,6.2,30,Submitted,strata-iq4xs-omp
+1307,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,9.3,24,Submitted,strata-iq4xs-omp-xhigh
+1307,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,6.1,16,Submitted,strata-q4kxl
+1307,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,1.9,11,Submitted,strata-q4kxl
+1307,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,2.7,21,Submitted,thinkingcap-dualfast
+1307,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,5.5,35,Submitted,thinkingcap-dualfast
+1307,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,2.9,28,Submitted,thinkingcap-dualfast-xhigh
+1307,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,9.5,39,Submitted,thinkingcap-dualfast-omp
+1307,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,9.0,21,Submitted,thinkingcap-dualfast-omp
+1307,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,6.1,25,Submitted,thinkingcap-dualfast-omp-xhigh
+1464,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,28.0,62,Submitted,glm-iq4xs
+1464,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,15.6,46,Submitted,glm-avar6
+1464,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,60.1,69,TimeExceeded,glm-avar6-xhigh
+1464,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,13.7,55,Submitted,glm-avar6-omp
+1464,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,38.3,78,Submitted,glm-avar6-omp-xhigh
+1464,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,19.3,44,Submitted,strata-iq4xs
+1464,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,17.8,54,Submitted,strata-iq4xs
+1464,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,33.0,78,Submitted,strata-iq4xs-xhigh
+1464,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,23.2,49,Submitted,strata-iq4xs-omp
+1464,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,20.5,60,Submitted,strata-iq4xs-omp-xhigh
+1464,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,7.6,36,Submitted,strata-q4kxl
+1464,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,6.1,37,Submitted,strata-q4kxl
+1464,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,7.2,46,Submitted,thinkingcap-dualfast
+1464,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,9.4,47,Submitted,thinkingcap-dualfast
+1464,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,11.0,63,Submitted,thinkingcap-dualfast-xhigh
+1464,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,6.7,70,Submitted,thinkingcap-dualfast-omp
+1464,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,5.3,43,Submitted,thinkingcap-dualfast-omp
+1464,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,5.2,41,Submitted,thinkingcap-dualfast-omp-xhigh
+1470,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,6.1,15,Submitted,glm-iq4xs
+1470,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,8.0,33,Submitted,glm-avar6
+1470,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,30.9,73,Submitted,glm-avar6-xhigh
+1470,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,4.5,16,Submitted,glm-avar6-omp
+1470,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,29.4,50,Submitted,glm-avar6-omp-xhigh
+1470,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,4.5,22,Submitted,strata-iq4xs
+1470,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,2.4,16,Submitted,strata-iq4xs
+1470,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,20.4,53,Submitted,strata-iq4xs-xhigh
+1470,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,6.6,23,Submitted,strata-iq4xs-omp
+1470,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,6.5,20,Submitted,strata-iq4xs-omp-xhigh
+1470,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,3.7,25,Submitted,strata-q4kxl
+1470,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,4.7,25,Submitted,strata-q4kxl
+1470,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,1.6,27,Submitted,thinkingcap-dualfast
+1470,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,1.2,20,Submitted,thinkingcap-dualfast
+1470,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,4.7,28,Submitted,thinkingcap-dualfast-xhigh
+1470,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,2.3,32,Submitted,thinkingcap-dualfast-omp
+1470,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,2.8,33,Submitted,thinkingcap-dualfast-omp
+1470,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,4.0,35,Submitted,thinkingcap-dualfast-omp-xhigh
+1510,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.5,1.0,0,25.9,51,Submitted,glm-iq4xs
+1510,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,1.0,0,23.3,69,Submitted,glm-avar6
+1510,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,0,0.5,1.0,0,42.3,100,LimitsExceeded,glm-avar6-xhigh
+1510,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.5,1.0,0,25.2,80,Submitted,glm-avar6-omp
+1510,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.0,1.0,0,60.1,108,omp-rc-1,glm-avar6-omp-xhigh
+1510,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,0,0.0,1.0,0,3.4,44,Submitted,strata-iq4xs
+1510,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,0,0.0,1.0,0,2.7,38,Submitted,strata-iq4xs
+1510,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,0,0.0,1.0,0,36.0,80,Submitted,strata-iq4xs-xhigh
+1510,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,0,0.5,1.0,0,18.8,65,Submitted,strata-iq4xs-omp
+1510,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,0,0.0,1.0,0,19.7,43,Submitted,strata-iq4xs-omp-xhigh
+1510,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.0,1.0,0,9.3,40,Submitted,strata-q4kxl
+1510,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,0,0.0,1.0,0,7.6,46,Submitted,strata-q4kxl
+1510,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.0,1.0,0,4.9,47,Submitted,thinkingcap-dualfast
+1510,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.5,1.0,0,4.0,41,Submitted,thinkingcap-dualfast
+1510,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.5,1.0,0,6.2,56,Submitted,thinkingcap-dualfast-xhigh
+1510,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,0,0.5,1.0,0,9.6,75,Submitted,thinkingcap-dualfast-omp
+1510,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.5,1.0,0,10.9,106,Submitted,thinkingcap-dualfast-omp
+1510,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.5,1.0,0,12.5,93,Submitted,thinkingcap-dualfast-omp-xhigh
+1518,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.4,1.0,0,1.9,9,Submitted,glm-iq4xs
+1518,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.4,1.0,0,2.8,11,Submitted,glm-iq4xs
+1518,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.4,1.0,0,3.3,14,Submitted,glm-avar6
+1518,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.4,1.0,0,2.2,10,Submitted,glm-avar6
+1518,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,0,0.4,1.0,0,20.1,54,Submitted,glm-avar6-xhigh
+1518,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.4,1.0,0,3.4,14,Submitted,glm-avar6-omp
+1518,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,19.9,46,Submitted,glm-avar6-omp-xhigh
+1518,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,1.9,11,Submitted,strata-iq4xs
+1518,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,0,0.4,1.0,0,1.5,16,Submitted,strata-iq4xs
+1518,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.4,1.0,0,0.4,10,Submitted,strata-iq4xs
+1518,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,13.0,46,Submitted,strata-iq4xs-xhigh
+1518,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,11.0,31,Submitted,strata-iq4xs-omp
+1518,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,0,0.4,1.0,0,7.1,32,Submitted,strata-iq4xs-omp-xhigh
+1518,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.4,1.0,0,1.4,9,Submitted,strata-q4kxl
+1518,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,3.7,11,Submitted,strata-q4kxl
+1518,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.4,1.0,0,2.9,13,Submitted,strata-q4kxl
+1518,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,2.0,25,Submitted,thinkingcap-dualfast
+1518,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,0.8,20,Submitted,thinkingcap-dualfast
+1518,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.4,1.0,0,2.7,25,Submitted,thinkingcap-dualfast
+1518,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,6.7,41,Submitted,thinkingcap-dualfast-xhigh
+1518,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,4.9,38,Submitted,thinkingcap-dualfast-omp
+1518,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,6.2,44,Submitted,thinkingcap-dualfast-omp
+1518,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,5.6,32,Submitted,thinkingcap-dualfast-omp-xhigh
+1555,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.5,1.0,0,17.4,42,Submitted,glm-iq4xs
+1555,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.333,0,24.7,42,Submitted,glm-iq4xs
+1555,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.5,1.0,0,13.6,44,Submitted,glm-avar6
+1555,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.333,0,38.6,99,Submitted,glm-avar6
+1555,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,60.7,100,LimitsExceeded,glm-avar6-xhigh
+1555,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.5,0.667,0,12.0,34,Submitted,glm-avar6-omp
+1555,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,0.667,0,55.0,107,Submitted,glm-avar6-omp-xhigh
+1555,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,0,0.5,0.667,0,12.7,36,Submitted,strata-iq4xs
+1555,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,0.667,0,10.9,47,Submitted,strata-iq4xs
+1555,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,2,38.4,100,LimitsExceeded,strata-iq4xs
+1555,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,0.667,0,31.5,77,Submitted,strata-iq4xs-xhigh
+1555,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,0,0.5,1.0,0,13.4,51,Submitted,strata-iq4xs-omp
+1555,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,0,0.5,0.667,0,21.9,59,Submitted,strata-iq4xs-omp-xhigh
+1555,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.5,0.667,0,23.4,48,Submitted,strata-q4kxl
+1555,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,0,0.5,0.667,0,15.0,39,Submitted,strata-q4kxl
+1555,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.333,0,11.1,28,Submitted,strata-q4kxl
+1555,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.5,1.0,0,5.4,51,Submitted,thinkingcap-dualfast
+1555,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.5,0.667,0,4.4,34,Submitted,thinkingcap-dualfast
+1555,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.0,0.333,0,7.5,59,Submitted,thinkingcap-dualfast
+1555,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.5,0.667,0,6.6,46,Submitted,thinkingcap-dualfast-xhigh
+1555,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,0,0.5,1.0,0,7.3,53,Submitted,thinkingcap-dualfast-omp
+1555,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.5,0.667,0,9.1,82,Submitted,thinkingcap-dualfast-omp
+1555,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.5,0.667,0,9.9,79,Submitted,thinkingcap-dualfast-omp-xhigh
+1556,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,1.0,0,13.2,39,Submitted,glm-iq4xs
+1556,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,1.0,0,18.9,69,Submitted,glm-avar6
+1556,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,0,0.0,1.0,0,51.4,89,Submitted,glm-avar6-xhigh
+1556,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.0,1.0,0,14.7,58,Submitted,glm-avar6-omp
+1556,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.0,1.0,0,45.3,88,Submitted,glm-avar6-omp-xhigh
+1556,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,25.6,55,Submitted,strata-iq4xs
+1556,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,0,0.0,1.0,0,5.1,31,Submitted,strata-iq4xs
+1556,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,0,0.0,1.0,0,25.7,73,Submitted,strata-iq4xs-xhigh
+1556,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,0,0.0,1.0,0,13.2,49,Submitted,strata-iq4xs-omp
+1556,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,0,0.0,1.0,0,21.4,50,Submitted,strata-iq4xs-omp-xhigh
+1556,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.0,1.0,0,20.4,45,Submitted,strata-q4kxl
+1556,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,0,0.0,1.0,0,12.5,37,Submitted,strata-q4kxl
+1556,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.0,1.0,0,5.1,53,Submitted,thinkingcap-dualfast
+1556,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.0,1.0,0,3.3,39,Submitted,thinkingcap-dualfast
+1556,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.0,1.0,0,4.5,35,Submitted,thinkingcap-dualfast-xhigh
+1556,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,0,0.0,1.0,0,9.4,49,Submitted,thinkingcap-dualfast-omp
+1556,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.0,1.0,0,7.5,65,Submitted,thinkingcap-dualfast-omp
+1556,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.0,1.0,0,16.8,104,Submitted,thinkingcap-dualfast-omp-xhigh
+1564,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,6.5,13,Submitted,glm-iq4xs
+1564,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.333,1.0,0,7.0,20,Submitted,glm-iq4xs
+1564,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,5.8,20,Submitted,glm-avar6
+1564,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.333,1.0,0,7.1,17,Submitted,glm-avar6
+1564,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,60.4,88,TimeExceeded,glm-avar6-xhigh
+1564,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,11.7,40,Submitted,glm-avar6-omp
+1564,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,1.0,0,41.5,62,Submitted,glm-avar6-omp-xhigh
+1564,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,3.1,21,Submitted,strata-iq4xs
+1564,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,6.8,30,Submitted,strata-iq4xs
+1564,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.333,1.0,0,5.7,33,Submitted,strata-iq4xs
+1564,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,19.7,51,Submitted,strata-iq4xs-xhigh
+1564,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,10.0,56,Submitted,strata-iq4xs-omp
+1564,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,14.4,54,Submitted,strata-iq4xs-omp-xhigh
+1564,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,11.4,28,Submitted,strata-q4kxl
+1564,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,6.1,20,Submitted,strata-q4kxl
+1564,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.333,1.0,0,12.5,27,Submitted,strata-q4kxl
+1564,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,0.7,13,Submitted,thinkingcap-dualfast
+1564,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,1.4,20,Submitted,thinkingcap-dualfast
+1564,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.333,1.0,0,1.5,25,Submitted,thinkingcap-dualfast
+1564,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,5.7,45,Submitted,thinkingcap-dualfast-xhigh
+1564,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,6.4,43,Submitted,thinkingcap-dualfast-omp
+1564,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,6.3,52,Submitted,thinkingcap-dualfast-omp
+1564,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,10.3,110,Submitted,thinkingcap-dualfast-omp-xhigh
+1571,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,8.2,23,Submitted,glm-iq4xs
+1571,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,11.4,30,Submitted,glm-iq4xs
+1571,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,5.0,23,Submitted,glm-avar6
+1571,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,12.7,43,ContextWindowExceededError,glm-avar6
+1571,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,0,0.875,1.0,0,50.8,66,Submitted,glm-avar6-xhigh
+1571,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,7.7,16,Submitted,glm-avar6-omp
+1571,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.875,1.0,0,46.0,52,Submitted,glm-avar6-omp-xhigh
+1571,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,12.0,32,Submitted,strata-iq4xs
+1571,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,12.0,39,Submitted,strata-iq4xs
+1571,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,21.1,57,Submitted,strata-iq4xs
+1571,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,25.9,65,Submitted,strata-iq4xs-xhigh
+1571,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,5.9,30,Submitted,strata-iq4xs-omp
+1571,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,12.2,35,Submitted,strata-iq4xs-omp-xhigh
+1571,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,7.5,29,Submitted,strata-q4kxl
+1571,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,6.2,21,Submitted,strata-q4kxl
+1571,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,9.2,37,Submitted,strata-q4kxl
+1571,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,5.4,34,Submitted,thinkingcap-dualfast
+1571,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.5,1.0,0,3.4,37,Submitted,thinkingcap-dualfast
+1571,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,6.5,57,Submitted,thinkingcap-dualfast
+1571,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,7.8,61,Submitted,thinkingcap-dualfast-xhigh
+1571,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,17.0,38,Submitted,thinkingcap-dualfast-omp
+1571,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.875,1.0,0,11.3,89,Submitted,thinkingcap-dualfast-omp
+1571,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.625,1.0,0,13.8,96,Submitted,thinkingcap-dualfast-omp-xhigh
+1573,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,1.0,0,7.7,18,Submitted,glm-iq4xs
+1573,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,13.1,40,Submitted,glm-avar6
+1573,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,60.1,91,TimeExceeded,glm-avar6-xhigh
+1573,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.0,1.0,0,8.1,22,Submitted,glm-avar6-omp
+1573,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.0,1.0,0,32.7,75,Submitted,glm-avar6-omp-xhigh
+1573,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,24.6,45,Submitted,strata-iq4xs
+1573,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,18.9,51,Submitted,strata-iq4xs
+1573,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,30.7,52,Submitted,strata-iq4xs-xhigh
+1573,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,10.7,39,Submitted,strata-iq4xs-omp
+1573,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,0,0.0,1.0,0,15.4,44,Submitted,strata-iq4xs-omp-xhigh
+1573,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.0,0.5,0,20.4,37,Submitted,strata-q4kxl
+1573,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,0.5,0,18.2,39,Submitted,strata-q4kxl
+1573,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.0,0.5,0,6.3,28,Submitted,thinkingcap-dualfast
+1573,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.0,0.5,0,13.7,54,Submitted,thinkingcap-dualfast
+1573,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.0,1.0,0,14.7,56,Submitted,thinkingcap-dualfast-xhigh
+1573,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,0,0.0,0.5,0,18.2,77,Submitted,thinkingcap-dualfast-omp
+1573,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.0,1.0,0,10.9,62,Submitted,thinkingcap-dualfast-omp
+1573,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.0,0.5,0,7.3,62,Submitted,thinkingcap-dualfast-omp-xhigh
+1588,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,0.667,0,12.7,26,Submitted,glm-iq4xs
+1588,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,1.0,0,12.1,37,Submitted,glm-avar6
+1588,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,0,0.0,1.0,0,48.6,94,Submitted,glm-avar6-xhigh
+1588,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.0,0.667,0,15.2,33,Submitted,glm-avar6-omp
+1588,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.0,0.667,0,47.5,70,Submitted,glm-avar6-omp-xhigh
+1588,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,44.0,100,LimitsExceeded,strata-iq4xs
+1588,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,0,0.0,0.667,0,4.9,31,Submitted,strata-iq4xs
+1588,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,23.3,70,Submitted,strata-iq4xs-xhigh
+1588,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,0,0.5,1.0,0,15.3,65,Submitted,strata-iq4xs-omp
+1588,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,21.2,69,Submitted,strata-iq4xs-omp-xhigh
+1588,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,0,0.0,0.667,0,4.8,32,Submitted,strata-q4kxl
+1588,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,0,0.0,0.667,0,3.3,32,Submitted,strata-q4kxl
+1588,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.0,0.667,0,5.6,38,Submitted,thinkingcap-dualfast
+1588,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.0,0.667,0,4.9,51,Submitted,thinkingcap-dualfast
+1588,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.0,0.667,0,7.6,48,Submitted,thinkingcap-dualfast-xhigh
+1588,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,0.667,0,8.8,59,Submitted,thinkingcap-dualfast-omp
+1588,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,0.667,0,6.1,46,Submitted,thinkingcap-dualfast-omp
+1588,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,0.667,0,6.8,59,Submitted,thinkingcap-dualfast-omp-xhigh
+1608,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,8.2,15,Submitted,glm-iq4xs
+1608,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,8.6,28,Submitted,glm-avar6
+1608,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,21.6,46,Submitted,glm-avar6-xhigh
+1608,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.0,0.0,0,19.5,41,Submitted,glm-avar6-omp
+1608,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.0,0.0,0,60.1,15,omp-rc-1,glm-avar6-omp-xhigh
+1608,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,0.8,15,Submitted,strata-iq4xs
+1608,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,0.8,15,Submitted,strata-iq4xs
+1608,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,49.3,65,Submitted,strata-iq4xs-xhigh
+1608,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,0,0.0,0.0,0,8.1,26,Submitted,strata-iq4xs-omp
+1608,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,8.8,18,Submitted,strata-iq4xs-omp-xhigh
+1608,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,1.5,14,Submitted,strata-q4kxl
+1608,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,7.3,29,Submitted,strata-q4kxl
+1608,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,1.0,0,0.6,11,Submitted,thinkingcap-dualfast
+1608,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,1.0,0,0.8,13,Submitted,thinkingcap-dualfast
+1608,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,1.0,16,Submitted,thinkingcap-dualfast-xhigh
+1608,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,0,0.0,0.0,0,11.3,30,Submitted,thinkingcap-dualfast-omp
+1608,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,1.0,0,8.4,34,Submitted,thinkingcap-dualfast-omp
+1608,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,14.8,58,Submitted,thinkingcap-dualfast-omp-xhigh
+1610,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,0.5,0,21.2,45,Submitted,glm-iq4xs
+1610,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,14.3,30,Submitted,glm-iq4xs
+1610,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,0.5,0,19.1,32,Submitted,glm-avar6
+1610,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,13.5,43,Submitted,glm-avar6
+1610,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,0.5,0,60.2,79,TimeExceeded,glm-avar6-xhigh
+1610,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,0,0.0,0.5,0,18.4,47,Submitted,glm-avar6-omp
+1610,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.0,0.5,0,60.1,80,omp-rc-1,glm-avar6-omp-xhigh
+1610,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,0.5,0,11.0,34,Submitted,strata-iq4xs
+1610,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,0.5,0,4.8,42,Submitted,strata-iq4xs
+1610,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,5.0,34,Submitted,strata-iq4xs
+1610,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,16.8,75,Submitted,strata-iq4xs-xhigh
+1610,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,21.6,68,Submitted,strata-iq4xs-omp
+1610,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,1.0,0,18.5,52,Submitted,strata-iq4xs-omp-xhigh
+1610,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,0.5,0,17.6,48,Submitted,strata-q4kxl
+1610,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,0,0.0,0.5,0,5.0,39,Submitted,strata-q4kxl
+1610,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,4.6,39,Submitted,strata-q4kxl
+1610,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,0.5,0,5.9,45,Submitted,thinkingcap-dualfast
+1610,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,0.5,0,11.7,48,Submitted,thinkingcap-dualfast
+1610,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.0,0.5,0,4.7,45,Submitted,thinkingcap-dualfast
+1610,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,0.5,0,9.3,66,Submitted,thinkingcap-dualfast-xhigh
+1610,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,12.0,75,Submitted,thinkingcap-dualfast-omp
+1610,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,0.5,0,9.2,60,Submitted,thinkingcap-dualfast-omp
+1610,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,0,0.0,0.5,0,13.0,69,Submitted,thinkingcap-dualfast-omp-xhigh
+1612,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,38.4,40,Submitted,glm-iq4xs
+1612,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,1.0,0,20.4,31,Submitted,glm-iq4xs
+1612,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,0,0.0,1.0,0,20.1,42,Submitted,glm-avar6
+1612,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,1.0,0,22.4,55,Submitted,glm-avar6
+1612,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,1.0,0,61.0,59,TimeExceeded,glm-avar6-xhigh
+1612,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,1.0,0,31.3,74,Submitted,glm-avar6-omp
+1612,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,0,0.0,1.0,0,51.4,86,Submitted,glm-avar6-omp-xhigh
+1612,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,12.1,49,Submitted,strata-iq4xs
+1612,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,11.7,56,Submitted,strata-iq4xs
+1612,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,1.0,0,7.6,39,Submitted,strata-iq4xs
+1612,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,1.0,0,25.3,85,Submitted,strata-iq4xs-xhigh
+1612,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,1.0,0,24.7,61,Submitted,strata-iq4xs-omp
+1612,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,0,0.0,1.0,0,24.1,55,Submitted,strata-iq4xs-omp-xhigh
+1612,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,1.0,0,21.7,43,Submitted,strata-q4kxl
+1612,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,1.0,0,14.3,54,Submitted,strata-q4kxl
+1612,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,1.0,0,8.9,35,Submitted,strata-q4kxl
+1612,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,0,0.0,1.0,0,7.9,53,Submitted,thinkingcap-dualfast
+1612,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,0,0.0,1.0,0,7.4,48,Submitted,thinkingcap-dualfast
+1612,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.0,1.0,0,8.8,45,Submitted,thinkingcap-dualfast
+1612,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,0,0.0,1.0,0,9.6,58,Submitted,thinkingcap-dualfast-xhigh
+1612,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,1.0,0,15.6,82,Submitted,thinkingcap-dualfast-omp
+1612,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,0,0.0,1.0,0,10.8,63,Submitted,thinkingcap-dualfast-omp
+1612,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,1.0,0,17.0,92,Submitted,thinkingcap-dualfast-omp-xhigh
+1621,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,0.333,0,43.8,76,Submitted,glm-iq4xs
+1621,GLM-5.3-Flash,"UD-IQ4_XS, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.333,0,20.7,27,Submitted,glm-iq4xs
+1621,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,final,1,1.0,1.0,0,59.6,90,Submitted,glm-avar6
+1621,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,0,24.0,55,Submitted,glm-avar6
+1621,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",mini-swe-agent,max,1,final,1,1.0,0.333,0,55.2,100,LimitsExceeded,glm-avar6-xhigh
+1621,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,low,1,final,1,1.0,0.333,0,22.0,42,Submitted,glm-avar6-omp
+1621,GLM-5.3-Flash,"avar6 Q2_K-Q3_K, llama.cpp moe-cache",omp,max,1,final,1,1.0,0.667,0,50.6,82,Submitted,glm-avar6-omp-xhigh
+1621,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,final,1,1.0,0.667,0,20.2,63,Submitted,strata-iq4xs
+1621,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,2,final,1,1.0,0.667,0,24.6,55,Submitted,strata-iq4xs
+1621,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,1.0,0,24.0,61,Submitted,strata-iq4xs
+1621,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",mini-swe-agent,xhigh,1,final,1,1.0,0.667,0,20.6,59,Submitted,strata-iq4xs-xhigh
+1621,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,low,1,final,1,1.0,0.667,0,11.7,43,Submitted,strata-iq4xs-omp
+1621,Qwen3.8-Flash-Next,"UD-IQ4_XS, Strata",omp,xhigh,1,final,1,1.0,0.667,0,13.4,43,Submitted,strata-iq4xs-omp-xhigh
+1621,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,final,1,1.0,0.333,0,18.6,54,Submitted,strata-q4kxl
+1621,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,2,final,1,1.0,0.333,0,18.8,41,Submitted,strata-q4kxl
+1621,Qwen3.8-Flash-Next,"UD-Q4_K_XL, Strata",mini-swe-agent,low,1,original (before Interface section),0,0.0,0.667,0,16.2,50,Submitted,strata-q4kxl
+1621,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,final,1,1.0,0.333,0,16.6,50,Submitted,thinkingcap-dualfast
+1621,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,2,final,1,1.0,0.333,0,9.2,39,Submitted,thinkingcap-dualfast
+1621,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,low,1,original (before Interface section),0,0.0,0.333,0,12.5,38,Submitted,thinkingcap-dualfast
+1621,ThinkingCap-Qwen3.8-27B,sgl dual-fast,mini-swe-agent,xhigh,1,final,1,1.0,0.667,0,28.3,69,Submitted,thinkingcap-dualfast-xhigh
+1621,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,1,final,1,1.0,0.667,0,13.1,62,Submitted,thinkingcap-dualfast-omp
+1621,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,low,2,final,1,1.0,0.667,0,11.1,52,Submitted,thinkingcap-dualfast-omp
+1621,ThinkingCap-Qwen3.8-27B,sgl dual-fast,omp,xhigh,1,final,1,1.0,0.667,0,17.1,74,Submitted,thinkingcap-dualfast-omp-xhigh

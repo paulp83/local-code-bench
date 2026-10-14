@@ -1,0 +1,32 @@
+[
+  {
+    "slug": "glm53-flash-q4",
+    "repo": "zai/GLM-5.3-Flash",
+    "quant": "UD-Q4_K_XL"
+  },
+  {
+    "slug": "glm53-flash-q6",
+    "repo": "zai/GLM-5.3-Flash",
+    "quant": "Q6_K"
+  },
+  {
+    "slug": "qfn-fp8",
+    "repo": "qwen/Qwen3.8-Flash-Next",
+    "quant": "fp8"
+  },
+  {
+    "slug": "qfn-awq",
+    "repo": "qwen/Qwen3.8-Flash-Next",
+    "quant": "awq"
+  },
+  {
+    "slug": "qwen-27b-q4",
+    "repo": "qwen/Qwen3.8-27B",
+    "quant": "Q4_K_M"
+  },
+  {
+    "slug": "llama-8b-q8",
+    "repo": "meta/Llama-4-8B",
+    "quant": "Q8_0"
+  }
+]

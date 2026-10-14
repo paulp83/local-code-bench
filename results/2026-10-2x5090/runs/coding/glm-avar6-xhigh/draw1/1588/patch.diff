@@ -1,0 +1,258 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index e6560a8..df45f27 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -320,7 +320,7 @@ For **entirely new models** under validation (e.g. "let's try MiniMax-M2.7"): ke
+ 
+ **Long-running tests: redirect full output to a log file — NEVER pipe through `tail`/`head`/`grep`.** A pipe buffers until the process exits, so a `--full` quality run piped to `tail -12` is a ~2 h black box: no live `[N/M]` progress, no partial scores, and an interrupt leaves nothing readable (benchlocal also writes its results JSON only at completion — noonghunna/benchlocal-cli#82 tracks scenario-level resume). Do `bash scripts/quality-test.sh --full ... > /path/run.log 2>&1` (or `| tee`) and summarize from the file; `tail -f` the file for live progress. Learned 2026-07-11 on a template A/B.
+ 
+-**Model resolution (all serving tests): they auto-detect — don't hand-pass `MODEL=` out of superstition.** Every serving script resolves the served-model id from the endpoint when `MODEL` is unset: `verify.sh`, `verify-full.sh`, `verify-stress.sh`, `bench.sh` (via `preflight_autodetect_model`), plus `quality-test.sh`, `rebench-full.sh`, `bench-agentic.sh` and `switch.sh`'s ready probe — all through `club_served_model_id` (`scripts/lib/served-model.sh`). It asks **`GET /v1/model` first and trusts only a genuine model card**, because TabbyAPI (exllamav3) answers `/v1/models` with *every folder in its model directory* — a report resolved a folder called `modules` ([#1360](https://github.com/noonghunna/club-3090/issues/1360)); vLLM / llama.cpp / SGLang 404 there and get `data[0].id` exactly as before. `soak-test.sh`, `concurrency-probe.sh` and `spec-sweep.sh` still read `data[0].id` inline — pass `MODEL=` to them on TabbyAPI. The endpoint itself is found the same way for every engine, including TabbyAPI's internal port 5000 (`club_engine_port_lines` in `scripts/lib/club-containers.sh`; 5000 and 8080 count only with evidence of an engine — ours by name, or an engine image — since unrelated apps use them too: SearXNG on 8088→8080 used to be picked as the inference container, [#1584](https://github.com/noonghunna/club-3090/issues/1584)). With `URL=` set, the container is the one that publishes that URL here (`club_container_for_url` — soak-test.sh asks it too), and none means `CONTAINER=none` (host-only); with `CONTAINER=` set, the URL is that container's own port. Still separate pickers, not on this rule: `concurrency-probe.sh`'s name fallback, `spec-sweep.sh`, `report.sh`, and c3's `detect.py`. `bench.sh` announces it: `[autodetect] served model='…'`. An explicit `MODEL=` **always wins and is never clobbered**. The `qwen3.6-27b` literal in some of them is a last-resort fallback, and since [#1330](https://github.com/noonghunna/club-3090/issues/1330) it is **refused exactly where it would mislead**: when the endpoint is unreachable, or when we autodetected the container ourselves and it reports no model, those four scripts stop with *"could not resolve which model to request, and guessing would be worse"* rather than 404-ing every request against a name the server never heard of. That fallback used to fire on a server that was merely still **loading**, and the result — `rc=8`, 8/8 red — read exactly like the config under test being broken. A user-supplied URL that reports no model still keeps the literal, because llama.cpp ignores the request's model field entirely. `PREFLIGHT_MODEL_WAIT_S` (default 10) bounds a short readiness wait, since mid-boot is the common case.
++**Model resolution (all serving tests): they auto-detect — don't hand-pass `MODEL=` out of superstition.** Every serving script resolves the served-model id from the endpoint when `MODEL` is unset: `verify.sh`, `verify-full.sh`, `verify-stress.sh`, `bench.sh` (via `preflight_autodetect_model`), plus `quality-test.sh`, `rebench-full.sh`, `bench-agentic.sh` and `switch.sh`'s ready probe — all through `club_served_model_id` (`scripts/lib/served-model.sh`). It asks **`GET /v1/model` first and trusts only a genuine model card**, because TabbyAPI (exllamav3) answers `/v1/models` with *every folder in its model directory* — a report resolved a folder called `modules` ([#1360](https://github.com/noonghunna/club-3090/issues/1360)); vLLM / llama.cpp / SGLang 404 there and get `data[0].id` exactly as before. `soak-test.sh`, `concurrency-probe.sh` and `spec-sweep.sh` still read `data[0].id` inline — pass `MODEL=` to them on TabbyAPI. The endpoint itself is found the same way for every engine, including TabbyAPI's internal port 5000 (`club_engine_port_lines` in `scripts/lib/club-containers.sh`; 5000 and 8080 count only with evidence of an engine — ours by name, or an engine image — since unrelated apps use them too: SearXNG on 8088→8080 used to be picked as the inference container, [#1584](https://github.com/noonghunna/club-3090/issues/1584)). With `URL=` set, the container is the one that publishes that URL here (`club_container_for_url` — soak-test.sh asks it too), and none means `CONTAINER=none` (host-only); with `CONTAINER=` set, the URL is that container's own port. Still separate pickers, not on this rule: `spec-sweep.sh`, `report.sh`, and c3's `detect.py` (`concurrency-probe.sh` resolves its container the same way, through the Python twin of `ports_serve_url` in `concurrency_probe.py` — the #1584 follow-up dropped its port-only match and its `vllm-(qwen|gemma)` name fallback, which bound a local container for a URL on another machine and reported that server's slots, GPUs, spec and KV pool as its own). `bench.sh` announces it: `[autodetect] served model='…'`. An explicit `MODEL=` **always wins and is never clobbered**. The `qwen3.6-27b` literal in some of them is a last-resort fallback, and since [#1330](https://github.com/noonghunna/club-3090/issues/1330) it is **refused exactly where it would mislead**: when the endpoint is unreachable, or when we autodetected the container ourselves and it reports no model, those four scripts stop with *"could not resolve which model to request, and guessing would be worse"* rather than 404-ing every request against a name the server never heard of. That fallback used to fire on a server that was merely still **loading**, and the result — `rc=8`, 8/8 red — read exactly like the config under test being broken. A user-supplied URL that reports no model still keeps the literal, because llama.cpp ignores the request's model field entirely. `PREFLIGHT_MODEL_WAIT_S` (default 10) bounds a short readiness wait, since mid-boot is the common case.
+ 
+ ⚠️ **Do pin `MODEL=` on multi-model endpoints** (llama-swap, or a compose registering several `--served-model-name` aliases): detection takes `data[0].id`, which may not be the alias you mean.
+ 
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 9b03501..89afec9 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -27,7 +27,9 @@
+ #   SWEEP="4 8 12 16" SLUG=vllm/minimal TPS_FLOOR=15 bash scripts/concurrency-probe.sh
+ #
+ # Env: URL (default registry-derived for qwen3.6-27b, currently :8020) · MODEL
+-#   (auto) · CONTAINER (auto for VRAM) · CONCURRENCY (default: served
++#   (auto) · CONTAINER (auto: the container serving URL on this host — none for a
++#   URL on another machine, so its slot count, GPUs, spec and KV pool are not
++#   read off an unrelated local container) · CONCURRENCY (default: served
+ #   max-num-seqs, else 2) · ROUNDS (5; --sweep defaults to 3) ·
+ #   PROMPT_TOKENS (16000) · GEN_TOKENS (256) ·
+ #   VRAM_GROWTH_MB (200) · REQ_TIMEOUT (600).
+@@ -195,11 +197,17 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# Container for VRAM, GPU label and flag introspection: the one publishing URL's port, any
+-# engine (#1537: the old `vllm-(qwen|gemma)` name heuristic never found an SGLang container, so
+-# its card listed every GPU on the host). The heuristic stays as the last resort.
++# Container for VRAM, GPU label, flag introspection and the slot count's first source: the ONE
++# serving URL on this host (#1537: by URL, not a name heuristic — the old `vllm-` / `gemma-`
++# prefix grep never found an SGLang container, so its card listed every GPU on the host).
++#
++# The match is host-aware (#1584 follow-up): the helper used to compare the port and ignore the
++# host, so URL=http://<other host>:8020 bound the container publishing :8020 HERE — and this
++# name fallback bound a second one whenever nothing matched. Both made a remote run report the
++# LOCAL server's slot count, GPU label, spec label and KV pool as its own. With nothing serving
++# the URL here, the engine at $URL answers for what it can (SGLang /get_server_info, llama.cpp
++# /props) and the container-only facts stay "unreadable" instead of another server's values.
+ CONTAINER="${CONTAINER:-$(URL="$URL" python3 "$PROBE_PY" --container-for-url 2>/dev/null || true)}"
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ # The served context: what the ENGINE reports first (SGLang server info, vLLM /v1/models, vLLM's
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index fee390d..200921b 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -24,6 +24,7 @@ import json
+ import math
+ import os
+ import re
++import socket
+ import statistics
+ import subprocess
+ import sys
+@@ -353,18 +354,162 @@ def engine_stats(container):
+     return (run, wait, run_max, wait_max, hit)
+ 
+ 
+-# ── which container, and is a drafter on (#1537) ──────────────────────────────
++# ── which container, and is a drafter on (#1537) ───────────────────────────
+ # The card's container and spec label used to come from a name heuristic (`vllm-(qwen|gemma)`) and
+ # a grep of the container's Cmd. Both lied on #1537: an SGLang container was never found (card
+ # listed every GPU on the host, spec "?"), and a vLLM compose that builds --speculative-config in
+ # its entrypoint script from SPEC_N read "spec off" with MTP n=4 running. These read the truth:
+-# the container publishing the probed URL's port, and the drafter the ENGINE says it loaded.
++# the container serving the probed URL on this host, and the drafter the ENGINE says it loaded.
++#
++# "Serving the URL" is NOT a port match (#1584 follow-up): the old regex compared the port and
++# ignored the host, so URL=http://<other host>:8020 bound the container publishing :8020 HERE and
++# a remote run reported this container's slot count, GPU label, spec label and KV pool as its own.
++# Same rule as listen-scope.sh's ports_serve_url, the one preflight's endpoint autodetect and
++# soak-test.sh ask through club_container_for_url: the mapping must be published on an address
++# the URL's host names — any of this host's addresses for 0.0.0.0 / ::, loopback for a 127.x /
++# ::1 publish, that exact address otherwise. A hostname counts by what it resolves to.
++_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
++
++
++def url_host_port(url):
++    """URL -> (host, port), the port defaulted from the scheme (80 / 443). ("", "") when the
++    URL carries a port that is not a number — nothing may be bound to such a URL."""
++    s = str(url or "").strip()
++    m = _SCHEME_RE.match(s)
++    scheme = (m.group(0)[:-3] if m else "").lower()
++    if m:
++        s = s[m.end():]
++    hostport = s.split("/", 1)[0]
++    if "@" in hostport:                      # userinfo@host:port
++        hostport = hostport.rsplit("@", 1)[1]
++    host, port = "", ""
++    if hostport.startswith("["):             # [::1]:8020
++        host, _, rest = hostport[1:].partition("]")
++        rest = rest[1:] if rest.startswith(":") else rest
++        if rest.isdigit():
++            port = rest
++    elif ":" in hostport:
++        host, port = hostport.split(":", 1)
++        if not port.isdigit():
++            return "", ""
++    else:
++        host = hostport
++    if not port:
++        port = "443" if scheme == "https" else "80"
++    return host, port
++
++
++# Resolving is not free and the probe asks once per `docker ps` line, so both are memoised: a
++# name resolves once, the rig's own addresses are read once.
++_HOST_ADDRS_CACHE = {}
++_OWN_ADDRS_CACHE = None
++
++
++def _host_addrs(host):
++    """HOST -> the addresses it names: a literal is itself, a name is whatever it resolves to.
++    ``URL=http://<this rig's hostname>:PORT`` has to count as this host, or a correct container
++    would be dropped (listen-scope.sh's _host_addrs)."""
++    h = str(host or "").strip().strip("[]").lower()
++    if not h:
++        return ()
++    if h not in _HOST_ADDRS_CACHE:
++        _HOST_ADDRS_CACHE[h] = _resolve_host_addrs(h)
++    return _HOST_ADDRS_CACHE[h]
++
++
++def _resolve_host_addrs(h):
++    """(the uncached half of _host_addrs)"""
++    if h in ("localhost", "0.0.0.0"):
++        return ("127.0.0.1", "::1")
++    if ":" in h:                             # a literal IPv6 address
++        return (h,)
++    if re.search(r"[^0-9.]", h):             # a name — resolve it
++        try:
++            infos = socket.getaddrinfo(h, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
++        except Exception:
++            return ()
++        out = []
++        for info in infos:
++            a = info[4][0]
++            if a and a not in out:
++                out.append(a)
++        return tuple(out)
++    return (h,)
++
++
++def _own_addrs():
++    """The addresses THIS host owns, for a 0.0.0.0 / :: publish: only a URL naming one of them
++    is served here. ``hostname -I`` lists every interface address (getaddrinfo on the hostname
++    can miss some); empty when both come up empty."""
++    global _OWN_ADDRS_CACHE
++    if _OWN_ADDRS_CACHE is not None:
++        return _OWN_ADDRS_CACHE
++    out = []
++    try:
++        proc = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5)
++        for a in (proc.stdout or "").split():
++            if a and a not in out:
++                out.append(a)
++    except Exception:
++        pass
++    try:
++        for info in socket.getaddrinfo(socket.gethostname(), None):
++            a = info[4][0]
++            if a and a not in out:
++                out.append(a)
++    except Exception:
++        pass
++    _OWN_ADDRS_CACHE = tuple(out)
++    return _OWN_ADDRS_CACHE
++
++
++def ports_serve_url(ports, url):
++    """True when a mapping in PORTS (a `docker ps` "Ports" string) serves URL on THIS host: same
++    host port, and the URL's host is an address the mapping is published on — any of this host's
++    addresses for 0.0.0.0 / ::, loopback for a 127.x / ::1 publish, that exact address otherwise.
++    A hostname counts by what it resolves to. The Python twin of listen-scope.sh's
++    ports_serve_url, so the probe and the bash pickers cannot disagree."""
++    host, port = url_host_port(url)
++    if not host or not port:
++        return False
++    addrs = _host_addrs(host)
++    if not addrs:
++        return False
++    own = _own_addrs()
++    for m in str(ports or "").split(","):
++        m = m.strip()
++        if "->" not in m:                    # an exposed-only port, not published
++            continue
++        bind_all = m.split("->", 1)[0]
++        bind, _, hp = bind_all.rpartition(":")
++        bind = bind.strip("[]")
++        lo, _, hi = hp.partition("-")        # a publish range: 127.0.0.1:6333-6334
++        if not lo.isdigit():
++            continue
++        if hi and not hi.isdigit():
++            continue
++        if not (int(lo) <= int(port) <= int(hi or lo)):
++            continue
++        for a in addrs:
++            if bind in ("", "0.0.0.0", "::"):
++                if a.startswith("127.") or a == "::1" or a in own:
++                    return True
++            elif bind.startswith("127.") or bind == "::1":
++                if a.startswith("127.") or a == "::1":
++                    return True
++            elif a == bind:
++                return True
++    return False
++
++
+ def container_for_url(url, ps_lines=None):
+-    """Name of the running container publishing ``url``'s host port, else ""."""
+-    m = re.match(r"^[a-z]+://[^/:]+:(\d+)", url or "")
+-    if not m:
+-        return ""
+-    port = m.group(1)
++    """Name of the running container serving ``url`` on this host, else "".
++
++    A URL on another machine names no container here, and "" is the honest answer: the caller
++    then reads the slot count, context length, spec label and KV pool from the ENGINE at
++    ``url`` (SGLang's /get_server_info, llama.cpp's /props) instead of off an unrelated local
++    container (#1584 follow-up — the port-only match bound one, and a name heuristic bound a
++    second one whenever nothing matched)."""
+     if ps_lines is None:
+         try:
+             out = subprocess.run(["docker", "ps", "--format", "{{.Names}}|{{.Ports}}"],
+@@ -372,11 +517,12 @@ def container_for_url(url, ps_lines=None):
+             ps_lines = out.stdout.splitlines()
+         except Exception:
+             return ""
+-    pat = re.compile(r":" + port + r"->")
+     for line in ps_lines:
+-        name, _, ports = line.partition("|")
+-        if name and pat.search(ports):
+-            return name.strip()
++        name, _, rest = (line or "").partition("|")
++        ports = rest.split("|", 1)[0]        # name|ports[|image]
++        if not name.strip() or not ports_serve_url(ports, url):
++            continue
++        return name.strip()
+     return ""
+ 
+ 
+@@ -1353,7 +1499,7 @@ def main(argv=None):
+     p.add_argument("--gpu-label", action="store_true",
+                    help="'N× <GPU name>' for the GPUs $CONTAINER sees (every GPU when it can't be resolved)")
+     p.add_argument("--container-for-url", action="store_true",
+-                   help="name of the running container publishing $URL's port (empty when none)")
++                   help="name of the running container serving $URL on this host (empty when none does)")
+     p.add_argument("--served-max-len", action="store_true",
+                    help="context length the engine at $URL / in $CONTAINER serves (empty when unreadable)")
+     p.add_argument("--spec-label", action="store_true",

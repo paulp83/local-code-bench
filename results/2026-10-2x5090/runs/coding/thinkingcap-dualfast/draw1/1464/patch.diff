@@ -1,0 +1,120 @@
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..dcf38d5 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1224,7 +1224,22 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
++# Pre-teardown preflight for a launch. Runs EVERY check that can refuse a launch
++# (or merely warn) whose verdict does NOT depend on the currently-running slug
++# having been torn down — the registry status gate, the compose-file / model-dir
++# (MODEL_DIR) checks, and the total-VRAM / host-RAM / split-mode hardware gates.
++# None of these read the GPUs' FREE VRAM, so they are valid before the old
++# container has released its memory.
++#
++# ⚠️ ORDERING IS THE POINT: this runs BEFORE down_running(). The old code tore the
++# running slug down FIRST and only then hit these checks, so a REFUSED launch
++# (a mistyped slug, an (NA) slug without --force, a worktree whose MODEL_DIR is not
++# on the host) left the rig serving nothing. Running the refuse path first means a
++# refused launch leaves whatever was serving still serving. The free-VRAM gates
++# (compose_gpu_fit / offload residency / CPU-MoE split / CPU-offload RAM /
++# gpu_preflight) stay in up_variant() and run AFTER down_running(), because they
++# size/gate on FREE VRAM that the just-torn-down container must release first.
++preflight_variant() {
+   local v="$1"
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+@@ -1239,12 +1254,15 @@ up_variant() {
+     exit 1
+   fi
+ 
+-  # Pre-up sanity:
++  # Pre-up sanity (teardown-independent — see the note above):
+   #  - repo_drift: warn if local HEAD is behind origin/master
+   #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist on host
+   #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case;
+   #     see club-3090#37 — this is the canonical fix raphael / snoby asked for)
+-  #  - kv_format_hint: soft warn if VRAM class needs --kv-cache-dtype override (#47)
++  #  - compose_hardware: HARD error on insufficient GPU count / SM (total VRAM, not free)
++  #  - lmcache_ram: HARD error if host RAM can't hold the L1 KV cache (host RAM, not VRAM)
++  #  - offload_split_mode: HARD error on a measured-catastrophic --split-mode
++  #  - kv_format_hint / offload_thp / single_card_util: soft warns
+   if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+     # shellcheck source=preflight.sh
+     source "${ROOT_DIR}/scripts/preflight.sh"
+@@ -1252,21 +1270,45 @@ up_variant() {
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
++    fi
++    # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
++    # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
++    # No-op for composes without an LMCache-l1-gb metadata header.
++    preflight_lmcache_ram "${full_dir}/${file}" || exit 1
++    preflight_offload_split_mode "${full_dir}/${file}" || exit 1
++    preflight_kv_format_hint "${full_dir}/${file}" || true
++    # WARN-only first-token-latency hint; never blocks a boot.
++    preflight_offload_thp "${full_dir}/${file}" || true
++    # Single-card util-override guard — runs even under --force (the nvfp4 slug
++    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
++    preflight_single_card_util "${full_dir}/${file}" "$v" || true
++  fi
++}
++
++# Post-teardown launch. Runs the free-VRAM-dependent preflights (which are only
++# correct AFTER the previously-running slug has released its VRAM) and then the
++# compose up. The refuse-able, teardown-independent checks already ran in
++# preflight_variant() BEFORE down_running(), so a refused launch never takes the
++# current slug down.
++up_variant() {
++  local v="$1"
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]:-}"
++  local full_dir="${ROOT_DIR}/${dir}"
++  if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    # shellcheck source=preflight.sh
++    source "${ROOT_DIR}/scripts/preflight.sh"
++    if [[ "$eng" == "vllm" ]]; then
+       # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+       # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+       # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+       # so its settle-retry also covers the just-torn-down container's VRAM lag.
+       preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+-    # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+-    # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+-    # No-op for composes without an LMCache-l1-gb metadata header.
+-    preflight_lmcache_ram "${full_dir}/${file}" || exit 1
+-    # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
++    # CPU-offload: size residency from DETECTED (free) VRAM, then gate. Order matters —
+     # the guards must see the RESOLVED config, not the compose defaults.
+     resolve_offload_residency "${full_dir}/${file}"
+     resolve_offload_threads   "${full_dir}/${file}"
+-    # exl3 CPU-MoE split, sized from DETECTED VRAM (#1366). Ordered with the two
++    # exl3 CPU-MoE split, sized from DETECTED (free) VRAM (#1366). Ordered with the two
+     # above and BEFORE the guards, so preflight_cpu_offload_ram prices the split we
+     # actually ship rather than the compose default -- and lowering it only ever
+     # LOWERS host RAM (the CPU worker holds the tail), so the two never fight.
+@@ -1274,13 +1316,6 @@ up_variant() {
+     resolve_cpu_moe_split     "${full_dir}/${file}"
+     # CPU-offload guards: marker-scoped, no-ops on non-offload composes (#deepseek-flash)
+     preflight_cpu_offload_ram "${full_dir}/${file}" || exit 1
+-    preflight_offload_split_mode "${full_dir}/${file}" || exit 1
+-    preflight_kv_format_hint "${full_dir}/${file}" || true
+-    # WARN-only first-token-latency hint; never blocks a boot.
+-    preflight_offload_thp "${full_dir}/${file}" || true
+-    # Single-card util-override guard — runs even under --force (the nvfp4 slug
+-    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+-    preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+@@ -1617,6 +1652,7 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++preflight_variant "${VARIANT}"   # refuse-able preflight BEFORE teardown (leaves a refused launch still serving)
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready

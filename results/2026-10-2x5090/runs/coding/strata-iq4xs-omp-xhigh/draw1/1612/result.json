@@ -1,0 +1,24 @@
+{
+ "n": 1612,
+ "config": "strata-iq4xs-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 1444.8,
+ "steps": 55,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/profiles/patch_attribution.py"
+ ],
+ "p2p_run": 2,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-patch-attribution.sh": 1
+ },
+ "effort_note": "ran as \"low\" but omp sent no reasoning_effort; Qwen3.8 template default xhigh (relabelled 2026-10-12)"
+}

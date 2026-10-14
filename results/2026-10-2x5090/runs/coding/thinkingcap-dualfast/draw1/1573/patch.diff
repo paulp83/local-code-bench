@@ -1,0 +1,60 @@
+diff --git a/scripts/lib/thinking-budget.sh b/scripts/lib/thinking-budget.sh
+index 636d91c..1be7963 100755
+--- a/scripts/lib/thinking-budget.sh
++++ b/scripts/lib/thinking-budget.sh
+@@ -266,6 +266,36 @@ print("CLP %s PARSER %s" % ("true" if clp else "false", rp))
+   return 0
+ }
+ 
++# vLLM's own readback for the parser when the container's argv does not show
++# one: an image whose OWN launcher adds `--reasoning-parser` inside a start
++# script (bucko's official image's `qwen38-serve`, e.g.) hides it from
++# `docker inspect`, but the server still prints the resolved `--non-default args`
++# dict at boot, e.g.
++#   INFO ... --non-default args: {'model': '...', 'reasoning_parser': 'qwen3', ...}
++# One `docker logs` can hold several boots (restart: unless-stopped); the LAST
++# quoted reasoning_parser wins. The match is the dict form ('reasoning_parser':
++# 'name'), not the command line (`--reasoning-parser name`), so a launcher's
++# echoed argv is not mistaken for the resolved config. stdout: the parser name,
++# or nothing.
++_TB_VLLM_BOOTLOG_PARSER_PY="$(cat <<'PY'
++import re, sys
++lines = sys.stdin.read().splitlines()
++# vLLM prints one `--non-default args: {...}` dict per boot; a restarted
++# container's log holds several, and the LAST one is the current boot's
++# resolved config. Parse only that line so a parser the current boot dropped
++# (still present in an earlier boot's dict) is not mistaken for live config.
++cand = [ln for ln in lines if "non-default args" in ln] or \
++       [ln for ln in lines if "reasoning_parser" in ln]
++m = None
++if cand:
++    m = re.findall(r"['\"]reasoning_parser['\"]\s*:\s*['\"]([^'\"]+)['\"]", cand[-1])
++print(m[-1] if m else "")
++PY
++)"
++_thinking_budget_vllm_bootlog_parser() {
++  docker logs "$1" 2>&1 | python3 -c "$_TB_VLLM_BOOTLOG_PARSER_PY" 2>/dev/null
++}
++
+ # SGLang ships model-specific ThinkingBudgetLogitProcessor subclasses
+ # (python/sglang/srt/sampling/custom_logit_processor.py, v0.5.20). Only the
+ # parsers whose think-token ids are known to match are mapped; anything else
+@@ -331,7 +361,17 @@ thinking_budget_verify() {
+       facts="$(docker inspect "$c" 2>/dev/null | _thinking_budget_container_facts vllm)"
+       case "$facts" in
+         "PARSER none")
+-          THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
++          # The image's own launcher may add --reasoning-parser inside a start
++          # script, so the container argv shows none even though the server booted
++          # with a parser. Before refusing on that (positive) evidence, read the
++          # server's own boot log: its resolved `--non-default args` dict is the
++          # ground truth the container argv cannot see.
++          _tb_log_parser="$(_thinking_budget_vllm_bootlog_parser "$c")"
++          if [[ -n "$_tb_log_parser" ]]; then
++            THINKING_BUDGET_EVIDENCE="container ${c} boots vLLM with --reasoning-parser ${_tb_log_parser} (set by the image's launcher — not in the container argv; read from the vLLM boot log 'non-default args')"
++            return 0
++          fi
++          THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser (neither the container argv nor the vLLM boot log shows a reasoning parser) — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
+           return 1 ;;
+         "PARSER "*)
+           THINKING_BUDGET_EVIDENCE="container ${c} boots vLLM with --reasoning-parser ${facts#PARSER }"

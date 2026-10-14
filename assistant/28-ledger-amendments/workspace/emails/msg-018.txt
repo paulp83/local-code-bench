@@ -1,0 +1,8 @@
+From: sol@example.net
+Date: 2026-07-09T02:04:00Z
+Subject: ledger amendment
+
+Please flip the sign of T-00319.
+
+Thanks,
+sol

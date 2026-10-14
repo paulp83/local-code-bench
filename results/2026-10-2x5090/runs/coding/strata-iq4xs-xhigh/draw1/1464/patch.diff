@@ -1,0 +1,291 @@
+diff --git a/scripts/launch.sh b/scripts/launch.sh
+index 7538ad3..f1cc84c 100755
+--- a/scripts/launch.sh
++++ b/scripts/launch.sh
+@@ -1448,8 +1448,9 @@ _note_brief() {
+ }
+ 
+ # Surface the lifecycle health flag (PR-A) before handing off. The actual gate
+-# (caveats notice / (NA) → require --force) lives in switch.sh up_variant, which
+-# this script delegates to; this is just a heads-up so the user isn't surprised.
++# (caveats notice / (NA) → require --force) lives in switch.sh preflight_variant,
++# which runs there BEFORE the running variant is torn down; this script delegates
++# to it, and this is just a heads-up so the user isn't surprised.
+ _launch_status="${LAUNCH_VARIANT_STATUS[$VARIANT]:-production}"
+ _launch_status_note="${LAUNCH_VARIANT_STATUS_NOTE[$VARIANT]:-}"
+ case "$_launch_status" in
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..a51b2be 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -6,6 +6,12 @@
+ # and (optionally) waits for the server to report ready on /v1/models.
+ # Stateless — re-run any time you want a different config.
+ #
++# A launch that a check REFUSES happens BEFORE the running variant is touched:
++# a mistyped slug, an (NA: …) slug without --force or a config whose weights
++# aren't on this host leaves the current server serving, not an empty rig.
++# (The exceptions are the two free-VRAM gates, which can only measure the GPU
++# once the outgoing container is gone — see preflight_variant().)
++#
+ # Usage:
+ #   bash scripts/switch.sh <variant>            # switch + tail until ready
+ #   bash scripts/switch.sh <variant> --no-wait  # switch and return immediately
+@@ -179,6 +185,9 @@ switch_gpu_profile_spec() {
+ # Teardown is registry-derived from VARIANT_CONTAINER (see down_running()). This
+ # replaced a fixed `^(vllm-|llama-cpp-)` regex that missed beellama-/ik-llama-/
+ # sglang- containers and leaked their VRAM across switches (#281).
++#
++# Ordering contract: nothing here runs until preflight_variant() has ACCEPTED
++# the incoming slug, so a launch that gets refused never takes the rig down.
+ 
+ 
+ PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-27b}"
+@@ -1224,16 +1233,41 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
++# The slug has to resolve before anything touches the rig. This used to be the
++# first lines of up_variant() — i.e. it ran AFTER down_running(), so a mistyped
++# slug cost whatever had been serving and brought the rig to zero.
++require_known_variant() {
+   local v="$1"
+-  if [[ -z "${VARIANTS[$v]:-}" ]]; then
+-    echo "ERROR: unknown variant '${v}'." >&2
+-    echo "Run: bash scripts/switch.sh --list" >&2
+-    exit 1
+-  fi
++  [[ -n "${VARIANTS[$v]:-}" ]] && return 0
++  echo "ERROR: unknown variant '${v}'." >&2
++  echo "Run: bash scripts/switch.sh --list" >&2
++  exit 1
++}
++
++# The launch gate: EVERY check that can refuse a launch, run BEFORE
++# down_running() so a refusal leaves the rig exactly as it was — still serving
++# the outgoing slug.
++#
++# The bug this closes: switch.sh brought the running container down FIRST and
++# only then ran the checks that can say no, so a refused launch left the rig
++# serving nothing. Hit twice on the reference rig in one day — an experimental
++# slug run without --force, and a worktree whose model files weren't on the
++# host (no MODEL_DIR) — and a mistyped slug did the same.
++#
++# The two checks deliberately left below the line (see up_variant) are
++# gpu_preflight() and preflight_compose_gpu_fit(): they measure FREE VRAM,
++# which is only a meaningful number once the outgoing container is gone. Run
++# before the teardown they would refuse every switch between two healthy
++# configs — the outgoing model's own 22 GiB reads as "something is pinning the
++# GPU". Everything else here is a property of the slug, the compose or the host
++# (weights on disk, host RAM, hardware envelope, lifecycle status), i.e. knowable
++# while the current server is still up.
++preflight_variant() {
++  local v="$1" eng dir file full_dir
++  require_known_variant "$v"
+   status_gate "$v"
+   IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
+-  local full_dir="${ROOT_DIR}/${dir}"
++  full_dir="${ROOT_DIR}/${dir}"
+   if [[ ! -f "${full_dir}/${file}" ]]; then
+     echo "ERROR: compose file missing at ${full_dir}/${file}" >&2
+     exit 1
+@@ -1252,11 +1286,6 @@ up_variant() {
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+-      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+@@ -1282,6 +1311,23 @@ up_variant() {
+     # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+     preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
++}
++
++up_variant() {
++  local v="$1" eng dir file
++  require_known_variant "$v"
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${dir}"
++
++  # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
++  # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
++  # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
++  # so its settle-retry also covers the just-torn-down container's VRAM lag —
++  # which is exactly why it, and gpu_preflight() below, are the only refusing
++  # checks that cannot move up into preflight_variant().
++  if [[ "$eng" == "vllm" ]] && declare -F preflight_compose_gpu_fit >/dev/null 2>&1; then
++    preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
++  fi
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+   # container stop leaves them resident — 65 GB on the reference rig 2026-09-25, incl. two 32 GiB
+@@ -1617,6 +1663,13 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++# Refuse BEFORE tearing anything down: preflight_variant() holds every check
++# that can say no to this slug (unknown slug, (NA) status without --force,
++# weights missing from the host, hardware/RAM envelopes). Running it first is
++# what keeps a refused launch from leaving the rig serving nothing. The only
++# refusing checks left below are the free-VRAM gates inside up_variant() —
++# they need the outgoing container gone before their numbers mean anything.
++preflight_variant "${VARIANT}"
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready
+diff --git a/scripts/tests/test-switch-refuse-before-teardown.sh b/scripts/tests/test-switch-refuse-before-teardown.sh
+new file mode 100755
+index 0000000..06d7087
+--- /dev/null
++++ b/scripts/tests/test-switch-refuse-before-teardown.sh
+@@ -0,0 +1,143 @@
++#!/usr/bin/env bash
++# Test for switch.sh refusal ORDER: a launch a check refuses must not have
++# touched the running variant.
++#
++# The bug: switch.sh brought the running slug down FIRST and only then ran the
++# checks that can say no, so a refused launch left the rig serving nothing. Hit
++# twice on the reference rig in one day —
++#   • an experimental slug run without --force;
++#   • a worktree whose model files weren't on the host (no MODEL_DIR);
++# and a mistyped slug did the same.
++#
++# Contract (all three must refuse with the rig still up):
++#   1. unknown / mistyped slug          → "unknown variant"
++#   2. (NA: …) slug without --force     → "not a reliable config"
++#   3. compose whose weights are absent → "aren't on host"
++# and the two controls that keep the fix honest:
++#   4. NEGATIVE CONTROL: an accepted launch still tears the old one down and
++#      brings the new one up (a "fix" that never tears down is worse);
++#   5. --force still forces an (NA) slug through the gate.
++#   6. STRUCTURAL: the refusing phase is wired before down_running in main.
++#
++# Harness: real scripts/switch.sh, mock `docker` on PATH (records every teardown
++# call), COMPOSE_BIN=: so nothing can boot, PREFLIGHT_NO_FETCH=1 so no git
++# network. Fully offline — no docker daemon, no GPU, no model boot.
++set -uo pipefail
++
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++
++PASS=0
++FAIL=0
++assert_contains() {
++  local haystack="$1" needle="$2" label="$3"
++  if [[ "$haystack" == *"$needle"* ]]; then PASS=$((PASS + 1)); else
++    echo "FAIL: ${label}: expected output to CONTAIN: ${needle}" >&2
++    echo "--- switch.sh output ---" >&2; printf '%s\n' "$haystack" >&2
++    FAIL=$((FAIL + 1))
++  fi
++}
++assert_not_contains() {
++  local haystack="$1" needle="$2" label="$3"
++  if [[ "$haystack" != *"$needle"* ]]; then PASS=$((PASS + 1)); else
++    echo "FAIL: ${label}: expected output to NOT contain: ${needle}" >&2
++    echo "--- switch.sh output ---" >&2; printf '%s\n' "$haystack" >&2
++    FAIL=$((FAIL + 1))
++  fi
++}
++assert_refused() {  # <rc> <label> — a refused launch must exit non-zero
++  if [[ "$1" != 0 ]]; then PASS=$((PASS + 1)); else
++    echo "FAIL: ${2}: expected a non-zero exit (the launch was supposed to be refused)" >&2
++    FAIL=$((FAIL + 1))
++  fi
++}
++
++tmp_dir="$(mktemp -d)"
++cleanup() { rm -rf "$tmp_dir"; }
++trap cleanup EXIT
++
++BIN="${tmp_dir}/bin"; mkdir -p "$BIN"
++EMPTY_MODELS="${tmp_dir}/models"; mkdir -p "$EMPTY_MODELS"
++export CALLS="${tmp_dir}/docker-calls.log"; : > "$CALLS"
++
++# --- mock `docker`: `ps` reports ONE managed container; every teardown call
++# (compose down / stop) is appended to $CALLS. Nothing else is recorded, so an
++# empty $CALLS is proof the running container was left alone.
++cat > "${BIN}/docker" <<'DOCKERMOCK'
++#!/usr/bin/env bash
++sub="$1"; shift || true
++case "$sub" in
++  ps)      printf 'beellama-qwen36-27b\n' ;;
++  inspect) printf '\n' ;;                                  # no labels → stop path
++  stop)    printf 'STOP %s\n' "${1:-}" >> "$CALLS" ;;
++  compose) printf 'COMPOSE %s\n' "$*" >> "$CALLS" ;;
++esac
++exit 0
++DOCKERMOCK
++chmod +x "${BIN}/docker"
++
++run_switch() {  # <label> <args…> — records output/rc + any teardown call
++  local label="$1"; shift
++  : > "$CALLS"
++  SWITCH_OUT="$(COMPOSE_BIN=: PATH="${BIN}:${PATH}" MODEL_DIR="$EMPTY_MODELS" \
++                PREFLIGHT_NO_FETCH=1 PREFLIGHT_NO_COMPOSE_DEPS="${DEPS:-0}" \
++                timeout 300 bash scripts/switch.sh "$@" 2>&1)"
++  SWITCH_RC=$?
++  SWITCH_TEARDOWN="$(cat "$CALLS")"
++}
++
++# --- 1. mistyped slug --------------------------------------------------------
++run_switch "typo" vllm/minimal-not-a-slug --no-wait
++assert_refused "$SWITCH_RC" "mistyped slug refused"
++assert_contains "$SWITCH_OUT" "unknown variant" "mistyped slug names the bad slug"
++assert_not_contains "$SWITCH_OUT" "bringing down" "mistyped slug: no teardown announced"
++assert_not_contains "$SWITCH_TEARDOWN" "STOP" "mistyped slug: docker never called to stop"
++
++# --- 2. (NA: …) slug without --force ----------------------------------------
++run_switch "na" llamacpp/deepseek-flash-dual-q8 --no-wait
++assert_refused "$SWITCH_RC" "(NA) slug refused without --force"
++assert_contains "$SWITCH_OUT" "not a reliable config" "(NA) gate fires"
++assert_not_contains "$SWITCH_OUT" "bringing down" "(NA) slug: no teardown announced"
++assert_not_contains "$SWITCH_TEARDOWN" "STOP" "(NA) slug: docker never called to stop"
++
++# --- 3. weights missing from the host ---------------------------------------
++# vllm/minimal is a PRODUCTION slug, so this isolates the model-file check
++# (PREFLIGHT_NO_COMPOSE_DEPS is left OFF here, unlike runs 1/2/4).
++DEPS=0 run_switch "weights" vllm/minimal --no-wait
++assert_refused "$SWITCH_RC" "missing weights refused"
++assert_contains "$SWITCH_OUT" "aren't on host" "model-file check fires"
++assert_not_contains "$SWITCH_OUT" "bringing down" "missing weights: no teardown announced"
++assert_not_contains "$SWITCH_TEARDOWN" "STOP" "missing weights: docker never called to stop"
++
++# --- 4. NEGATIVE CONTROL: an accepted launch still switches ------------------
++DEPS=1 run_switch "accept" vllm/minimal --no-wait
++assert_contains "$SWITCH_OUT" "bringing down: beellama-qwen36-27b" "accepted launch tears the old slug down"
++assert_contains "$SWITCH_OUT" "bringing up: vllm/minimal" "accepted launch brings the new slug up"
++if [[ "$SWITCH_TEARDOWN" == *"STOP"* ]]; then PASS=$((PASS + 1)); else
++  echo "FAIL: accepted launch: the mock docker recorded no stop call" >&2
++  echo "--- switch.sh output ---" >&2; printf '%s\n' "$SWITCH_OUT" >&2
++  FAIL=$((FAIL + 1))
++fi
++
++# --- 5. --force still forces an (NA) slug through the gate -------------------
++DEPS=1 run_switch "force" --force beellama/dflash --no-wait
++assert_contains "$SWITCH_OUT" "WARNING: forcing" "--force still forces an (NA) slug"
++assert_contains "$SWITCH_OUT" "bringing up: beellama/dflash" "--force launch proceeds to the bring-up"
++
++# --- 6. STRUCTURAL: the refusing phase is wired before the teardown ----------
++gate_line="$(command grep -n '^preflight_variant "${VARIANT}"$' scripts/switch.sh | head -1 | cut -d: -f1)"
++down_line="$(command grep -n '^down_running$' scripts/switch.sh | head -1 | cut -d: -f1)"
++if [[ -n "$gate_line" && -n "$down_line" && "$gate_line" -lt "$down_line" ]]; then
++  PASS=$((PASS + 1))
++else
++  echo "FAIL: main flow must run preflight_variant before down_running" >&2
++  echo "      preflight_variant@${gate_line:-missing}  down_running@${down_line:-missing}" >&2
++  FAIL=$((FAIL + 1))
++fi
++
++echo "----------------------------------------"
++echo "PASS: $PASS   FAIL: $FAIL"
++[[ "$FAIL" -eq 0 ]] || exit 1
++echo "OK: switch.sh refuses a launch before tearing down the running slug"

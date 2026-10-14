@@ -1,0 +1,24 @@
+{
+ "n": 1588,
+ "config": "thinkingcap-dualfast-xhigh",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 455.6,
+ "steps": 48,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 14,
+ "localization": 0.667,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py",
+  "scripts/lib/listen-scope.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 1
+ }
+}

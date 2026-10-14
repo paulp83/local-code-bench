@@ -1,0 +1,23 @@
+{
+ "n": 1555,
+ "config": "strata-iq4xs",
+ "draw": 2,
+ "exit_status": "Submitted",
+ "agent_s": 652.8,
+ "steps": 47,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 15,
+ "localization": 0.667,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 0
+ }
+}

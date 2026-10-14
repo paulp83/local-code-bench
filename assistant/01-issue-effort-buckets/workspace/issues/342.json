@@ -1,0 +1,11 @@
+{
+  "number": 342,
+  "title": "setup.sh hangs behind proxy",
+  "labels": [
+    "design",
+    "question"
+  ],
+  "files_touched": 2,
+  "has_repro": true,
+  "needs_gpu": false
+}

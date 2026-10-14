@@ -1,0 +1,7 @@
+PASS hot-dir-gone
+PASS regular-files-intact
+PASS no-tmp-files
+PASS symlinks-preserved
+PASS manifest-exact
+PASS links-file-exact
+PASS: 6 FAIL: 0

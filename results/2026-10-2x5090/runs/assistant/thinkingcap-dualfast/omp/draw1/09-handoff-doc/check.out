@@ -1,0 +1,11 @@
+PASS headings-exact-order
+PASS done-has-T1-T2-only
+PASS inprogress-T4-only
+PASS blockers-T3-only
+PASS blockers-exact-command
+PASS blockers-exit-status-3
+PASS inprogress-configs
+PASS next-script-path
+PASS todo-not-in-done-or-blockers
+PASS max-250-words
+PASS: 10 FAIL: 0

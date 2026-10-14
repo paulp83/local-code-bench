@@ -1,0 +1,244 @@
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..3d2e485 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1224,7 +1224,26 @@ status_gate() {
+   esac
+ }
+ 
++# Split launch into two phases so a REFUSAL never leaves the rig dark:
++#   up_variant        — every check that can say "no" (status gate, missing
++#                       compose file, missing model dir on host, hardware fit…)
++#                       runs BEFORE down_running() tears the current slug down.
++#   up_variant_launch — the bring-up itself, which runs AFTER down_running().
++# Previously `switch.sh` tore down the running slug first and only then ran the
++# refusable checks, so an experimental slug launched without --force (a worktree
++# whose model files weren't on the host, a mistyped slug) left the rig serving
++# nothing.
++#
++# The VRAM-fit guard (preflight_compose_gpu_fit) is the one refusable check that
++# CANNOT run pre-teardown — it needs the just-torn-down container's VRAM released
++# (its settle-retry covers that lag), and running it pre-teardown would price the
++# CURRENT slug's VRAM against the incoming config. It therefore stays in the
++# post-teardown phase; that tradeoff is inherent, not a bug.
++UP_ENG="" UP_DIR="" UP_FILE=""
++
+ up_variant() {
++  # Phase 1 — validate + refuse. NO teardown side effects. Sets the UP_* globals
++  # the launch phase consumes.
+   local v="$1"
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+@@ -1232,10 +1251,10 @@ up_variant() {
+     exit 1
+   fi
+   status_gate "$v"
+-  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
+-  local full_dir="${ROOT_DIR}/${dir}"
+-  if [[ ! -f "${full_dir}/${file}" ]]; then
+-    echo "ERROR: compose file missing at ${full_dir}/${file}" >&2
++  IFS='|' read -r UP_ENG UP_DIR UP_FILE <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${UP_DIR}"
++  if [[ ! -f "${full_dir}/${UP_FILE}" ]]; then
++    echo "ERROR: compose file missing at ${full_dir}/${UP_FILE}" >&2
+     exit 1
+   fi
+ 
+@@ -1249,38 +1268,50 @@ up_variant() {
+     # shellcheck source=preflight.sh
+     source "${ROOT_DIR}/scripts/preflight.sh"
+     preflight_repo_drift "${ROOT_DIR}" || true
+-    preflight_compose_deps "${full_dir}/${file}" || exit 1
+-    if [[ "$eng" == "vllm" ]]; then
+-      preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+-      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
++    preflight_compose_deps "${full_dir}/${UP_FILE}" || exit 1
++    if [[ "$UP_ENG" == "vllm" ]]; then
++      preflight_compose_hardware "${full_dir}/${UP_FILE}" "$v" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+     # No-op for composes without an LMCache-l1-gb metadata header.
+-    preflight_lmcache_ram "${full_dir}/${file}" || exit 1
++    preflight_lmcache_ram "${full_dir}/${UP_FILE}" || exit 1
+     # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
+     # the guards must see the RESOLVED config, not the compose defaults.
+-    resolve_offload_residency "${full_dir}/${file}"
+-    resolve_offload_threads   "${full_dir}/${file}"
++    resolve_offload_residency "${full_dir}/${UP_FILE}"
++    resolve_offload_threads   "${full_dir}/${UP_FILE}"
+     # exl3 CPU-MoE split, sized from DETECTED VRAM (#1366). Ordered with the two
+     # above and BEFORE the guards, so preflight_cpu_offload_ram prices the split we
+     # actually ship rather than the compose default -- and lowering it only ever
+     # LOWERS host RAM (the CPU worker holds the tail), so the two never fight.
+     # No-op on every compose without the CPU-MoE-* headers.
+-    resolve_cpu_moe_split     "${full_dir}/${file}"
++    resolve_cpu_moe_split     "${full_dir}/${UP_FILE}"
+     # CPU-offload guards: marker-scoped, no-ops on non-offload composes (#deepseek-flash)
+-    preflight_cpu_offload_ram "${full_dir}/${file}" || exit 1
+-    preflight_offload_split_mode "${full_dir}/${file}" || exit 1
+-    preflight_kv_format_hint "${full_dir}/${file}" || true
++    preflight_cpu_offload_ram "${full_dir}/${UP_FILE}" || exit 1
++    preflight_offload_split_mode "${full_dir}/${UP_FILE}" || exit 1
++    preflight_kv_format_hint "${full_dir}/${UP_FILE}" || true
+     # WARN-only first-token-latency hint; never blocks a boot.
+-    preflight_offload_thp "${full_dir}/${file}" || true
++    preflight_offload_thp "${full_dir}/${UP_FILE}" || true
+     # Single-card util-override guard — runs even under --force (the nvfp4 slug
+     # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+-    preflight_single_card_util "${full_dir}/${file}" "$v" || true
++    preflight_single_card_util "${full_dir}/${UP_FILE}" "$v" || true
++  fi
++}
++
++up_variant_launch() {
++  # Phase 2 — bring up. Runs only after every refusable check passed
++  # (up_variant), so a refusal never tears down the running slug first.
++  local v="$1"
++  local full_dir="${ROOT_DIR}/${UP_DIR}"
++  # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
++  # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
++  # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
++  # so its settle-retry also covers the just-torn-down container's VRAM lag.
++  # NOTE: this is the one refusable check that stays post-teardown (vllm-only) —
++  # it must see the torn-down container's VRAM released; running it pre-teardown
++  # would price the CURRENT slug's VRAM against the incoming config.
++  if [[ "$UP_ENG" == "vllm" ]]; then
++    preflight_compose_gpu_fit "${full_dir}/${UP_FILE}" "${FORCE:-0}" || exit 1
+   fi
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+@@ -1289,11 +1320,11 @@ up_variant() {
+   # the boot. CLUB3090_SHM_CLEANUP=0 disables.
+   bash "$(dirname "$0")/lib/shm-cleanup.sh" || true
+ 
+-  echo "[switch] bringing up: ${v}  (${dir}/${file})"
++  echo "[switch] bringing up: ${v}  (${UP_DIR}/${UP_FILE})"
+   export_variant_engine_pin "$v"
+   preflight_ik_llama_image "$v"   # #633 — cu12 fallback on <13.2 drivers (unless pinned)
+   apply_thinking_pin_env "$v"     # #1014 follow-up — persisted CLUB3090_THINKING_<MODEL> → ENABLE_THINKING
+-  (cd "${full_dir}" && ${COMPOSE_BIN} -f "${file}" up -d --remove-orphans)
++  (cd "${full_dir}" && ${COMPOSE_BIN} -f "${UP_FILE}" up -d --remove-orphans)
+ }
+ 
+ resolve_ready_url() {
+@@ -1617,8 +1648,9 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++up_variant "${VARIANT}"   # validate + refuse BEFORE tearing anything down
+ down_running
+-up_variant "${VARIANT}"
++up_variant_launch "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready
+ # OWUI sync (default on; --no-owui to skip): surface the just-launched endpoint in
+ # Open WebUI's model picker AND prune club-owned connections that are no longer
+diff --git a/scripts/tests/test-switch-refuse-before-teardown.sh b/scripts/tests/test-switch-refuse-before-teardown.sh
+new file mode 100755
+index 0000000..211a025
+--- /dev/null
++++ b/scripts/tests/test-switch-refuse-before-teardown.sh
+@@ -0,0 +1,99 @@
++#!/usr/bin/env bash
++# test-switch-refuse-before-teardown — a refused launch must NOT tear down the
++# running slug first. switch.sh splits the launch into up_variant (validate +
++# refuse, pre-teardown) and up_variant_launch (bring-up, post-teardown), so an
++# experimental slug without --force, a missing compose file, or a mistyped slug
++# exits without any down_running() side effect. Regression harness: extract the
++# two phases via sed and source them into a stub registry (same technique as
++# test-switch-orphan-teardown.sh).
++set -euo pipefail
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++fail=0
++ok()   { echo "  ok: $1"; }
++note() { echo "  FAIL: $1" >&2; fail=1; }
++
++TMP="$(mktemp -d)"
++trap 'rm -rf "$TMP"' EXIT
++HELPERS="$TMP/helpers.sh"
++{
++  sed -n '/^_note_brief() {/,/^}/p' scripts/switch.sh
++  sed -n '/^status_gate() {/,/^}/p' scripts/switch.sh
++  sed -n '/^up_variant() {/,/^}/p' scripts/switch.sh
++  sed -n '/^up_variant_launch() {/,/^}/p' scripts/switch.sh
++} > "$HELPERS"
++# shellcheck source=/dev/null
++source "$HELPERS"
++
++# Registry stubs the phases read.
++declare -A VARIANTS=(
++  ["vllm/dual"]="vllm|models/fakemodel/vllm/compose|dual/quant/serving.yml"
++)
++declare -A VARIANT_STATUS=( ["vllm/dual"]="experimental" )
++declare -A VARIANT_STATUS_NOTE=( ["vllm/dual"]="stub note" )
++ROOT_DIR="$ROOT_DIR"   # refusal cases use a repo-relative dir → missing file
++FORCE=0
++COMPOSE_BIN="docker"
++DOWN_LOG="$TMP/down.log"
++# Sentinel "teardown": record every down_running() invocation. The real function
++# isn't loaded (it needs docker); the harness asserts nothing recorded it.
++teardown_stub() { echo "$*" >> "$DOWN_LOG"; }
++
++# --- 1. mistyped slug refuses pre-teardown -----------------------------------
++rm -f "$DOWN_LOG"
++( set +u; up_variant "no-such-slug" ) >/dev/null 2>&1 && note "unknown slug did not refuse"
++[[ -f "$DOWN_LOG" ]] && note "unknown slug triggered a teardown"
++ok "unknown slug refused with no teardown"
++
++# --- 2. (NA) status without --force refuses pre-teardown ----------------------
++rm -f "$DOWN_LOG"
++out="$( set +u; up_variant "vllm/dual" 2>&1 )" && note "experimental slug launched without --force"
++grep -q "won't launch without an explicit override" <<<"$out" || note "status gate message missing: $out"
++[[ -f "$DOWN_LOG" ]] && note "refused (NA) slug triggered a teardown"
++ok "(NA) slug refused with no teardown (msg: $(head -n1 <<<"$out"))"
++
++# --- 3. missing compose file (model not on host) refuses pre-teardown ---------
++rm -f "$DOWN_LOG"
++FORCE=1
++out="$( set +u; up_variant "vllm/dual" 2>&1 )" && note "missing compose file launched"
++grep -q "compose file missing" <<<"$out" || note "missing-file message missing: $out"
++[[ -f "$DOWN_LOG" ]] && note "missing-file refusal triggered a teardown"
++ok "missing compose file refused with no teardown"
++
++# --- 4. happy path: validate passes, launch phase brings up -------------------
++# Stub the preflight.sh library (the real one lives in scripts/preflight.sh and
++# needs docker/GPU context; the missing-file refusal in case 3 happens BEFORE
++# any of it is called, so stubbing only affects the happy path).
++for _fn in preflight_repo_drift preflight_compose_deps preflight_compose_hardware \
++           preflight_lmcache_ram resolve_offload_residency resolve_offload_threads \
++           resolve_cpu_moe_split preflight_cpu_offload_ram preflight_offload_split_mode \
++           preflight_kv_format_hint preflight_offload_thp preflight_single_card_util; do
++  eval "$_fn() { return 0; }"
++done
++mkdir -p "$TMP/fakemodel/vllm/compose/dual/quant"
++printf 'services: {}\n' > "$TMP/fakemodel/vllm/compose/dual/quant/serving.yml"
++# Happy path: root the phase functions at $TMP (the real ROOT_DIR is used for
++# the refusal cases above, which must see a MISSING file at a repo-relative path).
++ROOT_DIR="$TMP"
++VARIANTS=( ["vllm/dual"]="vllm|fakemodel/vllm/compose|dual/quant/serving.yml" )
++UP_ENG="" UP_DIR="" UP_FILE="" UP_FULL_DIR=""
++up_variant "vllm/dual" || note "valid slug failed validation"
++[[ "${UP_DIR:-}" == "fakemodel/vllm/compose" && "${UP_FILE:-}" == "dual/quant/serving.yml" ]] \
++  || note "up_variant did not export UP_DIR/UP_FILE (got ${UP_DIR:-} / ${UP_FILE:-})"
++# Launch phase: stub compose so `up -d` records instead of running docker.
++COMPOSE_BIN="echo compose-up"
++gpu_preflight() { return 0; }
++export_variant_engine_pin() { return 0; }
++preflight_ik_llama_image() { return 0; }
++apply_thinking_pin_env() { return 0; }
++preflight_compose_gpu_fit() { return 0; }
++bash() { echo "bash $*" >> "$DOWN_LOG"; }   # shm-cleanup goes through bash
++out="$( set +u; up_variant_launch "vllm/dual" 2>&1 )"
++grep -q "compose-up -f dual/quant/serving.yml up -d" <<<"$out" \
++  || note "launch phase did not bring up: $out"
++grep -q "bringing up: vllm/dual" <<<"$out" || note "bring-up banner missing"
++ok "happy path: validate then bring up (banner + compose-up recorded)"
++
++[[ $fail -eq 0 ]] && echo "test-switch-refuse-before-teardown: ok" || echo "test-switch-refuse-before-teardown: FAIL"
++exit $fail

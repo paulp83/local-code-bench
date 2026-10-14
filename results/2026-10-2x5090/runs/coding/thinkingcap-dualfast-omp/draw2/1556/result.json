@@ -1,0 +1,24 @@
+{
+ "n": 1556,
+ "config": "thinkingcap-dualfast-omp",
+ "draw": 2,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 447.5,
+ "steps": 65,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 15,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py"
+ ],
+ "p2p_run": 4,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 1
+ }
+}

@@ -1,0 +1,48 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..c084f7a 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -936,6 +936,14 @@ _preflight_compose_path_default() {
+   value="${value%\'}"
+   value="${value%,}"
+ 
++  # A path embedded in escaped JSON (`--speculative-config "{\"model\":\"<path>\"}"`)
++  # is terminated by the backslash that escapes the closing quote, so a grep
++  # capture can carry trailing backslashes. They are never part of a model path
++  # and a trailing one silently breaks every `${model_dir}/${subdir}/...` test
++  # (gemma external-drafter composes, #1305) — drop them here so every caller is
++  # safe, not just the one grep whose class was tightened.
++  value="$(printf '%s' "$value" | sed -E 's#\\+$##')"
++
+   # Compose files commonly use ${VAR:-default/path}. Presence checks should use
+   # the path the compose will use by default; explicit env overrides are handled
+   # by callers for user-facing knobs such as GGUF_FILE.
+@@ -1329,8 +1337,15 @@ preflight_compose_deps() {
+     # those truncated the token to `${MODEL_SUBDIR` before _preflight_compose_path_default
+     # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+     # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+-    # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    # (quote / whitespace / comma / backslash); the `${VAR:-default}` resolver
++    # runs downstream.
++    # Backslash is a delimiter too: a drafter path written inside escaped JSON
++    # (`--speculative-config "{\"model\":\"/root/.cache/huggingface/gemma-assistant\"}"`,
++    # every gemma mtp/awq compose) ends at the `\` that escapes the closing quote,
++    # not at the quote. Leaving it in the class captured that `\` into the subdir,
++    # so the check ran on `${model_dir}/gemma-assistant\//config.json` — a path
++    # that can never exist — and preflight refused all 8 gemma drafter slugs.
++    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+@@ -1343,7 +1358,9 @@ preflight_compose_deps() {
+       elif [[ -d "${model_dir}/${path}" ]]; then
+         shard_dirs+=("${model_dir}/${path}")
+       fi
+-    done < <(command grep -hoE '\$\{MODEL_DIR[^}]*\}/[^"[:space:]]+' "${compose_files[@]}" || true)
++    # Same char-class rule as the vLLM extractor above: quotes, backslashes and
++    # commas end a path; `${VAR:-default}` is resolved downstream.
++    done < <(command grep -hoE '\$\{MODEL_DIR[^}]*\}/[^"\\[:space:]]+' "${compose_files[@]}" || true)
+   fi
+ 
+   # Present on the host, unreachable from the container. Reported SEPARATELY from

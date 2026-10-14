@@ -1,0 +1,145 @@
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..666dba2 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -2,8 +2,11 @@
+ #
+ # Switch between club-3090 compose variants.
+ #
+-# Brings down whatever's currently running, brings up the new variant,
+-# and (optionally) waits for the server to report ready on /v1/models.
++# Validates the requested variant first, then brings down whatever's
++# currently running, brings up the new variant, and (optionally) waits for
++# the server to report ready on /v1/models. A launch that is REFUSED (unknown
++# slug, (NA) status without --force, missing model dir) never tears down the
++# slug that is currently serving.
+ # Stateless — re-run any time you want a different config.
+ #
+ # Usage:
+@@ -1224,7 +1227,19 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
++# Refuse-before-teardown contract (see the header): every check that can
++# REFUSE a launch and whose verdict does not depend on the running container's
++# state runs HERE, before down_running() — so a refused launch leaves the
++# slug that is currently serving untouched.
++#
++# History: the old order brought the running slug down FIRST and only then ran
++# these checks inside up_variant(), so a refused launch left the rig serving
++# nothing. Hit twice on the reference rig in one day: an experimental slug run
++# without --force, and a worktree whose model files weren't on the host (no
++# MODEL_DIR). A mistyped slug did the same.
++#
++# Exits non-zero without touching any container when the launch is refused.
++validate_variant() {
+   local v="$1"
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+@@ -1239,12 +1254,14 @@ up_variant() {
+     exit 1
+   fi
+ 
+-  # Pre-up sanity:
++  # State-independent preflight (their verdict does not change because a
++  # container is currently running):
+   #  - repo_drift: warn if local HEAD is behind origin/master
+-  #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist on host
+-  #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case;
+-  #     see club-3090#37 — this is the canonical fix raphael / snoby asked for)
+-  #  - kv_format_hint: soft warn if VRAM class needs --kv-cache-dtype override (#47)
++  #  - compose_deps: HARD error if the compose mounts a model dir that doesn't
++  #    exist on host (the no-MODEL_DIR worktree case; club-3090#37)
++  #  - hardware: HARD error on GPU count / SM gate / mixed-arch (#762)
++  #  - lmcache_ram: HARD error when the L1 cache over-sizes host RAM (#133)
++  #  - kv_format_hint / offload_thp / single_card_util: soft warns
+   if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+     # shellcheck source=preflight.sh
+     source "${ROOT_DIR}/scripts/preflight.sh"
+@@ -1252,18 +1269,55 @@ up_variant() {
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
++    fi
++    # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
++    # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
++    # No-op for composes without an LMCache-l1-gb metadata header.
++    preflight_lmcache_ram "${full_dir}/${file}" || exit 1
++    preflight_kv_format_hint "${full_dir}/${file}" || true
++    # WARN-only first-token-latency hint; never blocks a boot.
++    preflight_offload_thp "${full_dir}/${file}" || true
++    # Single-card util-override guard — runs even under --force (the nvfp4 slug
++    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
++    preflight_single_card_util "${full_dir}/${file}" "$v" || true
++  fi
++}
++
++up_variant() {
++  local v="$1"
++  # The slug-level checks that REFUSE a launch (unknown slug, lifecycle gate,
++  # missing compose file, missing model dir) run in validate_variant() BEFORE
++  # down_running() — the lifecycle gate in particular must never run after the
++  # teardown. Kept here too: cheap, and keeps this function safe if called
++  # directly by a test.
++  if [[ -z "${VARIANTS[$v]:-}" ]]; then
++    echo "ERROR: unknown variant '${v}'." >&2
++    echo "Run: bash scripts/switch.sh --list" >&2
++    exit 1
++  fi
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${dir}"
++  if [[ ! -f "${full_dir}/${file}" ]]; then
++    echo "ERROR: compose file missing at ${full_dir}/${file}" >&2
++    exit 1
++  fi
++
++  # Post-teardown preflight: every check below needs the GPUs as they are
++  # AFTER down_running() released the previous container — the free-VRAM gate
++  # retries through the tear-down settle window, and the residency sizer prices
++  # the FREE VRAM the new container will actually get.
++  if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    # shellcheck source=preflight.sh
++    source "${ROOT_DIR}/scripts/preflight.sh"
++    if [[ "$eng" == "vllm" ]]; then
+       # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+       # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+       # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+       # so its settle-retry also covers the just-torn-down container's VRAM lag.
+       preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+-    # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+-    # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+-    # No-op for composes without an LMCache-l1-gb metadata header.
+-    preflight_lmcache_ram "${full_dir}/${file}" || exit 1
+-    # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
+-    # the guards must see the RESOLVED config, not the compose defaults.
++    # CPU-offload: size residency from DETECTED (post-teardown) free VRAM, then gate.
++    # Order matters — the guards must see the RESOLVED config, not the compose defaults.
+     resolve_offload_residency "${full_dir}/${file}"
+     resolve_offload_threads   "${full_dir}/${file}"
+     # exl3 CPU-MoE split, sized from DETECTED VRAM (#1366). Ordered with the two
+@@ -1275,12 +1329,6 @@ up_variant() {
+     # CPU-offload guards: marker-scoped, no-ops on non-offload composes (#deepseek-flash)
+     preflight_cpu_offload_ram "${full_dir}/${file}" || exit 1
+     preflight_offload_split_mode "${full_dir}/${file}" || exit 1
+-    preflight_kv_format_hint "${full_dir}/${file}" || true
+-    # WARN-only first-token-latency hint; never blocks a boot.
+-    preflight_offload_thp "${full_dir}/${file}" || true
+-    # Single-card util-override guard — runs even under --force (the nvfp4 slug
+-    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+-    preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+@@ -1617,6 +1665,10 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++# Refuse BEFORE teardown: validate the slug first — a launch refused here
++# (unknown slug, (NA) status without --force, missing compose file, model
++# files not on the host) must never have brought the running slug down.
++validate_variant "${VARIANT}"
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready

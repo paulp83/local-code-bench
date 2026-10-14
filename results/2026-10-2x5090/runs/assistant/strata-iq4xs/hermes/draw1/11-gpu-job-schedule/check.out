@@ -1,0 +1,7 @@
+PASS schedule-complete-ints
+PASS not-before-respected
+PASS dependencies-respected
+PASS gpu-capacity-never-exceeded
+PASS makespan-optimal
+PASS makespan-within-10-percent
+PASS: 6 FAIL: 0

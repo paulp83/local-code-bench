@@ -1,0 +1,372 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..d1fbde4 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -24,15 +24,24 @@ The extracted :func:`reaches` instead:
+ * validates the patch's **actual ``delivery_spec`` wiring** is present —
+   the declared volume mount(s) and/or entrypoint invoke string from
+   ``patches.yml`` / the Phase-A-prime ``delivery_spec`` — rather than a
+-  bare substring of the patch ID;
++  bare substring of the patch ID; for ``entrypoint_invoke`` (install-script)
++  patches the mount's **source** must also belong to the patch: a volume
++  marker only names the in-container target, and two different patches
++  share targets all the time (both W4A8 installers mount at
++  ``/etc/club3090/w4a8``), so mounting a DIFFERENT patch at this patch's
++  target is not this patch reaching;
+ * accepts either a ``COMPOSE_REGISTRY`` profile name *or* an arbitrary
+   absolute path to a compose file.
+ 
+-The deprecated ``delivery:`` boolean block is still consulted (read-only,
++When a patch declares a ``delivery_spec``, that check is the FINAL word:
++the deprecated ``delivery:`` boolean block is consulted only for entries
++carrying nothing else, and even there its file/dir markers are filtered
++against :data:`GENERIC_SOURCE_NAMES` — matching the ``patches`` parent
++directory or a bare ``install.sh`` matched *every* compose that mounts
++any patch dir / install script, which made an unwired install-script
++patch report "reached" forever. The block is still consulted (read-only,
+ the test still asserts on it) but every text probe it performs now runs
+-against the comment-stripped service body, never the header — so the
+-result is identical to the legacy behaviour on the shipped composes
+-while being immune to header/comment false positives on generated ones.
++against the comment-stripped service body, never the header.
+ """
+ 
+ from __future__ import annotations
+@@ -496,6 +505,97 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     return (bool(vol_markers) and vol_ok) or (bool(inv_markers) and inv_ok)
+ 
+ 
++# --------------------------------------------------------------------------
++# Mount-source identity — a volume marker names only the IN-CONTAINER
++# target; it does not prove the bytes mounted there come from THIS patch.
++# Different patches share targets all the time (the vLLM and the SGLang
++# W4A8 installers both mount at /etc/club3090/w4a8), so for
++# entrypoint_invoke (install-script) patches the mount line must ALSO
++# carry a source-side name owned by the patch.
++# --------------------------------------------------------------------------
++GENERIC_SOURCE_NAMES = {
++    # Structural directory names and boilerplate artifact names shared by
++    # EVERY patch of their kind: they appear in any compose that mounts
++    # any patch dir / runs any install script, so they identify nothing.
++    # (The legacy fallback matching ``patches`` / ``install.sh`` is what
++    # made every install-script patch "reach" every patch-carrying
++    # compose, permanently masking an unwire.)
++    "patches",
++    "local",
++    "install.sh",
++    "install.py",
++    "apply.sh",
++    "apply.py",
++    "patch.sh",
++    "patch.py",
++    "run.sh",
++    "setup.sh",
++    "boot.sh",
++}
++
++
++def _source_identity_tokens(patch: dict, root: Path) -> set[str]:
++    """Names that identify THIS patch as the SOURCE side of a mount.
++
++    Derived from the patch id plus its declared source paths (``files``
++    and the spec's ``script``/``sidecar``): a directory entry contributes
++    its own basename (e.g. ``vllm-effort-budget``), a file entry its
++    containing patch-directory basename (``fa2-fp8kv-sm86``) and its
++    filename. :data:`GENERIC_SOURCE_NAMES` entries are dropped — the
++    patch directory's OWN name (or the id) is the identifying token, not
++    the ``patches`` grandparent or a bare ``install.sh``.
++    """
++    tokens: set[str] = set()
++    if patch.get("id"):
++        tokens.add(str(patch["id"]))
++    paths = [str(rel) for rel in patch.get("files") or []]
++    spec = patch.get("delivery_spec") or {}
++    for key in ("script", "sidecar"):
++        if spec.get(key):
++            paths.append(str(spec[key]))
++    for rel in paths:
++        p = Path(rel)
++        candidates = [p.name] if (root / rel).is_dir() else [p.parent.name, p.name]
++        for tok in candidates:
++            if tok and tok not in GENERIC_SOURCE_NAMES:
++                tokens.add(tok)
++    return tokens
++
++
++def _mount_source_present(patch: dict, root: Path, body: str) -> bool:
++    """True iff some body line pairs a declared mount TARGET with one of
++    this patch's source-identity tokens (``…<src>/<patch-dir>:<dest>``).
++
++    Patches with no declared volume marker (pure invoke wiring, e.g. a
++    python_sidecar mounted and run by basename) trivially pass — there
++    is no target to confuse. A compose that bind-mounts a DIFFERENT
++    patch at this patch's declared target has the target line but never
++    this patch's source token on it, and correctly does NOT reach.
++    """
++    vol_markers, _ = _spec_wiring_markers(patch)
++    if not vol_markers:
++        return True
++    tokens = _source_identity_tokens(patch, root)
++    if not tokens:
++        return True
++    for line in body.splitlines():
++        if any(m in line for m in vol_markers) and any(t in line for t in tokens):
++            return True
++    return False
++
++
++def _legacy_entrypoint_invoke_reaches(patch: dict, root: Path, body: str) -> bool:
++    """Legacy ``delivery.entrypoint_invoke`` fallback, marker-sound.
++
++    Only patch-IDENTIFYING names count (see :func:`_source_identity_tokens`):
++    the old probe appended the parent of every ``files`` entry — always
++    ``patches`` for dir entries — and used bare filenames, so a compose
++    mounting ANY patch dir matched EVERY install-script patch. The patch
++    id in the service body still counts (comments are already stripped).
++    """
++    return any(tok in body for tok in _source_identity_tokens(patch, root))
++
++
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
+@@ -517,10 +617,13 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     ``name_or_path`` may be a COMPOSE_REGISTRY profile name OR an
+     arbitrary absolute path to a compose file.
+ 
+-    The deprecated ``delivery:`` boolean block is still honoured as a
+-    fallback for parity with the existing contract, but every probe runs
+-    against the service body so it cannot be tripped by a header/comment
+-    mention of the patch ID or a PR number.
++    When the patch declares a ``delivery_spec``, the spec check is the
++    FINAL word: the deprecated ``delivery:`` boolean block is consulted
++    only for entries that carry nothing else, and its ``entrypoint_invoke``
++    probes match only patch-identifying names (never the ``patches``
++    parent dir or a bare ``install.sh``). Every probe runs against the
++    service body, so it cannot be tripped by a header/comment mention of
++    the patch ID or a PR number.
+     """
+     # CONTRACT-2b-i: a `chat_template` patch's effective coverage MUST be
+     # computed from the REAL merged compose graph (`extends:` resolved with
+@@ -537,21 +640,30 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+ 
+     # Primary, sound path: the patch's declared delivery_spec wiring is
+     # genuinely present at the insertion point(s) it claims.
++    delivery = patch.get("delivery") or {}
+     if _spec_wiring_present(patch, body):
++        # A volume marker alone only names the in-container TARGET: a
++        # compose that bind-mounts a DIFFERENT patch at the same target
++        # used to count as wired. Install-script patches (entrypoint_invoke)
++        # must additionally pair the mount's SOURCE with this patch.
++        if delivery.get("entrypoint_invoke"):
++            return _mount_source_present(patch, root, body)
+         return True
+ 
+-    # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
+-    delivery = patch.get("delivery") or {}
++    # A declared delivery_spec is authoritative: its negative verdict is
++    # FINAL. The legacy fallback below must not override it — its old
++    # always-generic markers (``patches`` / ``install.sh``) used to answer
++    # True for every compose that mounts any patch dir, so an
++    # install-script patch whose mount + invoke had been stripped still
++    # "reached" and unwiring was undetectable.
++    if patch.get("delivery_spec"):
++        return False
++
++    # Legacy fallback (entries with ONLY the deprecated read-only
++    # `delivery:` block) — operates on the service body, so header/comment
++    # ID mentions never match.
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
+-        if patch["id"] in body:
++        if _legacy_entrypoint_invoke_reaches(patch, root, body):
+             return True
+     if (
+         delivery.get("genesis")
+diff --git a/scripts/lib/profiles/patches.yml b/scripts/lib/profiles/patches.yml
+index 1d45b86..427bc39 100644
+--- a/scripts/lib/profiles/patches.yml
++++ b/scripts/lib/profiles/patches.yml
+@@ -957,9 +957,11 @@ patches:
+     delivery_mechanism: install_script
+     delivery_spec:
+       script: models/gemma-4-31b/vllm/patches/vllm-pr42006-v0.22.0/install.sh
+-      invoke: "boot-time: applies the #42006 single-file diff to stock v0.22.0's gemma4_tool_parser.py (idempotent; fail-loud)"
++      mounted_at: /etc/club3090/pr42006
++      invoke: "bash /etc/club3090/pr42006/install.sh"
+       invoked_before: vllm-import
+       wired_at: [volumes, entrypoint]
++      note: "boot-time: applies the #42006 single-file diff to stock v0.22.0's gemma4_tool_parser.py (idempotent; fail-loud). The compose mounts the whole dir at /etc/club3090/pr42006 and the entrypoint runs bash /etc/club3090/pr42006/install.sh (see dual/autoround-int4/{bf16-mtp,int8}.yml)."
+     drift_guard:
+       kind: behavioral
+       check: "Gemma 4 streamed multi-tool response retains arguments on ALL calls (not just the last) on the pinned v0.22.0 image"
+@@ -1041,9 +1043,11 @@ patches:
+     delivery_mechanism: install_script
+     delivery_spec:
+       script: models/gemma-4-31b/vllm/patches/vllm-pr40391-v0.22.0/install.sh
+-      invoke: "boot-time: copies kv_cache_shape_utils.py + applies the ~240-line #40391 diff onto stock v0.22.0 (idempotent; fail-loud if the diff does not apply cleanly)"
++      mounted_at: /etc/club3090/pr40391
++      invoke: "bash /etc/club3090/pr40391/install.sh"
+       invoked_before: vllm-import
+       wired_at: [volumes, entrypoint]
++      note: "boot-time: copies kv_cache_shape_utils.py + applies the ~240-line #40391 diff onto stock v0.22.0 (idempotent; fail-loud if the diff does not apply cleanly). The compose mounts the whole dir at /etc/club3090/pr40391 and the entrypoint runs bash /etc/club3090/pr40391/install.sh (see dual/autoround-int4/int8.yml)."
+     drift_guard:
+       kind: import-and-boot
+       check: "Gemma 4 INT8 per-token-head KV cache pages unify (get_padded_attention_kv_cache_shape present) on the pinned v0.22.0 image"
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 6f4aabf..28384d2 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -319,6 +319,145 @@ for patch in chat_template_patches:
+                     f"../../patches/... mount form)"
+                 )
+ 
++# (6) Install-script (delivery.entrypoint_invoke) patches: an UNWIRED
++#     compose must report NOT-reached. The legacy fallback used to answer
++#     True for every compose that mounts any patch dir (its markers were
++#     the "patches" grandparent of a dir entry and bare filenames like
++#     install.sh), so stripping a patch's mount + invoke from a compose
++#     was undetectable. Controls per install-script patch (synthetic
++#     fixtures, no docker needed):
++#       full    — mount + invoke present            -> reaches (positive)
++#       stripped— this patch's mount + invoke gone, a DECOY install-script
++#                 patch still mounted (body keeps the "patches" and
++#                 "install.sh" strings that defeated the old fallback)
++#                                                       -> must NOT reach
++#       swapped — a DIFFERENT patch mounted at this patch's target with
++#                 the invoke kept (the sound spec check matches the
++#                 target alone; only source identity catches this)
++#                                                       -> must NOT reach
++#     Plus a legacy-only control: entries WITHOUT any delivery_spec still
++#     reach by their patch-dir name, but not by "patches"/"install.sh".
++decoy_mount = "      - ../../../patches/decoy-other-patch:/etc/club3090/decoy-patch:ro\n"
++decoy_entry = (
++    "    entrypoint:\n"
++    "      - /bin/bash\n"
++    "      - -c\n"
++    "      - |\n"
++    "        bash /etc/club3090/decoy-patch/install.sh\n"
++)
++install_script_patches = [
++    p for p in patches
++    if (p.get("delivery") or {}).get("entrypoint_invoke")
++    and p.get("delivery_mechanism") == "install_script"
++    and (p.get("delivery_spec") or {}).get("mounted_at")
++]
++for patch in install_script_patches:
++    spec = patch["delivery_spec"]
++    mounted = spec["mounted_at"]
++    src_dir = Path(spec.get("script") or patch["id"]).parent.name
++    inv = spec.get("invoke") or ""
++    inv_line = f"        {inv} || exit 1\n" if "/" in inv else ""
++    with tempfile.TemporaryDirectory() as _td2:
++        _tdp2 = Path(_td2)
++        full = _tdp2 / "full.yml"
++        full.write_text(
++            "services:\n"
++            "  svc:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            f"      - ../../../patches/{src_dir}:{mounted}:ro\n"
++            + decoy_mount + decoy_entry + inv_line +
++            "        exec vllm-serve --model m\n",
++            encoding="utf-8",
++        )
++        stripped = _tdp2 / "stripped.yml"
++        stripped.write_text(
++            "services:\n"
++            "  svc:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            + decoy_mount + decoy_entry +
++            "        exec vllm-serve --model m\n",
++            encoding="utf-8",
++        )
++        swapped = _tdp2 / "swapped.yml"
++        swapped.write_text(
++            "services:\n"
++            "  svc:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            f"      - ../../../patches/decoy-other-patch:{mounted}:ro\n"
++            + decoy_mount + decoy_entry + inv_line +
++            "        exec vllm-serve --model m\n",
++            encoding="utf-8",
++        )
++        if not pa.reaches(root, patch, str(full)):
++            errors.append(
++                f"{patch['id']}: fixture with mount + invoke does not reach "
++                f"(source-identity check is over-strict)"
++            )
++        if pa.reaches(root, patch, str(stripped)):
++            errors.append(
++                f"{patch['id']} still reaches a compose with its mount + "
++                "invoke REMOVED (the legacy fallback must not answer True "
++                "on another patch's 'patches'/'install.sh' strings)"
++            )
++        if pa.reaches(root, patch, str(swapped)):
++            errors.append(
++                f"{patch['id']} reaches a compose mounting a DIFFERENT "
++                f"patch at its target {mounted!r} (the mount SOURCE must "
++                "match the patch, not just the target)"
++            )
++
++# Legacy-only fallback control: an entry with just the deprecated
++# delivery: block reaches by its patch-dir name, never by "patches".
++legacy_control = {
++    "id": "synthetic-legacy-only-patch",
++    "files": ["models/qwen3.8-27b/vllm/patches/vllm-flashinfer-decode-pin"],
++    "delivery": {
++        "dockerfile_bake": False,
++        "entrypoint_invoke": True,
++        "genesis": False,
++    },
++}
++with tempfile.TemporaryDirectory() as _td3:
++    _tdp3 = Path(_td3)
++    ghost = _tdp3 / "ghost.yml"
++    ghost.write_text(
++        "services:\n"
++        "  svc:\n"
++        "    image: scratch\n"
++        "    volumes:\n"
++        + decoy_mount + decoy_entry +
++        "        exec vllm-serve --model m\n",
++        encoding="utf-8",
++    )
++    hit = _tdp3 / "hit.yml"
++    hit.write_text(
++        "services:\n"
++        "  svc:\n"
++        "    image: scratch\n"
++        "    volumes:\n"
++        "      - ../../../patches/vllm-flashinfer-decode-pin:/etc/club3090/synth:ro\n"
++        "    entrypoint:\n"
++        "      - /bin/bash\n"
++        "      - -c\n"
++        "      - |\n"
++        "        bash /etc/club3090/synth/install.sh\n"
++        "        exec vllm-serve --model m\n",
++        encoding="utf-8",
++    )
++    if pa.reaches(root, legacy_control, str(ghost)):
++        errors.append(
++            "legacy-only fallback still matches another patch's mount: "
++            "'patches'/'install.sh' are not patch identity"
++        )
++    if not pa.reaches(root, legacy_control, str(hit)):
++        errors.append(
++            "legacy-only fallback lost its identifying marker "
++            "(patch-dir name in the service body must still reach)"
++        )
++
+ arch_allowed_keys = pa.ARCH_ALLOWED_KEYS
+ arch_required = pa.ARCH_REQUIRED_KEYS
+ valid_trc = pa.VALID_TRC

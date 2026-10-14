@@ -1,0 +1,25 @@
+{
+ "n": 1518,
+ "config": "strata-iq4xs-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 423.1,
+ "steps": 32,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.4,
+ "checks_passed": 12,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/bench-row-formatter.sh",
+  "scripts/switch.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-switch-orphan-teardown.sh": 1
+ },
+ "effort_note": "ran as \"low\" but omp sent no reasoning_effort; Qwen3.8 template default xhigh (relabelled 2026-10-12)"
+}

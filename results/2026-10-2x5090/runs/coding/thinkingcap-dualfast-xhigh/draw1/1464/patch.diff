@@ -1,0 +1,110 @@
+diff --git a/scripts/launch.sh b/scripts/launch.sh
+index 7538ad3..c1c3061 100755
+--- a/scripts/launch.sh
++++ b/scripts/launch.sh
+@@ -1448,8 +1448,9 @@ _note_brief() {
+ }
+ 
+ # Surface the lifecycle health flag (PR-A) before handing off. The actual gate
+-# (caveats notice / (NA) → require --force) lives in switch.sh up_variant, which
+-# this script delegates to; this is just a heads-up so the user isn't surprised.
++# (caveats notice / (NA) → require --force) lives in switch.sh (preflight_variant,
++# run before the running slug is torn down), which this script delegates to; this
++# is just a heads-up so the user isn't surprised.
+ _launch_status="${LAUNCH_VARIANT_STATUS[$VARIANT]:-production}"
+ _launch_status_note="${LAUNCH_VARIANT_STATUS_NOTE[$VARIANT]:-}"
+ case "$_launch_status" in
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..3a33970 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1224,7 +1224,21 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
++# Refusal preflight — runs BEFORE down_running(), so a launch that cannot
++# happen never leaves the rig serving nothing.
++#
++# The failure modes that motivated the split (reference rig, twice in one day):
++# an experimental slug run without --force, and a worktree whose model files
++# are not on the host (no MODEL_DIR); a mistyped slug did the same. In each
++# case the old order brought the running slug down FIRST and only then refused
++# — and the rig kept serving nothing. Every check here is static: it inspects
++# the registry, the compose metadata, and host properties that do not change
++# across the switch (total VRAM, arch, host RAM, model files). None reads
++# FREE VRAM, which is exactly why the free-VRAM gates (preflight_compose_gpu_
++# fit / gpu_preflight) deliberately stay in up_variant() AFTER the teardown:
++# pre-teardown the slug being replaced still holds its own VRAM, and gpu_fit's
++# settle-retry exists to absorb the just-torn-down container's release lag.
++preflight_variant() {
+   local v="$1"
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+@@ -1239,7 +1253,7 @@ up_variant() {
+     exit 1
+   fi
+ 
+-  # Pre-up sanity:
++  # Pre-up sanity (refusals only — nothing here needs the GPUs to be free):
+   #  - repo_drift: warn if local HEAD is behind origin/master
+   #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist on host
+   #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case;
+@@ -1252,11 +1266,6 @@ up_variant() {
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+-      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+@@ -1282,6 +1291,33 @@ up_variant() {
+     # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+     preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
++}
++
++# Post-teardown phase: the two free-VRAM gates (they must see the VRAM that
++# down_running() just freed), the torn-down container's shm cleanup, and the
++# compose up itself. A refusal that fires HERE (free VRAM still held by
++# something we don't manage) is by design — the replacement cannot boot on a
++# pinned card, and the message says how to fix it.
++up_variant() {
++  local v="$1"
++  if [[ -z "${VARIANTS[$v]:-}" ]]; then
++    echo "ERROR: unknown variant '${v}'." >&2
++    echo "Run: bash scripts/switch.sh --list" >&2
++    exit 1
++  fi
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${dir}"
++  if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    # shellcheck source=preflight.sh
++    source "${ROOT_DIR}/scripts/preflight.sh"
++    if [[ "$eng" == "vllm" ]]; then
++      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
++      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
++      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
++      # so its settle-retry also covers the just-torn-down container's VRAM lag.
++      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
++    fi
++  fi
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+   # container stop leaves them resident — 65 GB on the reference rig 2026-09-25, incl. two 32 GiB
+@@ -1616,7 +1652,11 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ # steered away; this catches the deliberate-or-pinned case.
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
++# Refuse BEFORE tearing down: preflight_variant runs ahead of down_running,
++# so a slug that cannot launch (NA without --force, model files missing on
++# the host, a mistyped slug) leaves the running slug up and serving.
+ resolve_ready_url "${VARIANT}"
++preflight_variant "${VARIANT}"
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready

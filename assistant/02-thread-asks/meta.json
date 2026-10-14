@@ -1,0 +1,9 @@
+{
+  "id": "02-thread-asks",
+  "source": "session-derived",
+  "category": "reading",
+  "difficulty": "medium",
+  "est_minutes": 8,
+  "needs_web": false,
+  "notes": "Shape from sessions where the maintainer replied on a GitHub thread and the user asked what was requested of them."
+}

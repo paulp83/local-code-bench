@@ -1,0 +1,26 @@
+{
+  "id": "32-event-plan-issues",
+  "set": "hard-v1",
+  "axis": "C",
+  "source": "novel",
+  "category": "conflicting-sources",
+  "difficulty": "hard",
+  "est_minutes": 30,
+  "needs_web": false,
+  "notes": "A pass that flags everything that looks odd reports DUPLICATE_RSVP (ED@ vs ed@ only differ in case but appear once), the UTC/CET pairs that agree, and misses the quiet CATERING_SHORT and WEEKDAY_MISMATCH. Check names list the exact codes; a decoy per rule (standing capacity, 'maybe' RSVPs, matching UTC pairs, holiday list) must stay unreported.",
+  "spec_map": {
+    "issues-parses": "`/workspace/issues.json`: a JSON array of objects",
+    "issues-sorted-by-code": "sorted by code",
+    "issue-found-CAPACITY": "list both files; a rule that is only about one file lists that file.",
+    "issue-found-CATERING_SHORT": "list both files; a rule that is only about one file lists that file.",
+    "issue-found-OVER_BUDGET": "list both files; a rule that is only about one file lists that file.",
+    "issue-found-TIME_MISMATCH": "list both files; a rule that is only about one file lists that file.",
+    "issue-found-WEEKDAY_MISMATCH": "list both files; a rule that is only about one file lists that file.",
+    "no-invented-issues": "do not invent other issues, and do not report a code whose condition does not hold",
+    "issue-count-exact": "A code that does not occur is left out.",
+    "plan-date": "`Date: <YYYY-MM-DD>`",
+    "plan-venue": "`Venue: <venue name>`",
+    "plan-confirmed-guests": "`Confirmed guests: <number>`",
+    "plan-open-issues": "`Open issues: <number of entries in issues.json>`"
+  }
+}

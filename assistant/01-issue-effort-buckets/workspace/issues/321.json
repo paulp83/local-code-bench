@@ -1,0 +1,12 @@
+{
+  "number": 321,
+  "title": "registry row missing quant",
+  "labels": [
+    "design",
+    "docs",
+    "enhancement"
+  ],
+  "files_touched": 7,
+  "has_repro": true,
+  "needs_gpu": false
+}

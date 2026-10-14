@@ -1,0 +1,14 @@
+{
+ "task": "07-forum-reply-style",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 8.8,
+ "tool_calls": 4,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 11,
+ "checks_total": 11,
+ "partial": 1.0
+}

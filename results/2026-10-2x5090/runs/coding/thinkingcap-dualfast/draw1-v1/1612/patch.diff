@@ -1,0 +1,129 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index e69007a..d689913 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -420,6 +420,54 @@ def _install_sources(patch: dict) -> list[str]:
+     return sorted(n for n in names if n and n not in _GENERIC_SCRIPT_NAMES and n != "patches")
+ 
+ 
++def _is_ambiguous_template_target(mounted_at: str | None) -> bool:
++    """True if a chat-template ``mounted_at`` is a bare suffix (a single path
++    component, e.g. ``/chat_template.jinja``).
++
++    Such a target is AMBIGUOUS: the template is mounted over each model dir's
++    own ``chat_template.jinja``, so on the container target alone ANY compose
++    that mounts ANY template over a model dir matches it. It must be
++    disambiguated by the vendored template's own source on the same line.
++    A distinctive container path (``/etc/apex-qwen-chat-template.jinja``) is
++    self-identifying and needs no such disambiguation."""
++    if not mounted_at:
++        return False
++    return len([part for part in mounted_at.split("/") if part]) == 1
++
++
++def _chat_template_sources(patch: dict) -> list[str]:
++    """Host-side names that identify a chat_template patch on its mount line: the
++    vendored template's own directory or (unique) filename, minus generic names.
++
++    The generic basename ``chat_template.jinja`` sits on EVERY template mount, so
++    it is dropped and the identifying directory is used instead (e.g.
++    ``qwen38-reasoning-effort-template``); a distinctive filename (e.g.
++    ``apex-qwen-chat-template.jinja``) identifies the patch on its own."""
++    if patch.get("delivery_mechanism") != "chat_template":
++        return []
++    names: set[str] = set()
++    generic_dirs = {"patches", "models", ""}
++    for rel in patch.get("files") or []:
++        path = Path(rel)
++        if path.suffix in CHAT_TEMPLATE_ARTIFACT_SUFFIXES:
++            # a .jinja file: its directory identifies it; the filename too,
++            # unless it is the generic chat_template.* (on every template mount).
++            if path.stem != "chat_template":
++                names.add(path.name)
++            names.add(path.parent.name)
++        elif not path.suffix:
++            # a directory entry (e.g. glm53-minja-numeric-index)
++            names.add(path.name)
++    return sorted(n for n in names if n and n not in generic_dirs)
++
++
++def _wiring_sources(patch: dict) -> list[str]:
++    """Host-side source names that pin a mounted-artifact patch to its own mount
++    line (the source-aware check of #1597/#1610): install scripts and
++    chat templates alike."""
++    return _install_sources(patch) or _chat_template_sources(patch)
++
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -468,16 +516,20 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     # chat_template → the vendored `.jinja` is bind-mounted at `mounted_at`
+     # (already added as a volume marker above via `mounted_at`). Two
+     # in-tree wiring styles:
+-    #   * explicit `--chat-template <mounted_at>` arg (froggeric): require
+-    #     BOTH tokens in the merged body (rendered as adjacent list items,
+-    #     so the joined string never appears — match them separately);
+-    #   * mount-only (carnice mounts over the model dir's chat_template.jinja
+-    #     and vLLM auto-loads it; `wired_at: [volumes]`): the mount target
+-    #     alone is the load-bearing artifact, no `--chat-template` arg.
++    #   * explicit `--chat-template <mounted_at>` arg (froggeric, qwen38 vLLM);
++    #   * mount-only (carnice, qwen38 SGLang: mounted over the model dir's
++    #     chat_template.jinja and auto-loaded; no `--chat-template` arg).
++    #
++    # The bare `--chat-template` flag must NOT be an invoke marker on its own:
++    # it is a substring of `--chat-template-file` and is passed by EVERY vLLM
++    # compose for ITS OWN template, so as a standalone `any()` marker it made
++    # one template "reach" composes that mount a different one. The
++    # load-bearing discriminator is the mount TARGET — and where that target is
++    # an ambiguous suffix, the source-aware volume check in
++    # `_spec_wiring_present` pins it to this patch's own vendored template. So
++    # expose only the mount path here, never the bare flag.
+     if patch.get("delivery_mechanism") == "chat_template" and mounted_at:
+-        if "--chat-template" in (spec.get("invoke") or ""):
+-            inv.append("--chat-template")
+-            inv.append(mounted_at)
++        inv.append(mounted_at)
+ 
+     return vol, inv
+ 
+@@ -497,15 +549,33 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = spec.get("wired_at")
+     if isinstance(wired_at, str):
+         wired_at = [wired_at]
+-    wired_at = set(wired_at or [])
++    # `command` and `entrypoint` are the SAME insertion point (the launch
++    # command); some patches declare one, some the other. Treat them alike so a
++    # `wired_at: [volumes, command]` patch goes through the same both-points
++    # branch as `[volumes, entrypoint]` — not the "unknown: any marker"
++    # fallback, where the bare `--chat-template` flag used to decide alone.
++    wired_at = {"entrypoint" if w == "command" else w for w in (wired_at or [])}
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+     vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
+-    sources = _install_sources(patch)
+-    if vol_markers and sources:
+-        # The container target alone is not this patch's: two patches can mount at the same
+-        # path (the vLLM and SGLang W4A8 patches both use /etc/club3090/w4a8), so require the
+-        # patch's own source on the SAME line as the target (#1597).
++    sources = _wiring_sources(patch)
++    # A container target alone is not proof THIS patch is the one mounted: two
++    # patches can share a target (the vLLM and SGLang W4A8 patches both use
++    # /etc/club3090/w4a8), and a chat-template target that is a bare SUFFIX
++    # (mounted over each model dir's own chat_template.jinja, e.g.
++    # qwen38's /chat_template.jinja) is matched by ANY compose that mounts
++    # ANY template over a model dir. In both cases require the patch's own
++    # source (its directory / filename) on the SAME line as the target
++    # (#1597/#1610). A unique, self-identifying target (a distinctive
++    # container path) needs no such disambiguation.
++    needs_source = bool(sources) and (
++        patch.get("delivery_mechanism") == "install_script"
++        or (
++            patch.get("delivery_mechanism") == "chat_template"
++            and _is_ambiguous_template_target(spec.get("mounted_at"))
++        )
++    )
++    if vol_markers and needs_source:
+         vol_ok = any(any(m in ln for m in vol_markers) and any(src in ln for src in sources)
+                      for ln in body.splitlines())
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)

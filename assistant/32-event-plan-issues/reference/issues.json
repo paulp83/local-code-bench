@@ -1,0 +1,35 @@
+[
+  {
+    "code": "CAPACITY",
+    "files": [
+      "rsvp.csv",
+      "venue.json"
+    ]
+  },
+  {
+    "code": "CATERING_SHORT",
+    "files": [
+      "catering.csv",
+      "rsvp.csv"
+    ]
+  },
+  {
+    "code": "OVER_BUDGET",
+    "files": [
+      "budget.md",
+      "quotes.csv"
+    ]
+  },
+  {
+    "code": "TIME_MISMATCH",
+    "files": [
+      "schedule.md"
+    ]
+  },
+  {
+    "code": "WEEKDAY_MISMATCH",
+    "files": [
+      "schedule.md"
+    ]
+  }
+]

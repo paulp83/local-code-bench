@@ -1,0 +1,22 @@
+{
+ "n": 1571,
+ "config": "thinkingcap-dualfast",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 390.5,
+ "steps": 57,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 0.5,
+ "files_touched": [
+  "scripts/report.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-report-gpu-attribution.sh": 1
+ }
+}

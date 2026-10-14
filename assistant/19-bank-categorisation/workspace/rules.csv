@@ -1,0 +1,9 @@
+pattern,category
+REFUND,refunds
+PAYROLL,income
+SHELL,fuel
+SUPERMARKET,groceries
+MARKET,dining
+RAIL,transport
+NETFLIX,subscriptions
+RENT,housing

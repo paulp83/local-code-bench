@@ -1,0 +1,29 @@
+[
+  {
+    "code": "CAPACITY",
+    "files": [
+      "rsvp.csv",
+      "venue.json"
+    ]
+  },
+  {
+    "code": "DUPLICATE_RSVP",
+    "files": [
+      "rsvp.csv"
+    ]
+  },
+  {
+    "code": "OVER_BUDGET",
+    "files": [
+      "budget.md",
+      "quotes.csv"
+    ]
+  },
+  {
+    "code": "TIME_MISMATCH",
+    "files": [
+      "invitation.md",
+      "schedule.md"
+    ]
+  }
+]

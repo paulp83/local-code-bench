@@ -1,0 +1,290 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 2b0d50f..3e686d1 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -195,8 +195,11 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# best-effort container for VRAM + cmd introspection (name heuristic)
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++# best-effort container for VRAM + cmd introspection. Resolve it by the PUBLISHED PORT of $URL (from
++# `docker ps`, any engine) — NOT a `vllm-(qwen|gemma)` name heuristic, which never matched an SGLang
++# container, so its GPUs were listed rig-wide and its spec was unknown (#1537). Empty when nothing on
++# $URL's port is a running container (the probe then falls back to rig-wide, as before).
++CONTAINER="${CONTAINER:-$(URL="$URL" python3 "$PROBE_PY" --container-for-url 2>/dev/null || true)}"
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ _served_seqs()   { _container_cmd | command grep -oE 'max-num-seqs [0-9]+'  | command grep -oE '[0-9]+' | head -1; }
+@@ -231,13 +234,13 @@ _gpu_fp() {
+ }
+ 
+ _spec_fp() {
+-  local cmd
+-  cmd="$(_container_cmd)"
+-  if [[ -z "$cmd" ]]; then echo "spec ?"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'num-speculative|speculative-config|--speculative'; then echo "MTP"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
+-  echo "spec off"
++  # Read the drafter from the ENGINE, not from the container's Cmd. A vLLM compose that builds
++  # --speculative-config inside their entrypoint (from SPEC_N) never shows it in Cmd, so grepping Cmd
++  # read "spec off" with MTP n=4 running; and an SGLang engine isn't in Cmd at all. --spec-label reads
++  # vLLM's boot config (from $CONTAINER's `docker logs` HEAD) or SGLang's /get_server_info (from $URL).
++  local lbl
++  lbl="$(CONTAINER="$CONTAINER" URL="$URL" python3 "$PROBE_PY" --spec-label 2>/dev/null || true)"
++  echo "${lbl:-spec ?}"
+ }
+ 
+ # --- per-rig #249 record: self-tee stdout so the per-N `RESULT` lines (whichever
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 4a75db5..e4300d5 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -368,6 +368,13 @@ def container_gpus(container):
+         return None, "every GPU on the host (rig-wide: run_context.py unavailable)"
+     if selectors is None:
+         return None, f"every GPU on the host (container {container} sees them all)"
++    # A single DeviceIDs entry can carry several comma-joined GPUs — `["2,3"]` — which is exactly what
++    # Compose emits from `device_ids: ["${ESTATE_GPUS}"]` when ESTATE_GPUS="2,3". Treat it like the
++    # explicit `["2", "3"]` it came from, or a 2-GPU container reads as one unresolvable selector and
++    # silently falls back to every GPU on the host (#1537).
++    selectors = [part.strip() for sel in selectors for part in str(sel).split(",") if part.strip()]
++    if not selectors:
++        return None, f"every GPU on the host (container {container} sees them all)"
+     return selectors, f"GPU {', '.join(selectors)} (container {container})"
+ 
+ 
+@@ -419,6 +426,209 @@ def gpu_label(selectors=None):
+     return " + ".join(f"{n}× {name}" for name, n in names.items())
+ 
+ 
++# ── which container answers $URL (#1537) ───────────────────────────────────────
++# The card named the wrong container because CONTAINER came from a
++# `vllm-(qwen|gemma)` name heuristic: an SGLang container was never found, so the
++# GPUs were listed rig-wide and the spec probe never saw the engine. Resolve the
++# container by the PUBLISHED PORT of $URL instead — engine-agnostic, so vLLM,
++# SGLang and llama.cpp all resolve. One `docker ps`, read from any engine.
++def _url_port(url):
++    """The host port in a URL (`http://host:PORT/…`), or None when it is absent."""
++    m = re.search(r"://[^/:]+:(\d+)\b", url or "")
++    return int(m.group(1)) if m else None
++
++
++def _published_host_ports(ports_field):
++    """Every host port a docker-ps ``Ports`` field publishes, expanding ranges
++    (``0.0.0.0:6333-6334->6333-6334/tcp`` → 6333, 6334). Handles the IPv6 form
++    (``[::]:8020->8000/tcp``) and an unmapped entry (no ``->``) contributes nothing."""
++    ports = set()
++    for entry in (ports_field or "").split(","):
++        entry = entry.strip()
++        head = entry.split("->", 1)[0].strip()
++        if not head:
++            continue
++        m = re.search(r":(\d+)(?:-(\d+))?$", head)
++        if not m:
++            continue
++        lo = int(m.group(1))
++        hi = int(m.group(2)) if m.group(2) else lo
++        ports.update(range(lo, hi + 1))
++    return ports
++
++
++def container_for_url(url):
++    """Name of the running container publishing $URL's port, or "" when none does.
++    Engine-agnostic: it keys off the published port from ``docker ps``, not a name
++    pattern, so SGLang / llama.cpp containers resolve exactly like vLLM ones."""
++    port = _url_port(url)
++    if port is None:
++        return ""
++    try:
++        out = subprocess.run(
++            ["docker", "ps", "--format", "{{.Names}}|{{.Ports}}"],
++            capture_output=True, text=True, encoding="utf-8",
++            errors="replace", timeout=10,
++        )
++        rows = out.stdout.splitlines()
++    except Exception:
++        return ""
++    for line in rows:
++        if not line.strip():
++            continue
++        if "|" in line:
++            name, ports = line.split("|", 1)
++        else:
++            # Tolerate an engine that ignored --format and emitted ``name ports``.
++            parts = line.split(None, 1)
++            if len(parts) < 2:
++                continue
++            name, ports = parts
++        if port in _published_host_ports(ports):
++            return name.strip()
++    return ""
++
++
++# ── what the ENGINE says it is running (speculative decoding) (#1537) ──────────
++# vLLM composes that build --speculative-config inside their entrypoint (from
++# SPEC_N) never show it in Cmd, so grepping Cmd read "spec off" with MTP n=4 live.
++# Read it from the engine instead: vLLM prints its full config once at boot (the
++# HEAD of `docker logs`, not the tail); SGLang answers /get_server_info.
++def _read_log_head(container, stop_pred=None, max_lines=200000):
++    """The first lines of `docker logs` (stdout+stderr), read from the START — the
++    engine config is printed once at boot, so the tail (what detect_kv_tokens reads)
++    misses it. Stops at `stop_pred(line)` or after `max_lines` and kills the reader,
++    so a long-lived server is not drained from its first request onward."""
++    if not container:
++        return ""
++    try:
++        proc = subprocess.Popen(
++            ["docker", "logs", container],
++            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++            text=True, encoding="utf-8", errors="replace",
++        )
++    except Exception:
++        return ""
++    collected = []
++    try:
++        for i, line in enumerate(proc.stdout):
++            collected.append(line)
++            if i >= max_lines or (stop_pred is not None and stop_pred(line)):
++                break
++    except Exception:
++        pass
++    finally:
++        try:
++            proc.stdout.close()
++        except Exception:
++            pass
++        try:
++            proc.kill()
++        except Exception:
++            pass
++    return "".join(collected)
++
++
++def _is_vllm_spec_line(line):
++    """A boot config line carrying vLLM's speculative_config= value."""
++    return "speculative_config=" in line and (
++        "LLM engine" in line or "with config:" in line
++    )
++
++
++def parse_vllm_spec_label(text):
++    """vLLM's boot config line → a spec label, or None when the line is absent.
++
++    `Initializing a V1 LLM engine ... with config: ... speculative_config=...`
++    prints `speculative_config=None` for no drafting, or a
++    `SpeculativeConfig(method='mtp', ..., num_spec_tokens=4)` repr for MTP →
++    `MTP n=4`.
++    """
++    for line in (text or "").splitlines():
++        if "speculative_config=" not in line:
++            continue
++        # Only the engine's own boot config counts, not any stray mention.
++        if "LLM engine" not in line and "with config:" not in line:
++            continue
++        if re.search(r"speculative_config=None\b", line):
++            return "spec off"
++        m = re.search(r"speculative_config=SpeculativeConfig\(", line)
++        if not m:
++            continue
++        inner = _balanced(line, line.index("(", m.start()))
++        mm = re.search(r"method=['\"]?([^'\",)]+)", inner)
++        nm = re.search(r"num_spec(?:ulative)?_tokens=(\d+)", inner)
++        if not mm:
++            continue
++        label = mm.group(1).strip().upper()
++        if nm:
++            label += f" n={nm.group(1)}"
++        return label
++    return None
++
++
++def _balanced(text, open_idx):
++    """The text inside the parens that open at `open_idx` (inclusive of the balanced
++    body, exclusive of the outer parens). A trailing run is returned when unbalanced."""
++    depth = 0
++    for i in range(open_idx, len(text)):
++        c = text[i]
++        if c == "(":
++            depth += 1
++        elif c == ")":
++            depth -= 1
++            if depth == 0:
++                return text[open_idx + 1:i]
++    return text[open_idx + 1:]
++
++
++def _http_json(url, timeout=5):
++    try:
++        req = urllib.request.Request(url)
++        with urllib.request.urlopen(req, timeout=timeout) as resp:
++            return json.loads(resp.read().decode("utf-8", "ignore"))
++    except Exception:
++        return None
++
++
++def parse_sglang_spec_label(info):
++    """SGLang /get_server_info payload → a spec label, or None when it is not a
++    readable SGLang answer. `speculative_algorithm` + `speculative_num_steps` drive
++    the label; EAGLE drafting from the target's OWN checkpoint is MTP, not EAGLE."""
++    if not isinstance(info, dict):
++        return None
++    algo = info.get("speculative_algorithm")
++    if not algo:
++        return "spec off"
++    n = info.get("speculative_num_steps")
++    name = str(algo).strip().upper()
++    draft = str(info.get("speculative_draft_model_path") or "").strip().rstrip("/")
++    target = str(info.get("model_path") or "").strip().rstrip("/")
++    if name.startswith("EAGLE") and draft and draft == target:
++        name = "MTP"
++    label = name
++    if n not in (None, "", 0, "0"):
++        label += f" n={n}"
++    return label
++
++
++def spec_label(container="", url=""):
++    """The engine's speculative-decoding label, or "" when neither source is
++    readable. Tries vLLM's boot config (needs `$CONTAINER`) first, then SGLang's
++    /get_server_info (needs `$URL`)."""
++    if container:
++        text = _read_log_head(container, stop_pred=_is_vllm_spec_line)
++        if text:
++            lbl = parse_vllm_spec_label(text)
++            if lbl is not None:
++                return lbl
++    if url:
++        lbl = parse_sglang_spec_label(_http_json(url.rstrip("/") + "/get_server_info"))
++        if lbl is not None:
++            return lbl
++    return ""
++
++
+ def parse_result_line(line):
+     """Parse 'RESULT k=v …' into a dict. Missing keys stay absent."""
+     if not line:
+@@ -1200,8 +1410,22 @@ def main(argv=None):
+     p.add_argument("--detect-kv", action="store_true")
+     p.add_argument("--gpu-label", action="store_true",
+                    help="'N× <GPU name>' for the GPUs $CONTAINER sees (every GPU when it can't be resolved)")
++    p.add_argument("--container-for-url", action="store_true",
++                   help="name of the running container publishing $URL's port (any engine), or nothing")
++    p.add_argument("--spec-label", action="store_true",
++                   help="speculative-decoding label read from the engine ($CONTAINER logs / $URL), or nothing")
+     args = p.parse_args(argv)
+ 
++    if args.container_for_url:
++        name = container_for_url(_env("URL"))
++        if name:
++            print(name)
++        return 0
++    if args.spec_label:
++        label = spec_label(_env("CONTAINER"), _env("URL"))
++        if label:
++            print(label)
++        return 0
+     if args.gpu_label:
+         print(gpu_label(container_gpus(_env("CONTAINER"))[0]))
+         return 0

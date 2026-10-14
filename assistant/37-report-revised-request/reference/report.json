@@ -1,0 +1,14 @@
+{
+  "quarter": "2026-Q3",
+  "revenue_by_region": {
+    "East": 88663.48,
+    "North": 70641.15,
+    "South": 91351.89
+  },
+  "top_products": [
+    "Prod-C",
+    "Prod-H",
+    "Prod-F"
+  ],
+  "total_revenue": 250656.52
+}

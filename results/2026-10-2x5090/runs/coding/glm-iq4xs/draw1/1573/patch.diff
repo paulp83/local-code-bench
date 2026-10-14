@@ -1,0 +1,103 @@
+diff --git a/docs/QUALITY_TEST.md b/docs/QUALITY_TEST.md
+index 8bb7b38..15a231d 100644
+--- a/docs/QUALITY_TEST.md
++++ b/docs/QUALITY_TEST.md
+@@ -543,7 +543,7 @@ all of them.
+ | engine | server prerequisite (boot) | what the wrapper sends | how it verifies |
+ |---|---|---|---|
+ | llama.cpp | `--reasoning-budget N` — the shipped composes read `REASONING_BUDGET=N` | nothing (server-wide) | `docker inspect` of the serving container, resolving the flag's **value** through the container env. The composes always emit `--reasoning-budget "${REASONING_BUDGET:--1}"`, so a *present* flag with the env unset boots **unbounded (-1)** — presence proves nothing, the value must be exactly N. |
+-| vLLM v0.29.0 | `--reasoning-parser <name>` | `thinking_token_budget: N` (via benchlocal's `--extra-body`) | the container command carries a parser — without one vLLM rejects the field per request, so every scenario would 400 |
++| vLLM v0.29.0 | `--reasoning-parser <name>` | `thinking_token_budget: N` (via benchlocal's `--extra-body`) | the container command carries a parser (or the boot log reports one, for images whose launcher adds the flag inside its own script) — without one vLLM rejects the field per request, so every scenario would 400 |
+ | SGLang v0.5.20 | `--enable-custom-logit-processor` | `custom_logit_processor` (the model-specific `ThinkingBudgetLogitProcessor` subclass, chosen from the server's reasoning parser: qwen3 / qwen3-thinking / glm45 / deepseek-r1) + `custom_params.thinking_budget` | `/server_info` readback first, container command second |
+ 
+ Refusals are loud and carry the fix — a budget that is accepted and ignored is worse than none, because
+diff --git a/scripts/lib/thinking-budget.sh b/scripts/lib/thinking-budget.sh
+index 636d91c..561383b 100755
+--- a/scripts/lib/thinking-budget.sh
++++ b/scripts/lib/thinking-budget.sh
+@@ -45,8 +45,8 @@
+ #       rc 2  unverifiable — no evidence either way (no container, no docker,
+ #                        no server readback). Caller decides; the only
+ #                        acceptable bypass is an explicit, loud one.
+-#       Sets THINKING_BUDGET_EVIDENCE (one line, human) and, for SGLang,
+-#       THINKING_BUDGET_REASONING_PARSER. Prints nothing on stdout.
++#       Sets THINKING_BUDGET_EVIDENCE (one line, human) and, for SGLang and
++#       vLLM, THINKING_BUDGET_REASONING_PARSER. Prints nothing on stdout.
+ #   thinking_budget_fix_hint <kind> <N>
+ #       Prints the fix instruction for a refused/unverifiable verification.
+ #   thinking_budget_extra_body <kind> <N> [sglang_processor_class]
+@@ -266,6 +266,39 @@ print("CLP %s PARSER %s" % ("true" if clp else "false", rp))
+   return 0
+ }
+ 
++# vLLM's boot log readback. An image that starts vLLM through ITS OWN launcher
++# (e.g. bucko's `qwen38-serve` script) puts `--reasoning-parser` inside that
++# script, so `docker inspect` argv shows no parser and the argv check alone
++# would refuse a server that actually has one. The resolved config IS printed
++# at boot, under `non-default args`:
++#   ... non-default args: {'model': ..., 'reasoning_parser': 'qwen3', ...}
++# stdout: `PARSER <name>` (last occurrence wins) or nothing when unavailable.
++_THINKING_BUDGET_VLLM_LOG_PY="$(cat <<'PY'
++import re, sys
++
++text = sys.stdin.read()
++# `non-default args` / `EngineArgs` dump first (the resolved truth), then the
++# flag itself in a logged command line, in case a future vLLM stops dumping.
++pats = (
++    r"'reasoning_parser'\s*[:=]\s*'([^']+)'",
++    r'"reasoning_parser"\s*[:=]\s*"([^"]+)"',
++    r"--reasoning-parser(?:=|[ \t]+)([A-Za-z0-9_.-]+)",
++)
++for pat in pats:
++    hits = re.findall(pat, text)
++    if hits:
++        print("PARSER %s" % hits[-1])
++        sys.exit(0)
++PY
++)"
++_thinking_budget_vllm_boot_log_facts() {
++  local c="$1" logs=""
++  command -v docker >/dev/null 2>&1 || return 0
++  logs="$(docker logs "$c" 2>&1 || true)"
++  [[ -n "$logs" ]] || return 0
++  python3 -c "$_THINKING_BUDGET_VLLM_LOG_PY" <<<"$logs" 2>/dev/null || true
++}
++
+ # SGLang ships model-specific ThinkingBudgetLogitProcessor subclasses
+ # (python/sglang/srt/sampling/custom_logit_processor.py, v0.5.20). Only the
+ # parsers whose think-token ids are known to match are mapped; anything else
+@@ -330,16 +363,29 @@ thinking_budget_verify() {
+       fi
+       facts="$(docker inspect "$c" 2>/dev/null | _thinking_budget_container_facts vllm)"
+       case "$facts" in
+-        "PARSER none")
+-          THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
+-          return 1 ;;
+         "PARSER "*)
+-          THINKING_BUDGET_EVIDENCE="container ${c} boots vLLM with --reasoning-parser ${facts#PARSER }"
+-          return 0 ;;
++          # argv shows a parser — direct evidence, nothing else needed.
++          if [[ "${facts#PARSER }" != "none" ]]; then
++            THINKING_BUDGET_EVIDENCE="container ${c} boots vLLM with --reasoning-parser ${facts#PARSER }"
++            THINKING_BUDGET_REASONING_PARSER="${facts#PARSER }"
++            return 0
++          fi ;;
+         *)
+           THINKING_BUDGET_EVIDENCE="could not read container ${c}: ${facts:-no output}"
+           return 2 ;;
+       esac
++      # No parser in the argv: an image that launches vLLM through its own
++      # script adds the flag inside that script, so fall back to the server's
++      # boot log, which dumps the resolved args (`'reasoning_parser': 'qwen3'`).
++      facts="$(_thinking_budget_vllm_boot_log_facts "$c")"
++      local log_parser="${facts#PARSER }"
++      if [[ -n "$facts" && "$log_parser" != "none" ]]; then
++        THINKING_BUDGET_EVIDENCE="container ${c} boots vLLM with --reasoning-parser ${log_parser} (from the boot log — the image's launcher sets the flag itself)"
++        THINKING_BUDGET_REASONING_PARSER="$log_parser"
++        return 0
++      fi
++      THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser (argv and boot log) — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
++      return 1
+       ;;
+     sglang)
+       # The server's own readback first — it is the resolved truth and works

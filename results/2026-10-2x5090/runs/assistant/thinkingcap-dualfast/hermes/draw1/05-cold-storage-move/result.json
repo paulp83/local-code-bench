@@ -1,0 +1,14 @@
+{
+ "task": "05-cold-storage-move",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 54.2,
+ "tool_calls": 5,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 6,
+ "checks_total": 6,
+ "partial": 1.0
+}

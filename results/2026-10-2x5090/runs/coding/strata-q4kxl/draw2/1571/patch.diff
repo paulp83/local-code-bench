@@ -1,0 +1,170 @@
+diff --git a/scripts/lib/gpu-select.sh b/scripts/lib/gpu-select.sh
+index ed69318..9ba3e58 100644
+--- a/scripts/lib/gpu-select.sh
++++ b/scripts/lib/gpu-select.sh
+@@ -109,3 +109,128 @@ gpu_select_assert_placement() {
+   fi
+   return 0
+ }
++
++# ---------------------------------------------------------------------------
++# VRAM attribution (#1537) — credit each GPU's used VRAM to the PROCESS that
++# actually holds it, not to whichever single club-3090 container happened to be
++# running. The old report.sh credited EVERY busy card to the one running
++# container, so a rig where another workload owned GPUs 0 and 2 read as "held
++# by running <ours>" for all three cards. report.sh calls this in place of its
++# own per-container line.
++#
++# Data sources (all best-effort; any gap degrades to a warning, never a crash):
++#   - nvidia-smi --query-gpu=index,uuid,memory.used        (per-card usage)
++#   - nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name (who is running)
++#   - <GPU_ATTR_PROC>/<pid>/cgroup → docker-<id>.scope     (pid → container id;
++#     proc root overridable via $GPU_ATTR_PROC, default /proc)
++#   - docker ps (container id → name)
++# When the host lists NO compute processes (some drivers hide them from the
++# host), we fall back to the container's OWN view — docker exec <ours> nvidia-smi
++# --query-compute-apps — to place our container on the cards it can see.
++#
++# gpu_vram_report_lines "<our_container>"
++#   Echoes one "- **GPU <index> idle VRAM:** ..." line per GPU. OUR_CONTAINER may
++#   be empty (no club-3090 container running).
++# ---------------------------------------------------------------------------
++
++# _gpu_attr_trim "<str>" — strip CR + leading/trailing whitespace.
++_gpu_attr_trim() {
++  local s="${1//$'\r'/}"
++  s="${s#"${s%%[![:space:]]*}"}"
++  s="${s%"${s##*[![:space:]]}"}"
++  printf '%s' "$s"
++}
++
++# _gpu_attr_pid_container <pid> <proc_root> <ps_lines>
++#   Container NAME owning <pid>, or empty when the pid is outside any docker
++#   container (host display process, or the container isn't in `docker ps`).
++#   Matches the id out of docker-<id>.scope against `docker ps` ids with a
++#   prefix match in either direction, so a short id from `docker ps` and the
++#   full 64-hex id from the cgroup line up without needing --no-trunc.
++_gpu_attr_pid_container() {
++  local pid="$1" proc_root="$2" ps_lines="$3"
++  [[ -z "$pid" || ! -r "$proc_root/$pid/cgroup" ]] && return 0
++  local scope cid id name rest
++  scope="$(command grep -oE 'docker-[0-9a-f]+\.scope' "$proc_root/$pid/cgroup" 2>/dev/null | head -1)"
++  [[ -z "$scope" ]] && return 0
++  cid="${scope#docker-}"; cid="${cid%.scope}"
++  [[ -z "$cid" ]] && return 0
++  while read -r id name rest; do
++    [[ -z "$id" || -z "$name" ]] && continue
++    if [[ "$cid" == "$id" || "$cid" == "$id"* || "$id" == "$cid"* ]]; then
++      printf '%s' "$name"
++      return 0
++    fi
++  done <<< "$ps_lines"
++  return 0
++}
++
++gpu_vram_report_lines() {
++  local our_container="${1:-}"
++  command -v nvidia-smi >/dev/null 2>&1 || return 0
++  local proc_root="${GPU_ATTR_PROC:-/proc}"
++
++  local gpu_rows apps
++  gpu_rows="$(nvidia-smi --query-gpu=index,uuid,memory.used --format=csv,noheader,nounits 2>/dev/null)" || gpu_rows=""
++  [[ -z "${gpu_rows//[[:space:]]/}" ]] && return 0
++  apps="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv,noheader 2>/dev/null)" || apps=""
++
++  # container id -> name map (id<space>name per line), once.
++  local ps_lines=""
++  if command -v docker >/dev/null 2>&1; then
++    ps_lines="$(docker ps --format '{{.ID}} {{.Names}}' 2>/dev/null)" || ps_lines=""
++  fi
++
++  # First compute process on each GPU's uuid -> owner (container name or process).
++  declare -A gpu_owner_kind=() gpu_owner_val=()
++  if [[ -n "${apps//[[:space:]]/}" ]]; then
++    local a b c container
++    while IFS=',' read -r a b c || [[ -n "${a}${b}${c}" ]]; do
++      a="$(_gpu_attr_trim "$a")"; b="$(_gpu_attr_trim "$b")"; c="$(_gpu_attr_trim "$c")"
++      [[ "$a" != GPU-* ]] && continue
++      [[ -n "${gpu_owner_kind[$a]:-}" ]] && continue   # keep the first process per card
++      container=""
++      [[ -n "$b" ]] && container="$(_gpu_attr_pid_container "$b" "$proc_root" "$ps_lines")"
++      if [[ -n "$container" ]]; then
++        gpu_owner_kind[$a]="container"; gpu_owner_val[$a]="$container"
++      else
++        gpu_owner_kind[$a]="process"; gpu_owner_val[$a]="${c:-pid $b}"
++      fi
++    done <<< "$apps"
++  fi
++
++  # Only when the host lists no compute processes: ask our container which cards
++  # IT is running on (its own nvidia-smi view). Concatenated uuids, no spaces.
++  local ours_uuids=""
++  if [[ -z "${apps//[[:space:]]/}" && -n "$our_container" ]] && command -v docker >/dev/null 2>&1; then
++    ours_uuids="$(docker exec "$our_container" nvidia-smi --query-compute-apps=gpu_uuid --format=csv,noheader 2>/dev/null | tr -d '[:space:]')" || ours_uuids=""
++  fi
++
++  local idx uuid used kind val note
++  while IFS=',' read -r idx uuid used || [[ -n "${idx}${uuid}${used}" ]]; do
++    idx="$(_gpu_attr_trim "$idx")"; uuid="$(_gpu_attr_trim "$uuid")"; used="$(_gpu_attr_trim "$used")"
++    [[ -z "$idx" ]] && continue
++    if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
++      kind="${gpu_owner_kind[$uuid]:-}"; val="${gpu_owner_val[$uuid]:-}"
++      if [[ "$kind" == "container" ]]; then
++        if [[ -n "$our_container" && "$val" == "$our_container" ]]; then
++          note=" (held by running \`${our_container}\`)"
++        else
++          note=" (held by \`${val}\`"
++          [[ -n "$our_container" ]] && note="${note}, not \`${our_container}\`"
++          note="${note})"
++        fi
++      elif [[ "$kind" == "process" ]]; then
++        note=" (held by \`${val}\`)"
++      elif [[ -n "$our_container" && -n "$ours_uuids" && "$ours_uuids" == *"$uuid"* ]]; then
++        note=" (held by running \`${our_container}\`)"
++      else
++        note=" ⚠ something is using this GPU (display, browser, container)"
++        [[ -n "$our_container" ]] && note="${note}, not \`${our_container}\`"
++      fi
++      printf -- '- **GPU %s idle VRAM:** %s MiB%s\n' "$idx" "$used" "$note"
++    else
++      printf -- '- **GPU %s idle VRAM:** %s MiB ✓\n' "$idx" "$used"
++    fi
++  done <<< "$gpu_rows"
++}
+diff --git a/scripts/report.sh b/scripts/report.sh
+index 133e585..00d34b5 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -111,6 +111,9 @@ cd "$REPO_ROOT"
+ source "$REPO_ROOT/scripts/lib/engine-kind.sh"
+ # shellcheck source=lib/club-containers.sh
+ source "$REPO_ROOT/scripts/lib/club-containers.sh"
++# VRAM-per-card attribution (#1537): gpu_vram_report_lines.
++# shellcheck source=lib/gpu-select.sh
++source "$REPO_ROOT/scripts/lib/gpu-select.sh"
+ source "$REPO_ROOT/scripts/lib/report_calib.sh"
+ # shellcheck source=lib/p2p-state.sh
+ source "$REPO_ROOT/scripts/lib/p2p-state.sh"
+@@ -763,19 +766,9 @@ section "Display / desktop state"
+     if have docker && docker info >/dev/null 2>&1; then
+       our_container=$(club_running_container)
+     fi
+-    nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
+-      | while IFS=, read -r idx used; do
+-          idx="${idx# }"; used="${used# }"
+-          if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
+-            if [[ -n "$our_container" ]]; then
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
+-            else
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+-            fi
+-          else
+-            echo "- **GPU $idx idle VRAM:** ${used} MiB ✓"
+-          fi
+-        done
++    # Attribute each busy card to the process that actually holds its VRAM
++    # (#1537) — not blindly to whichever club-3090 container is running.
++    gpu_vram_report_lines "$our_container"
+   fi
+ } | redact
+ 

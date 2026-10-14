@@ -1,0 +1,200 @@
+diff --git a/docs/QUALITY_TEST.md b/docs/QUALITY_TEST.md
+index 6172cd9..6bf7820 100644
+--- a/docs/QUALITY_TEST.md
++++ b/docs/QUALITY_TEST.md
+@@ -636,10 +636,29 @@ for the run's `REASONING_EFFORT` or the server's default effort:
+ | `off` | unchanged | `budget=server off` |
+ | unknown (no line, no container) | unchanged | nothing — the line is unchanged |
+ 
++**llama.cpp has no effort map — and prints no readback line.** Its budget is the boot flag
++`--reasoning-budget`, server-wide and the same for every effort; the shipped composes boot
++`--reasoning-budget "${REASONING_BUDGET:-32768}"`, so the **resolved value** is what counts, not the flag's
++presence. When the boot log carries no `[effort-budget]` line and the serving container is llama.cpp, the
++wrapper therefore reads the container's boot **command** (`docker inspect`, `REASONING_BUDGET` resolved through
++`Config.Env` exactly as the shell would — the same read `--thinking-budget` verifies against, owned by
++`scripts/lib/thinking-budget.sh`) and applies the table above with **no effort tag**:
++
++| Readback (llama.cpp) | Thinking cap | Recorded |
++|---|---|---|
++| `--reasoning-budget N` (N > 0 — the compose default 32768 included) | default 16384 raised to N + headroom when that is larger | `budget=server N`; benchlocal `--server-thinking-budget N` |
++| `-1`, or the flag absent | unchanged — nothing closes thinking, so nothing cuts the answer off | `budget=server off` |
++| unresolvable (`${SOME_VAR}` with nothing behind it) | unchanged | nothing |
++
++Left unread, that 32768 budget meets a 16384 client cap: reasoning past 16384 is cut by `token_limit` instead of
++the server closing it gracefully with room left for the answer — the run measures the harness (#1617's default,
++read back here).
++
+ Never applied on a `--no-thinking` leg or `--resume` (benchlocal restores the original record). Never overrides a
+ choice: `--thinking-max-tokens` / `THINKING_MAX_TOKENS` and `--pack-budgets` keep their caps (the budget is still
+-recorded), and `--thinking-budget N` wins outright — its per-request budget overrides the server's, so the server's
+-is not recorded.
++recorded), and `--thinking-budget N` wins outright — on vLLM / SGLang its per-request budget overrides the
++server's, and on llama.cpp it IS the server's flag, already verified against it — so the server's value is not
++recorded either way.
+ 
+ Reading a bounded run: a capped scenario still fails — as `token_limit` rather than `timeout` — so the budget
+ bounds cost and makes wall-time estimable; it does not rescue a score. The latency distribution under a budget
+diff --git a/scripts/quality-test.sh b/scripts/quality-test.sh
+index b055e42..5bbec37 100755
+--- a/scripts/quality-test.sh
++++ b/scripts/quality-test.sh
+@@ -147,12 +147,15 @@ OPTIONS (extra)
+                    (pack default or --enable-thinking). Default 16384, sent
+                    explicitly: benchlocal-cli would otherwise give thinking packs
+                    the --max-tokens value. Also settable via THINKING_MAX_TOKENS.
+-                   When the serving compose caps reasoning server-side (its
+-                   `[effort-budget] v1` boot line, read from `docker logs`), the
+-                   default grows to that budget + THINKING_BUDGET_HEADROOM (4096)
+-                   if that is larger, so the answer after the server's forced
+-                   close is not cut off. Not on a --no-thinking leg, --resume,
+-                   --pack-budgets, --thinking-budget, or when you set this cap.
++                   When the server caps reasoning server-side, the default grows
++                   to that budget + THINKING_BUDGET_HEADROOM (4096) if that is
++                   larger, so the answer after the server's forced close is not
++                   cut off. Read back, never guessed: a vLLM / SGLang compose's
++                   `[effort-budget] v1` boot line (`docker logs`), or llama.cpp's
++                   --reasoning-budget boot flag (`docker inspect`, resolved as
++                   the shell would — the compose default 32768 counts). Not on a
++                   --no-thinking leg, --resume, --pack-budgets,
++                   --thinking-budget, or when you set this cap.
+   --max-tokens N   Completion budget for BOTH arms. Default 4096 — benchlocal's
+                    per-pack ~1024 cuts long answers off into token_limit
+                    failures that read as wrong answers (docs/RUN_EVALS.md).
+@@ -1210,16 +1213,58 @@ fi
+ # budget + THINKING_BUDGET_HEADROOM when that is larger. The budget is also
+ # stamped on the Quality: line and recorded by benchlocal (--server-thinking-budget,
+ # when the installed benchlocal-cli has it).
++#   A llama.cpp serve never prints that line: its budget is the boot flag
++# --reasoning-budget, server-wide and the SAME for every effort (the shipped
++# composes boot `--reasoning-budget "${REASONING_BUDGET:-32768}"`, the qwen3.8
++# default since #1617). So when the log carries no readback line and the serving
++# container is llama.cpp, the budget comes off the container's boot COMMAND
++# instead: `docker inspect`, resolved through Config.Env exactly as the shell
++# would — the same read --thinking-budget verifies against, owned by
++# scripts/lib/thinking-budget.sh. -1 or no flag at all means UNRESTRICTED:
++# nothing bounds the run, so the cap stays where it is and only `off` is stamped.
+ #   Not read on --resume (benchlocal restores the original run's own record) or on
+ #   a --no-thinking leg (no reasoning, nothing to bound). Never overrides a choice:
+-#   --thinking-budget N (sent per request — the request's budget wins on the
+-#   server, so the server's is not the one in effect), an explicit
++#   --thinking-budget N (its own cap wins — per request on vLLM/SGLang, and on
++#   llama.cpp it is the same boot flag, already verified against it), an explicit
+ #   --thinking-max-tokens / THINKING_MAX_TOKENS, or --pack-budgets.
+ # Engine-neutral by design: the readback line is the same on every engine, and
+ # effort_budget.py owns its parsing (the LAST line wins: `docker logs` spans restarts).
+ SERVER_THINKING_BUDGET=""          # N | off | empty = unknown / not in effect
+ SERVER_THINKING_EFFORT=""          # the effort that budget was read for
+ THINKING_MAX_TOKENS_FROM_SERVER="" # "server-budget+H" when the cap was raised from it
++
++# Tail shared by every readback that found a budget: SERVER_THINKING_BUDGET is
++# the number in effect, _sb_what names it for the messages, _sb_tb_note is the
++# engine's own reason why --thinking-budget supersedes it. Sizing rule and the
++# three choices it never overrides — see the block below.
++_sb_apply_server_budget() {
++  if [[ -n "$THINKING_BUDGET" ]]; then
++    echo "[quality-test] ${_sb_what} — ${_sb_tb_note}"
++    SERVER_THINKING_BUDGET=""; SERVER_THINKING_EFFORT=""
++  elif [[ "$THINKING_MAX_TOKENS_EXPLICIT" == "1" ]]; then
++    echo "[quality-test] ${_sb_what} — your thinking cap ${THINKING_MAX_TOKENS} is kept"
++    if [[ "$THINKING_MAX_TOKENS" -le "$SERVER_THINKING_BUDGET" ]]; then
++      echo "[quality-test] WARN: thinking cap ${THINKING_MAX_TOKENS} is not above the server budget ${SERVER_THINKING_BUDGET}: an answer after the server's forced close has no room (token_limit, not a wrong answer)" >&2
++    fi
++  elif [[ "$PACK_BUDGETS" == "1" ]]; then
++    echo "[quality-test] ${_sb_what} — --pack-budgets keeps benchlocal's own caps (not raised)"
++  else
++    _sb_headroom="${THINKING_BUDGET_HEADROOM:-4096}"
++    if ! [[ "$_sb_headroom" =~ ^[1-9][0-9]*$ ]]; then
++      echo "✗ THINKING_BUDGET_HEADROOM must be a positive integer (answer tokens after the reasoning budget), got '${_sb_headroom}'" >&2
++      exit 2
++    fi
++    _sb_cap=$(( SERVER_THINKING_BUDGET + _sb_headroom ))
++    if [[ "$_sb_cap" -gt "$DEFAULT_THINKING_MAX_TOKENS" ]]; then
++      THINKING_MAX_TOKENS="$_sb_cap"
++      THINKING_MAX_TOKENS_FROM_SERVER="server-budget+${_sb_headroom}"
++      echo "[quality-test] ${_sb_what} — thinking cap raised to ${THINKING_MAX_TOKENS} (= ${SERVER_THINKING_BUDGET} + ${_sb_headroom} answer headroom; the default ${DEFAULT_THINKING_MAX_TOKENS} would cut the answer off)"
++    else
++      echo "[quality-test] ${_sb_what} — the default thinking cap ${DEFAULT_THINKING_MAX_TOKENS} already leaves ≥ ${_sb_headroom} tokens for the answer"
++    fi
++  fi
++}
++
+ if [[ -z "$RESUME" && "$NO_THINKING" != "1" && -n "${CONTAINER:-}" && "${CONTAINER}" != "none" ]] \
+    && command -v docker >/dev/null 2>&1 && docker inspect "$CONTAINER" >/dev/null 2>&1; then
+   _sb_effort="$(printf '%s' "$REASONING_EFFORT" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+@@ -1251,36 +1296,50 @@ print(info.get("default_effort") or "")' "${ROOT_DIR}/scripts/lib/effort_budget.
+         _sb_eff_note=" (the server's default effort, ${SERVER_THINKING_EFFORT})"
+       fi
+       _sb_what="server budget ${SERVER_THINKING_BUDGET} reasoning tokens${_sb_eff_note}, read from ${CONTAINER}'s boot log"
+-      if [[ -n "$THINKING_BUDGET" ]]; then
+-        echo "[quality-test] ${_sb_what} — --thinking-budget ${THINKING_BUDGET} is sent per request and wins over it; cap from --thinking-budget"
+-        SERVER_THINKING_BUDGET=""; SERVER_THINKING_EFFORT=""
+-      elif [[ "$THINKING_MAX_TOKENS_EXPLICIT" == "1" ]]; then
+-        echo "[quality-test] ${_sb_what} — your thinking cap ${THINKING_MAX_TOKENS} is kept"
+-        if [[ "$THINKING_MAX_TOKENS" -le "$SERVER_THINKING_BUDGET" ]]; then
+-          echo "[quality-test] WARN: thinking cap ${THINKING_MAX_TOKENS} is not above the server budget ${SERVER_THINKING_BUDGET}: an answer after the server's forced close has no room (token_limit, not a wrong answer)" >&2
+-        fi
+-      elif [[ "$PACK_BUDGETS" == "1" ]]; then
+-        echo "[quality-test] ${_sb_what} — --pack-budgets keeps benchlocal's own caps (not raised)"
+-      else
+-        _sb_headroom="${THINKING_BUDGET_HEADROOM:-4096}"
+-        if ! [[ "$_sb_headroom" =~ ^[1-9][0-9]*$ ]]; then
+-          echo "✗ THINKING_BUDGET_HEADROOM must be a positive integer (answer tokens after the reasoning budget), got '${_sb_headroom}'" >&2
+-          exit 2
+-        fi
+-        _sb_cap=$(( SERVER_THINKING_BUDGET + _sb_headroom ))
+-        if [[ "$_sb_cap" -gt "$DEFAULT_THINKING_MAX_TOKENS" ]]; then
+-          THINKING_MAX_TOKENS="$_sb_cap"
+-          THINKING_MAX_TOKENS_FROM_SERVER="server-budget+${_sb_headroom}"
+-          echo "[quality-test] ${_sb_what} — thinking cap raised to ${THINKING_MAX_TOKENS} (= ${SERVER_THINKING_BUDGET} + ${_sb_headroom} answer headroom; the default ${DEFAULT_THINKING_MAX_TOKENS} would cut the answer off)"
+-        else
+-          echo "[quality-test] ${_sb_what} — the default thinking cap ${DEFAULT_THINKING_MAX_TOKENS} already leaves ≥ ${_sb_headroom} tokens for the answer"
+-        fi
+-      fi
++      _sb_tb_note="--thinking-budget ${THINKING_BUDGET} is sent per request and wins over it; cap from --thinking-budget"
++      _sb_apply_server_budget
+     elif [[ "$_sb_rc" == "0" && "$_sb_out" == "off" ]]; then
+       SERVER_THINKING_BUDGET="off"
+       echo "[quality-test] server budget: off (${CONTAINER} booted with THINKING_BUDGETS=off) — thinking cap unchanged"
+     elif [[ "$_sb_rc" == "0" || "$_sb_rc" == "2" ]]; then
+-      echo "[quality-test] server budget: unknown (no [effort-budget] v1 line in ${CONTAINER}'s boot log) — thinking cap unchanged"
++      # No `[effort-budget] v1` line to read. A llama.cpp serve is the common
++      # reason: it has no effort map, only --reasoning-budget on the command
++      # line. Ask the container before calling this unknown.
++      _sb_llama=""
++      if [[ -z "$_sb_lines" ]]; then
++        # shellcheck source=lib/thinking-budget.sh
++        source "${ROOT_DIR}/scripts/lib/thinking-budget.sh"
++        if [[ "$(thinking_budget_engine_kind)" == "llamacpp" ]]; then
++          _sb_llama="$(docker inspect "$CONTAINER" 2>/dev/null | _thinking_budget_container_facts llamacpp)"
++        fi
++      fi
++      case "$_sb_llama" in
++        "")
++          echo "[quality-test] server budget: unknown (no [effort-budget] v1 line in ${CONTAINER}'s boot log) — thinking cap unchanged"
++          ;;
++        "BUDGET -1"|"BUDGET none")
++          # The compose default when REASONING_BUDGET was never set is the flag
++          # present at -1: visible on the command line, unrestricted in effect.
++          SERVER_THINKING_BUDGET="off"
++          echo "[quality-test] server budget: off (${CONTAINER} boots llama.cpp with --reasoning-budget -1 or none: unrestricted) — thinking cap unchanged"
++          ;;
++        "BUDGET unresolvable"*|"BUDGET "*)
++          _sb_val="${_sb_llama#BUDGET }"
++          if [[ "$_sb_val" =~ ^[1-9][0-9]*$ ]]; then
++            SERVER_THINKING_BUDGET="$_sb_val"
++            SERVER_THINKING_EFFORT=""   # server-wide: no effort picks a different one
++            _sb_what="server budget ${SERVER_THINKING_BUDGET} reasoning tokens (llama.cpp --reasoning-budget, the same for every effort), read from ${CONTAINER}'s boot command"
++            _sb_tb_note="the --thinking-budget ${THINKING_BUDGET} this run verified; cap from --thinking-budget"
++            _sb_apply_server_budget
++          else
++            echo "[quality-test] server budget: unknown (llama.cpp --reasoning-budget unresolvable — ${_sb_llama#BUDGET } in ${CONTAINER}'s boot command) — thinking cap unchanged"
++          fi
++          ;;
++        *)
++          echo "[quality-test] WARN: could not read the server budget from ${CONTAINER}'s boot command — thinking cap unchanged:" >&2
++          printf '%s\n' "${_sb_llama:-no output}" | sed 's/^/[quality-test]   /' >&2
++          ;;
++      esac
+     else
+       echo "[quality-test] WARN: could not read the server budget from ${CONTAINER}'s boot log — thinking cap unchanged:" >&2
+       printf '%s\n' "$_sb_out" | sed 's/^/[quality-test]   /' >&2

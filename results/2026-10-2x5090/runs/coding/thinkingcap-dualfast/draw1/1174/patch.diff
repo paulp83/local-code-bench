@@ -1,0 +1,92 @@
+diff --git a/scripts/lib/profiles/hf_fetch.py b/scripts/lib/profiles/hf_fetch.py
+index c7728f4..8161d7f 100644
+--- a/scripts/lib/profiles/hf_fetch.py
++++ b/scripts/lib/profiles/hf_fetch.py
+@@ -144,6 +144,31 @@ def is_xet_refusal(blob: str) -> bool:
+     return all(m in low for m in _XET_REFUSAL_MARKERS)
+ 
+ 
++def is_tool_unavailable(rc: int, blob: str) -> bool:
++    """True iff a failed rung-1 ``hf download`` died because the ``hf`` CLI is
++    not on PATH — NOT because of the repo, the files, or the network.
++
++    Either signal suffices:
++
++    * ``rc == 127``, the shell's canonical "command not found" status (what a
++      bare ``hf …`` returns when the binary is absent);
++    * this module's own sentinel from ``_hf_download`` ("neither ``hf`` nor
++      ``huggingface-cli`` is on PATH"), which pre-empts the spawn so the answer
++      never even depends on the shell's rc.
++
++    A missing-tool failure says nothing about the files, so rung 3 (raw resolve
++    + curl — no ``hf`` dependency at all) is still able to serve the pull.
++    Treating it as *fallback-eligible* instead of a hard stop is the point: a
++    rig that has ``curl`` but not ``hf`` can still fetch. Contrast
++    :func:`is_xet_refusal`, which is a hard policy wall the fallback rungs also
++    have to respect — here the wall is simply "no downloader on PATH"."""
++    if rc == 127:
++        return True
++    low = (blob or "").lower()
++    return ("neither `hf` nor `huggingface-cli` is on path" in low
++            or "command not found" in low)
++
++
+ def hf_xet_importable(python: Optional[str] = None) -> bool:
+     """Is `hf_xet` ALREADY importable in the environment the `hf` CLI runs under?
+ 
+@@ -822,9 +847,19 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+     allow = allow_xet_enabled() if allow_xet is None else allow_xet
+     notes: list[str] = []
+ 
+-    log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: huggingface_hub "
+-        "client-side blocks the plain HTTP path for files over 50 GB. This is "
+-        "a hard policy wall, not flakiness — retrying it cannot succeed.")
++    if is_tool_unavailable(0, classic_error):
++        # rung 1 could not even start: the `hf` CLI is absent. That is a
++        # missing-tool problem, not a wall about the files, so say exactly
++        # that — the raw-resolve fallback needs no `hf` and can still serve it.
++        log("[hf-fetch] rung 1 (classic LFS) could not run: the `hf` CLI is not "
++            "on PATH (neither `hf` nor `huggingface-cli`). This is a missing-"
++            "tool problem, not a wall about these files — rung 3 (raw resolve "
++            "+ curl) has no `hf` dependency and can still serve the pull.")
++    else:
++        log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: huggingface_hub "
++            "client-side blocks the plain HTTP path for files over 50 GB. This "
++            "is a hard policy wall, not flakiness — retrying it cannot "
++            "succeed.")
+     if classic_error:
+         log(f"[hf-fetch]   hub said: {classic_error.strip()[:300]}")
+ 
+@@ -976,7 +1011,14 @@ def fetch(repo_id: str, local_dir: Path, includes: list[str], *,
+             f"`hf download` hashes as it writes, so no separate gate is run "
+             f"on this rung.")
+         return LadderResult(ok=True, rung="classic", files=list(names))
+-    if not is_xet_refusal(blob):
++    # Escalate past rung 1 when the failure is NOT recoverable by retrying it:
++    #   * the client-side too-large refusal (a hard policy wall), OR
++    #   * the `hf` CLI being missing entirely (rc=127 / command-not-found).
++    # The second is easy to miss: a rung-1 failure for "no downloader on PATH"
++    # has nothing to do with the files, and rung 3 (raw resolve + curl, no `hf`
++    # dependency) can still serve the pull — so it is fallback-eligible too.
++    # Every other rung-1 failure keeps its pre-existing hard-stop mapping below.
++    if not (is_xet_refusal(blob) or is_tool_unavailable(rc, blob)):
+         return LadderResult(ok=False, failure="fallback-failed",
+                             detail=f"rung 1 failed (rc={rc}): "
+                                    f"{blob.strip()[-400:]}")
+@@ -1031,7 +1073,15 @@ def _main(argv: list[str]) -> int:
+     res = fetch(args.repo, Path(args.local_dir), includes,
+                 revision=args.revision, allow_xet=args.allow_xet or None,
+                 do_verify_in_place=args.verify_in_place or None)
+-    return 0 if res.ok else 1
++    if res.ok:
++        return 0
++    # #804/#812 contract: "every rung announces which rung ran" and "logs are
++    # auditable" — including the failure path. A bare `return 1` here is the
++    # opaque-exit the whole module exists to kill: name the token AND the
++    # detail on stderr, then (and only then) exit non-zero.
++    print(f"[hf-fetch] FAILED ({res.failure or 'unknown'}): "
++          f"{res.detail or 'no detail'}", file=sys.stderr, flush=True)
++    return 1
+ 
+ 
+ if __name__ == "__main__":       # pragma: no cover - CLI wrapper

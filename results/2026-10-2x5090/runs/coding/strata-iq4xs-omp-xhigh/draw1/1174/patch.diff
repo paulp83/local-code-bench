@@ -1,0 +1,271 @@
+diff --git a/scripts/lib/profiles/hf_fetch.py b/scripts/lib/profiles/hf_fetch.py
+index c7728f4..dc8ff70 100644
+--- a/scripts/lib/profiles/hf_fetch.py
++++ b/scripts/lib/profiles/hf_fetch.py
+@@ -28,6 +28,12 @@ serves the bytes fine: the resolve endpoint 302s to the CAS bridge, plain HTTP
+                           against the *resolve* endpoint, stall watchdog, then
+                           the same mandatory sha256 gate.
+ 
++Rung 1 escalates on exactly two failure classes: the refusal above, and a
++CLI that could not even run (``hf``/``huggingface-cli`` missing — rc 127,
++command-not-found). The second is a tooling gap, not a repo property, and
++rung 3 needs only ``urllib`` + ``curl``, so the ladder falls through to it
++instead of dying with the missing tool.
++
+ Guardrails that are not negotiable here:
+ 
+ * **No parallel-chunk downloaders.** ``aria2c`` silently corrupts multi-GB
+@@ -45,6 +51,10 @@ Guardrails that are not negotiable here:
+ * Every rung announces which rung ran and what was verified, so logs are
+   auditable.
+ 
++* **A non-zero module-CLI exit is never silent.** ``_main`` prints the
++  failure token + the rung's detail to stderr before returning 1 — "exits
++  1, prints nothing" is exactly what the auditability contract forbids.
++
+ #812 — verify-in-place + announce WHY
+ -------------------------------------
+ A file placed by hand has no ``.cache/huggingface/download/<f>.metadata`` beside
+@@ -131,6 +141,34 @@ def short_sha(s: Optional[str]) -> str:
+     return f"{s[:12]}…" if s else "?"
+ 
+ 
++# ---------------------------------------------------------------------------
++# "tool unavailable" signature (missing `hf` CLI)
++# ---------------------------------------------------------------------------
++
++# Command-not-found signatures for `is_tool_unavailable`: rc 127 is checked
++# by the function itself; these text markers cover a wrapper/shim whose
++# shell reports the missing command, and `_hf_download`'s own line —
++# "neither `hf` nor `huggingface-cli` is on PATH" — matched on its tail.
++_TOOL_UNAVAILABLE_MARKERS = (
++    "is on path",
++    "command not found",
++)
++
++
++def is_tool_unavailable(rc: int, blob: str) -> bool:
++    """True iff rung 1 failed because the `hf` CLI itself could not be run.
++
++    The command-not-found class: rc 127 is the shell convention, and it is
++    what `_hf_download` returns when neither `hf` nor `huggingface-cli`
++    resolves on PATH. Unlike the Xet wall this says NOTHING about the repo
++    or the file — and rung 3 depends only on urllib + curl — so this failure
++    class is fallback-eligible and must NOT kill the ladder."""
++    if rc == 127:
++        return True
++    low = (blob or "").lower()
++    return any(m in low for m in _TOOL_UNAVAILABLE_MARKERS)
++
++
+ # ---------------------------------------------------------------------------
+ # Xet refusal signature
+ # ---------------------------------------------------------------------------
+@@ -804,6 +842,7 @@ def verify_fetched(local_dir: Path, names: Iterable[str],
+ 
+ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+              classic_error: str,
++             reason: str = "xet-wall",
+              meta: Optional[dict[str, FileMeta]] = None,
+              revision: str = "main",
+              allow_xet: Optional[bool] = None,
+@@ -814,7 +853,10 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+              xet_available: Optional[Callable[[], bool]] = None,
+              tree_fn: Optional[Callable] = None,
+              stall_timeout: int = 300) -> LadderResult:
+-    """Rungs 2 and 3, entered ONLY after rung 1 hit the too-large refusal.
++    """Rungs 2 and 3, entered after rung 1 could not deliver — either the
++    hub's client-side too-large refusal (`reason="xet-wall"`, the default)
++    or a rung 1 that could not even run (`reason="tool-unavailable"`: the
++    `hf` CLI is missing, and rung 3 has no dependency on it).
+ 
+     Each rung announces why the previous one could not deliver, so a log shows
+     the whole decision chain rather than a bare "downloading (again)"."""
+@@ -822,11 +864,20 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+     allow = allow_xet_enabled() if allow_xet is None else allow_xet
+     notes: list[str] = []
+ 
+-    log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: huggingface_hub "
+-        "client-side blocks the plain HTTP path for files over 50 GB. This is "
+-        "a hard policy wall, not flakiness — retrying it cannot succeed.")
++    if reason == "tool-unavailable":
++        log("[hf-fetch] rung 1 (classic LFS) COULD NOT RUN: the `hf` CLI is "
++            "not on PATH (restore it with `pipx install "
++            "\"huggingface_hub[cli]\"`). This is a tooling gap, not a repo "
++            "property — and rung 3 depends only on urllib + curl, so the "
++            "ladder escalates instead of dying with the missing tool.")
++    else:
++        log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: "
++            "huggingface_hub client-side blocks the plain HTTP path for "
++            "files over 50 GB. This is a hard policy wall, not flakiness — "
++            "retrying it cannot succeed.")
+     if classic_error:
+-        log(f"[hf-fetch]   hub said: {classic_error.strip()[:300]}")
++        label = "rung 1 said" if reason == "tool-unavailable" else "hub said"
++        log(f"[hf-fetch]   {label}: {classic_error.strip()[:300]}")
+ 
+     # --- enumerate the concrete files (curl fetches one named file at a time)
+     metas: dict[str, FileMeta] = dict(meta or {})
+@@ -852,7 +903,13 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+ 
+     # --- rung 2: Xet, opt-in only, never auto-installed --------------------
+     avail_fn = xet_available or hf_xet_importable
+-    if not allow:
++    if reason == "tool-unavailable":
++        notes.append("rung 2 (Xet) skipped: the hf CLI itself is missing")
++        log("[hf-fetch] rung 2 (Xet) SKIPPED — it re-runs the very `hf "
++            "download` that just failed to launch; a plugin cannot fix a "
++            "missing CLI. Straight to rung 3, which needs only urllib + "
++            "curl and no hf at all.")
++    elif not allow:
+         notes.append("rung 2 (Xet) skipped: not opted in")
+         log("[hf-fetch] rung 2 (Xet) SKIPPED — operator opt-in required "
+             "(ALLOW_XET=1 or pull.sh --allow-xet). Xet has a stall/restart-"
+@@ -934,7 +991,8 @@ def fetch(repo_id: str, local_dir: Path, includes: list[str], *,
+           token: Optional[str] = None,
+           log: Callable[[str], None] = default_log) -> LadderResult:
+     """The whole thing, for callers that are NOT `downloader.download_model`:
+-    preflight -> announce/verify-in-place -> rung 1 -> escalate on the refusal.
++    preflight -> announce/verify-in-place -> rung 1 -> escalate on the refusal
++    or on a missing `hf` CLI (rc 127 — rung 3 does not depend on the tool).
+ 
+     `download_model` drives the rungs itself (it owns atomic staging and the
+     CONTRACT-3 failure vocabulary); this is the standalone entry the module CLI
+@@ -976,16 +1034,20 @@ def fetch(repo_id: str, local_dir: Path, includes: list[str], *,
+             f"`hf download` hashes as it writes, so no separate gate is run "
+             f"on this rung.")
+         return LadderResult(ok=True, rung="classic", files=list(names))
+-    if not is_xet_refusal(blob):
++    tool_missing = is_tool_unavailable(rc, blob)
++    if not tool_missing and not is_xet_refusal(blob):
+         return LadderResult(ok=False, failure="fallback-failed",
+                             detail=f"rung 1 failed (rc={rc}): "
+                                    f"{blob.strip()[-400:]}")
+     try:
+         return escalate(repo_id, local_dir, todo, classic_error=blob,
++                        reason=("tool-unavailable" if tool_missing
++                                else "xet-wall"),
+                         meta=metas, revision=revision, allow_xet=allow,
+                         token=token, log=log)
+     except LadderError as exc:
+-        log(f"[hf-fetch] FAILED: {exc.detail or exc.token}")
++        # No re-log: `LadderResult` is the structured contract for library
++        # callers, and `_main` is the single place a failure is announced.
+         return LadderResult(ok=False, failure=exc.token, detail=exc.detail)
+ 
+ 
+@@ -1031,7 +1093,17 @@ def _main(argv: list[str]) -> int:
+     res = fetch(args.repo, Path(args.local_dir), includes,
+                 revision=args.revision, allow_xet=args.allow_xet or None,
+                 do_verify_in_place=args.verify_in_place or None)
+-    return 0 if res.ok else 1
++    if res.ok:
++        return 0
++    # The #804 auditability contract lands HERE: a non-zero exit carries the
++    # structured failure token + the rung's detail. A bare `1` with nothing
++    # on stderr is the silent-exit bug this replaces.
++    print(f"[hf-fetch] FAILED: {res.failure or 'unknown-failure'}",
++          file=sys.stderr, flush=True)
++    if res.detail:
++        print(f"[hf-fetch]   detail: {res.detail}",
++              file=sys.stderr, flush=True)
++    return 1
+ 
+ 
+ if __name__ == "__main__":       # pragma: no cover - CLI wrapper
+diff --git a/scripts/tests/test-pull-download-ladder.sh b/scripts/tests/test-pull-download-ladder.sh
+index f44df1d..69bf969 100755
+--- a/scripts/tests/test-pull-download-ladder.sh
++++ b/scripts/tests/test-pull-download-ladder.sh
+@@ -491,6 +491,91 @@ with tempfile.TemporaryDirectory() as td:
+ check(callable(getattr(HF, "_main", None)) and callable(getattr(HF, "fetch", None)),
+       "hf_fetch exposes a standalone fetch() + a CLI entry point")
+ 
++# ---------------------------------------------------------------------------
++# 14. a rung 1 whose CLI COULD NOT RUN is fallback-eligible: rc 127 is a
++#     tooling gap, not a repo property, and rung 3 needs only urllib +
++#     curl. Dying there (bare exit 1, no escalation) was the bug — the
++#     #804 contract says the ladder escalates whenever rung 1 cannot
++#     deliver and a lower rung has no dependency on the missing tool.
++# ---------------------------------------------------------------------------
++check(HF.is_tool_unavailable(127,
++      "neither `hf` nor `huggingface-cli` is on PATH"),
++      "rc 127 (command-not-found) is recognised as tool-unavailable")
++check(HF.is_tool_unavailable(1, "python3: command not found"),
++      "a shim whose shell reports command-not-found is too")
++for not_missing in (
++    "401 Client Error: Unauthorized",
++    "The file is too large to be downloaded using the regular download "
++    "method. Install hf_xet",
++):
++    check(not HF.is_tool_unavailable(1, not_missing),
++          f"a non-tooling failure is NOT tool-unavailable: "
++          f"{not_missing[:36]!r}")
++
++with tempfile.TemporaryDirectory() as td:
++    log = Log()
++    _orig_tree, _orig_dl, _orig_raw = (HF.repo_tree, HF._hf_download,
++                                       HF.raw_resolve_fetch)
++
++    def _raw_stub(repo_id, filename, local_dir, **kw):
++        p = Path(local_dir) / filename
++        p.parent.mkdir(parents=True, exist_ok=True)
++        p.write_bytes(BODY)
++        return p
++
++    HF.repo_tree = lambda *a, **k: TREE
++    HF._hf_download = lambda *a, **k: (
++        127, "neither `hf` nor `huggingface-cli` is on PATH")
++    HF.raw_resolve_fetch = _raw_stub
++    try:
++        res = HF.fetch("unsloth/Qwen3.6-27B-MTP-GGUF", Path(td), [BIG],
++                       token=None, log=log)
++    finally:
++        HF.repo_tree, HF._hf_download, HF.raw_resolve_fetch = (
++            _orig_tree, _orig_dl, _orig_raw)
++    check(res.ok and res.rung == "raw-resolve",
++          f"a missing `hf` CLI ESCALATES to rung 3 instead of killing the "
++          f"ladder (ok={res.ok} rung={res.rung!r} failure={res.failure!r})")
++    check("COULD NOT RUN" in log.text()
++          and "huggingface_hub[cli]" in log.text(),
++          "the announcement names the missing CLI AND how to restore it")
++    check("rung 2 (Xet) SKIPPED" in log.text()
++          and "the hf CLI itself is missing" in " ".join(res.notes),
++          "rung 2 skipped WITH a reason: a plugin cannot fix a missing CLI")
++    check("DONE via rung 3" in log.text() and "sha256-verified" in log.text(),
++          "the missing-CLI path still ends at the mandatory sha256 gate")
++
++# ---------------------------------------------------------------------------
++# 15. the module CLI never exits non-zero silently: the failure token AND
++#     the rung's detail go to stderr before the 1 (auditable logs — a bare
++#     `EXIT=1` with no diagnostics is what this replaces).
++# ---------------------------------------------------------------------------
++import contextlib
++
++with tempfile.TemporaryDirectory() as td:
++    _orig_fetch = HF.fetch
++    HF.fetch = lambda *a, **k: HF.LadderResult(
++        ok=False, failure="fallback-failed",
++        detail="rung 1 failed (rc=9): boom")
++    err = io.StringIO()
++    rc_ok_seen = None
++    try:
++        with contextlib.redirect_stderr(err):
++            rc = HF._main(["org/Repo", "--local-dir", td])
++        HF.fetch = lambda *a, **k: HF.LadderResult(ok=True, rung="classic")
++        err_ok = io.StringIO()
++        with contextlib.redirect_stderr(err_ok):
++            rc_ok_seen = HF._main(["org/Repo", "--local-dir", td])
++    finally:
++        HF.fetch = _orig_fetch
++    check(rc == 1 and "FAILED: fallback-failed" in err.getvalue(),
++          f"a failed fetch exits 1 WITH the failure token on stderr "
++          f"(got rc={rc}: {err.getvalue().strip()!r})")
++    check("detail: rung 1 failed (rc=9): boom" in err.getvalue(),
++          "the rung detail rides along — never a bare exit 1")
++    check(rc_ok_seen == 0 and err_ok.getvalue() == "",
++          "the ok path still exits 0 with no noise")
++
+ if failures:
+     print(f"\n{len(failures)} assertion(s) failed.", file=sys.stderr)
+     sys.exit(1)

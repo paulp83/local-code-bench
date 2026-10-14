@@ -1,0 +1,24 @@
+{
+ "n": 1608,
+ "config": "strata-iq4xs-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 528.1,
+ "steps": 18,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 0,
+ "localization": 1.0,
+ "files_touched": [
+  "models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-compose-args-array-scope.sh": 0
+ },
+ "effort_note": "ran as \"low\" but omp sent no reasoning_effort; Qwen3.8 template default xhigh (relabelled 2026-10-12)"
+}

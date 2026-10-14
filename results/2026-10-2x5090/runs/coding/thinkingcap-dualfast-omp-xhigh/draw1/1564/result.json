@@ -1,0 +1,26 @@
+{
+ "n": 1564,
+ "config": "thinkingcap-dualfast-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 618.7,
+ "steps": 110,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 15,
+ "localization": 1.0,
+ "files_touched": [
+  "docs/BRING_YOUR_OWN.md",
+  "scripts/catalog.sh",
+  "scripts/lib/profiles/promote.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-catalog-cli.sh": 0,
+  "scripts/tests/test_promote.py": 0
+ }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "27-notes-current-state",
+  "set": "hard-v1",
+  "axis": "A",
+  "source": "novel",
+  "category": "long-input",
+  "difficulty": "hard",
+  "est_minutes": 40,
+  "needs_web": false,
+  "notes": "Grep for a keyword (standup, on-call, budget, staging, offsite) hits stale values first and filler lines that mention the same words; files are not in date order. Naive = the value from the first/kickoff mention: gets q1,q2,q3,q4,q6,q7,q8 wrong (q5 coincides). Traps: temporary on-call swap still active on the as-of date, a slipped migration (Cirrus, not Dovetail), relative budget changes, a roster change that moves Marta between teams.",
+  "spec_map": {
+    "answers-parses": "Write `/workspace/answers.json` with these keys:",
+    "q1": "`q1`: Platform standup weekday, full English name (e.g. `Monday`).",
+    "q2": "`q2`: full name of the person holding on-call on 2026-09-30.",
+    "q3": "`q3`: current budget in USD (integer) of the team that Marta Voss leads.",
+    "q4": "`q4`: which staging host is in use on 2026-09-30, as a single word.",
+    "q5": "`q5`: number of people on the Web team (integer).",
+    "q6": "`q6`: date of the team offsite, `YYYY-MM-DD`.",
+    "q7": "`q7`: sum of the current budgets of Platform, Data and Web, integer USD.",
+    "q8": "`q8`: the team (`Platform`, `Data` or `Web`) Joel Ames is on."
+  }
+}

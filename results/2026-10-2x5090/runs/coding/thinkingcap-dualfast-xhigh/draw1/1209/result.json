@@ -1,0 +1,22 @@
+{
+ "n": 1209,
+ "config": "thinkingcap-dualfast-xhigh",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 528.8,
+ "steps": 60,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 12,
+ "localization": 0.333,
+ "files_touched": [
+  "scripts/catalog.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-catalog-amend.sh": 0
+ }
+}

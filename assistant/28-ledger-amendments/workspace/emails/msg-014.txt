@@ -1,0 +1,8 @@
+From: vendor-help@example.net
+Date: 2026-07-21T03:23:00Z
+Subject: ledger amendment
+
+Move T-00535 over to ACC-08, wrong account was used.
+
+Thanks,
+vendor-help

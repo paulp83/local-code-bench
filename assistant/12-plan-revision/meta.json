@@ -1,0 +1,9 @@
+{
+  "id": "12-plan-revision",
+  "source": "session-derived",
+  "category": "writing",
+  "difficulty": "hard",
+  "est_minutes": 18,
+  "needs_web": false,
+  "notes": "Shape from sessions revising plan docs (claude-model-router plan, kv-offload plan) where steps move and references must follow."
+}

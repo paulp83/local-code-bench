@@ -1,0 +1,273 @@
+diff --git a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+index 81a4f45..2276675 100644
+--- a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
++++ b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+@@ -275,6 +275,7 @@ services:
+         _gmu="$${GPU_MEMORY_UTILIZATION:-$$_gmu_tier}"; _seqs="$${MAX_NUM_SEQS:-$$_seqs_tier}"
+         _mnbt="$${MAX_NUM_BATCHED_TOKENS:-$$_mnbt_tier}"; _lptt="$${LONG_PREFILL_TOKEN_THRESHOLD:-$$_lptt_tier}"
+         _mml="$${MAX_MODEL_LEN:-$$_mml_tier}"
++        LM_ONLY_ARGS=()
+         case "$$VISION" in
+           on) LM_ONLY_ARGS=() ;;
+           off) LM_ONLY_ARGS=(--language-model-only) ;;
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..deeac07 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+-# Every "${X_ARGS[@]}" used on an `exec` line must be ASSIGNED at a block depth no
+-# deeper than that exec -- i.e. not inside a branch the exec's own path may skip.
++# Every "${X_ARGS[@]}" used on an `exec` line must be ASSIGNED on a path that
++# DOMINATES that exec -- i.e. not inside a branch the exec's own path may skip.
+ #
+ # WHY: a compose entrypoint that ends in `if ...; then exec A; else exec B; fi` will
+ # happily accept an array assigned inside ONE branch. The other branch expands an
+@@ -16,6 +16,20 @@
+ # ⚠️ Indentation is NOT a sufficient proxy: in these composes the branch execs sit
+ # at the same column as a block nudged inside the branch. Depth is tracked from the
+ # shell keywords instead.
++#
++# `case` handling (added for the #1540 VISION `case` on qwen3.8-27b single mtp,
++# which the first cut of this gate falsely flagged):
++#   * an assignment may open a case arm -- `on) LM_ONLY_ARGS=() ;;` -- so the
++#     assignment matcher accepts an optional `pattern)` prefix;
++#   * each arm is an ALTERNATIVE scope (like `else`/`elif`), so an assignment in
++#     one arm does NOT dominate code in another arm or after `esac`;
++#   * an EXHAUSTIVE case -- every arm assigns the array or exits/returns/execs,
++#     and a `*)` default is present so no input falls through -- DOES dominate
++#     code after `esac`: the array is assigned on every path that reaches there.
++#
++# The gate runs its own fixtures (exhaustive case passes, non-exhaustive case
++# fails, `*) exit` arms count, and the original then-branch bug still fails) on
++# every invocation, so fixing this logic cannot silently regress it.
+ set -uo pipefail
+ export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
+ # #779: this gate parses compose YAML through python3; without PYTHONUTF8 a
+@@ -27,7 +41,7 @@ python3 - <<'PY' || exit 1
+ import re, sys, yaml, pathlib
+ 
+ def script_of(path):
+-    try: d = yaml.safe_load(open(path))
++    try: d = yaml.safe_load(open(path, encoding="utf-8"))
+     except Exception: return None
+     for svc in (d.get("services") or {}).values():
+         # ⚠️ entrypoint AND command. 17 services set
+@@ -50,53 +64,190 @@ def script_of(path):
+ OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
+ CLOSE = re.compile(r'^\s*(fi|done|esac)\b')
+ ALT   = re.compile(r'^\s*(else|elif)\b')
+-ONELINE = re.compile(r'\b(fi|done|esac)\s*;?\s*$')
++# fi/done/esac may also close INLINE (a one-liner if/case ending `...; fi`, or an
++# arm line ending `...; fi ;;`). Preceded by `;`/`&` on purpose: `done` inside
++# `echo "... done"` is prose, `; done` is the loop closing.
++INLINE_CLOSE = re.compile(r'[;&]\s*(?:fi|done|esac)\b')
++# A case arm opens with `pattern)`: bare word / glob / `|`-list, no spaces, quotes
++# or parens. Deliberately strict -- a false arm reading would corrupt the scope
++# stack. Arms this misses (quoted patterns) keep the previous arm's id, i.e. the
++# pre-case behaviour: never a false FAIL, at worst a missed dead array.
++ARM   = re.compile(r'^\s*[A-Za-z0-9_*?.|-]+(?:\s*\|\s*[A-Za-z0-9_*?.|-]+)*\s*\)')
++# A terminal statement: the path ends here, so an arm that only exits still
++# "covers" the array (the exec after `esac` is never reached on that path).
++EXITISH   = re.compile(r'(?:^|[;&|]\s*)(?:exit|return|exec)\b')
++ARM_PAT_RE = re.compile(r'^\s*([^)]*)\)')
++
++def assign_re(arr):
++    # `NAME=(...)` at the start of a line, optionally behind a case pattern:
++    # `on) LM_ONLY_ARGS=() ;;` (#1540 style). The prefix shape mirrors ARM, and
++    # the anchor keeps `SPEC_ARGS=(` from ever matching as `ARGS=(`.
++    return re.compile(rf'^\s*(?:[A-Za-z0-9_*?.|-]+(?:\s*\|\s*[A-Za-z0-9_*?.|-]+)*\s*\)\s*)?{arr}=\(')
+ 
+-def scope_paths(lines):
+-    """Path of enclosing BRANCH ids per line.  `else`/`elif` starts a NEW id at the
+-    same depth, so an assignment in the then-branch does not dominate the
+-    else-branch -- which plain depth counting cannot express."""
+-    paths, stack, nxt = [], [], [0]
++def parse(lines):
++    """Return (branch path per line, case blocks).
++
++    A path is the tuple of enclosing BRANCH ids. `else`/`elif` and every case arm
++    start a NEW id at the same depth, so an assignment in one alternative does not
++    dominate another -- which plain depth counting cannot express.
++    A case block is (case_line, esac_line, [arm_line, ...]) for the dominance rule.
++    """
++    paths, stack, blocks, nxt = [], [], [], [0]
+     def fresh():
+         nxt[0] += 1
+         return nxt[0]
+-    for ln in lines:
+-        if CLOSE.match(ln) and stack: stack.pop()
+-        elif ALT.match(ln) and stack: stack[-1] = fresh()
+-        paths.append(tuple(stack))
+-        if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+-    return paths
++    def pop_one():
++        if not stack: return
++        fr = stack.pop()
++        if fr["kind"] == "case":
++            blocks.append((fr["start"], idx, fr["arms"]))
++    for idx, ln in enumerate(lines):
++        m_open = OPEN.match(ln)
++        closes_inline = len(INLINE_CLOSE.findall(ln))
++        pops   = max(0, max(closes_inline, 1 if CLOSE.match(ln) else 0) - (1 if m_open else 0))
++        pushes = max(0, (1 if m_open else 0) - closes_inline)
++        is_close = bool(CLOSE.match(ln))
++        is_alt   = bool(ALT.match(ln))
++        is_arm   = bool(stack and stack[-1]["kind"] == "case" and ARM.match(ln))
++        if is_close:
++            for _ in range(pops): pop_one()
++        else:
++            if is_alt and stack:
++                stack[-1]["id"] = fresh()
++            elif is_arm:
++                stack[-1]["arms"].append(idx)
++            for _ in range(pops): pop_one()
++        paths.append(tuple(fr["id"] for fr in stack))
++        if pushes:
++            stack.append({"id": fresh(), "kind": "case" if m_open.group(1) == "case" else "block",
++                          "start": idx, "arms": []})
++    return paths, blocks
++
++def esac_guaranteeing(blocks, lines, arr):
++    """esac line numbers after which `arr` is guaranteed assigned.
+ 
+-checked = refs = 0
+-problems = []
++    An exhaustive case -- a `*)` default arm so no value falls through, and every
++    arm assigning `arr` or ending the path (exit/return/exec) -- dominates code
++    after `esac`. Requires at least one arm to actually assign, so a case whose
++    arms only exit cannot mask a genuine "never assigned" script.
++    """
++    are = assign_re(arr)
++    out = []
++    for (c, e, arms) in blocks:
++        if not arms: continue
++        regions = [(arms[k], arms[k + 1] if k + 1 < len(arms) else e) for k in range(len(arms))]
++        has_default = any(ARM_PAT_RE.match(lines[a]).group(1).strip() == "*" for a, _ in regions)
++        assigns = cov = 0
++        for (a, z) in regions:
++            body = lines[a:z]
++            if any(are.match(l) for l in body): assigns += 1
++            if any(are.match(l) or EXITISH.search(l) for l in body): cov += 1
++        if has_default and assigns and cov == len(regions):
++            out.append(e)
++    return out
+ 
+-for p in sorted(pathlib.Path("models").rglob("*.yml")):
+-    if "compose" not in str(p): continue
+-    s = script_of(p)
+-    if not s: continue
+-    checked += 1
+-    lines = s.splitlines()
+-    paths = scope_paths(lines)
++def scan(lines):
++    """Return (n array refs, [problem messages]) for one entrypoint script."""
++    paths, blocks = parse(lines)
++    refs, problems = 0, []
+     for i, ln in enumerate(lines):
+         if not re.match(r'^\s*exec\b', ln): continue
+         for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+             refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
++            asg  = [(j, paths[j]) for j, l in enumerate(lines) if assign_re(arr).match(l)]
++            asg += [(e, paths[e]) for e in esac_guaranteeing(blocks, lines, arr)]
+             if not asg:
+-                problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
++                problems.append(f"exec uses ${{{arr}[@]}} but it is never assigned"); continue
+             # an assignment dominates the exec iff it comes first AND its branch
+             # path is a prefix of the exec's (same scope, or an enclosing one)
+-            ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
++            ok = any(j < i and paths[i][:len(p)] == p for j, p in asg)
+             if not ok:
+                 problems.append(
+-                    f"{p}: {arr} is assigned only inside a branch that the exec on line "
++                    f"{arr} is assigned only inside a branch that the exec on line "
+                     f"{i+1} does not share -- that path expands an unset array, silently "
+                     f"dropping the feature")
++    return refs, problems
++
++def scan_dir(root):
++    checked = refs = 0
++    problems = []
++    for p in sorted(root.rglob("*.yml")):
++        if "compose" not in str(p): continue
++        s = script_of(p)
++        if not s: continue
++        checked += 1
++        r, probs = scan(s.splitlines())
++        refs += r
++        problems += [f"{p}: {m}" for m in probs]
++    return checked, refs, problems
++
++checked, refs, problems = scan_dir(pathlib.Path("models"))
++
++# ---- self-test fixtures -----------------------------------------------------
++# The guard must keep its own semantics pinned; these run on every invocation.
++EXHAUSTIVE = '''V=on
++case "$V" in
++  on) LM_ARGS=() ;;
++  off) LM_ARGS=(--language-model-only) ;;
++  *) echo "VISION=$V" >&2; exit 1 ;;
++esac
++exec cmd "${LM_ARGS[@]}"'''
++NO_DEFAULT = '''case "$V" in
++  on) LM_ARGS=() ;;
++  off) LM_ARGS=(--language-model-only) ;;
++esac
++exec cmd "${LM_ARGS[@]}"'''
++ARM_GAP = '''case "$V" in
++  on) LM_ARGS=() ;;
++  off) echo "no arg for off" >&2 ;;
++  *) exit 1 ;;
++esac
++exec cmd "${LM_ARGS[@]}"'''
++THEN_ONLY = '''if [ -n "$A" ]; then
++  LM_ARGS=(--a)
++else
++  exec cmd "${LM_ARGS[@]}"
++fi
++exec cmd "${LM_ARGS[@]}"'''
++PRE_CASE = '''LM_ARGS=()
++case "$V" in
++  on) LM_ARGS=() ;;
++  off) LM_ARGS=(--language-model-only) ;;
++  *) exit 1 ;;
++esac
++exec cmd "${LM_ARGS[@]}"'''
++ELIF_ALT = '''if [ x = y ]; then
++  LM_ARGS=(--one)
++elif [ x = z ]; then
++  exec cmd "${LM_ARGS[@]}"
++else
++  exec cmd "${LM_ARGS[@]}"
++fi'''
++PLAIN = '''LM_ARGS=(--a)
++exec cmd "${LM_ARGS[@]}"'''
++
++FIXTURES = [
++    ("case-arm-exhaustive",  EXHAUSTIVE, True),   # #1540 pattern: every arm assigns or exits
++    ("case-arm-pre-init",    PRE_CASE,   True),   # init before the case
++    ("plain-assign",         PLAIN,      True),
++    ("case-no-default",      NO_DEFAULT, False),  # unknown value skips both arms
++    ("case-arm-gap",         ARM_GAP,    False),  # one arm neither assigns nor exits
++    ("then-branch-only",     THEN_ONLY,  False),  # the bug this gate was written for
++    ("elif-branch-only",     ELIF_ALT,   False),
++]
++fixture_failures = []
++for name, script, want_pass in FIXTURES:
++    _, probs = scan(script.splitlines())
++    if want_pass and probs:
++        fixture_failures.append(f"fixture {name}: expected PASS, got: {probs[0]}")
++    if not want_pass and not probs:
++        fixture_failures.append(f"fixture {name}: expected FAIL (dead-array shape), but the guard was silent")
+ 
+ if checked == 0 or refs == 0:
+     print(f"FAIL: vacuous run (checked={checked}, refs={refs}) -- extraction is broken", file=sys.stderr); sys.exit(1)
++for m in fixture_failures: print("FAIL: " + m, file=sys.stderr)
+ for m in problems: print("FAIL: " + m, file=sys.stderr)
+-if problems: sys.exit(1)
+-print(f"  checked {checked} entrypoints, {refs} array reference(s) -- each assigned before, and no deeper than, every exec that uses it")
++if problems or fixture_failures: sys.exit(1)
++print(f"  checked {checked} entrypoints, {refs} array reference(s) -- each assigned on every path reaching every exec that uses it; {len(FIXTURES)} fixtures pass")
+ PY
+ echo "test-compose-args-array-scope.sh OK"

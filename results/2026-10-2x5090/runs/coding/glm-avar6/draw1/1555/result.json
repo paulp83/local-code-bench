@@ -1,0 +1,24 @@
+{
+ "n": 1555,
+ "config": "glm-avar6",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 815.5,
+ "steps": 44,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.5,
+ "checks_passed": 14,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py",
+  "scripts/lib/run_context.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 1
+ }
+}

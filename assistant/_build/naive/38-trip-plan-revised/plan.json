@@ -1,0 +1,14 @@
+{
+  "flights": [
+    "F01",
+    "F06",
+    "F13",
+    "F30"
+  ],
+  "hotels": {
+    "BER": "H-BER-4",
+    "LIS": "H-LIS-5",
+    "MAD": "H-MAD-2"
+  },
+  "total_usd": 1727
+}

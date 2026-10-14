@@ -1,0 +1,14 @@
+PASS report-parses
+PASS four-categories
+PASS claimed-lodging
+PASS reimbursable-lodging
+PASS claimed-meals
+PASS reimbursable-meals
+PASS claimed-supplies
+PASS reimbursable-supplies
+PASS claimed-transport
+PASS reimbursable-transport
+PASS total-reimbursable
+PASS duplicates-dropped
+PASS over-cap
+PASS: 13 FAIL: 0

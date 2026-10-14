@@ -1,0 +1,14 @@
+{
+ "task": "08-models-slug-index",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 15.4,
+ "tool_calls": 8,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 10,
+ "checks_total": 10,
+ "partial": 1.0
+}

@@ -1,0 +1,25 @@
+{
+ "n": 1610,
+ "config": "thinkingcap-dualfast-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 780.5,
+ "steps": 69,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 0.5,
+ "files_touched": [
+  "docs/PATCH_ATTRIBUTION.md",
+  "docs/PATCH_POLICY.md",
+  "scripts/lib/profiles/patch_attribution.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-patch-attribution.sh": 1
+ }
+}

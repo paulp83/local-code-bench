@@ -1,0 +1,32 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..3a23034 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -38,10 +38,23 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+-    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # A slug pinned with a drafter emits this line TWICE per device: once for the
++    # target, once for the drafter. Last-wins here would silently swap the
++    # target's weights for the drafter's -- sum them instead (agg=True).
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size\s+=\s+([\d.]+) MiB", agg=True)
++    # compute stays last-wins: the engine RE-RESERVES the same buffer per device
++    # (a drafter load forces a bigger reservation and the target reserves again).
++    # The log does not say which context a sched_reserve line belongs to, so
++    # summing here would double-count the target's own re-reserve. Known gap:
++    # a drafter's compute reservation on a device is absorbed into "unaccounted".
++    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size\s+=\s+([\d.]+) MiB")
++    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size\s+=\s+([\d.]+) MiB", agg=True)
++    # Recurrent models (GLM/GRU drafters) log an RS buffer under llama_memory_recurrent;
++    # DeepSeek-style compute state logs under _comp_state. Both are state buffers
++    # the engine did not otherwise name, and a device may report either or both.
++    state = {**_per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size\s+=\s+([\d.]+) MiB", agg=True)}
++    for dev, val in _per_dev(text, r"llama_memory_recurrent:\s+(CUDA\d) (?:RS|state) buffer size\s+=\s+([\d.]+) MiB", agg=True).items():
++        state[dev] = state.get(dev, 0.0) + val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

@@ -1,0 +1,123 @@
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 06b4696..68203bb 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -455,6 +455,13 @@ spec = {
+     "default_weight_variant": "local",
+     "vision_capable": bool(cfg_extra.get("vision_capable", False)),
+     "compose": {"path": cpath, "content": text},
++    # The LOCAL ENGINE profile, when the engine is unknown to the catalog. It is
++    # handed to promote.py as PART OF THE SPEC, not written here: promote owns the
++    # plan, the --dry-run exit and the confirm, and it must therefore own this
++    # write too — a write performed here happened before anyone could stop it, so
++    # every --dry-run register leaked engines.d/<engine>.yml onto disk.
++    "engine_profile": ({"path": f"scripts/lib/profiles-local/engines.d/{engine}.yml",
++                        "content": engine_yaml} if engine_yaml else None),
+     "registry_entry": {"slug": slug, "kwargs": {
+         "model": mid, "weights_variant": "local", "workload": workload,
+         "engine": engine, "drafter": None,
+@@ -466,10 +473,10 @@ spec = {
+ }
+ Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
+ if engine_yaml:
+-    d = Path(wroot) / "scripts/lib/profiles-local/engines.d"
+-    d.mkdir(parents=True, exist_ok=True)
+-    (d / f"{engine}.yml").write_text(engine_yaml, encoding="utf-8")
+-    print(f"[catalog] wrote a local ENGINE profile: profiles-local/engines.d/{engine}.yml "
++    # Reported, not written — promote.py writes it (and only after its own
++    # --dry-run / confirm gates let a real write through).
++    print(f"[catalog] engine profile staged for the write: "
++          f"scripts/lib/profiles-local/engines.d/{engine}.yml "
+           f"(type={etype}, capabilities evidenced from the compose)")
+ 
+ def mark(v, given):  # show the user which values THEY chose vs which we guessed
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index 1e903c2..fc325ea 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -83,6 +83,12 @@ _LOCAL_DIR_REL = "scripts/lib/profiles-local"
+ _LOCAL_MODELS_REL = f"{_LOCAL_DIR_REL}/models.d"
+ _LOCAL_COMPOSES_REL = f"{_LOCAL_DIR_REL}/composes"
+ _LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
++# The optional LOCAL engine profile a spec may carry (catalog.sh derives it from
++# the compose when the engine is unknown to the catalog). It is a FOURTH artifact
++# of the local write — and it lives HERE, not in the deriving caller, because this
++# script owns the plan, the --dry-run exit and the confirm: a write performed
++# upstream happens before anyone could stop it.
++_LOCAL_ENGINES_REL = f"{_LOCAL_DIR_REL}/engines.d"
+ _LOCAL_SLUG_PREFIX = "local/"
+ # Local entries ALWAYS land here (the enum's pre-experimental rung: hidden from
+ # switch.sh --list, --force to launch). Not user-selectable — promote up the
+@@ -391,6 +397,16 @@ def _check_common_shape(spec: Any) -> dict:
+         raise Refusal("spec.registry_entry.kwargs must be a dict incl. model + compose_path")
+     if kwargs.get("model") != mid:
+         raise Refusal(f"registry kwargs.model {kwargs.get('model')!r} != model_id {mid!r}")
++    # Optional fourth artifact: the LOCAL engine profile. Only its SHAPE is
++    # checked here; the layer containment is a local-layer concern (validate_spec).
++    ep = spec.get("engine_profile")
++    if ep is not None:
++        if not isinstance(ep, dict):
++            raise Refusal("spec.engine_profile must be a dict when present")
++        if not isinstance(ep.get("path"), str) or not ep["path"]:
++            raise Refusal("spec.engine_profile.path is required")
++        if not isinstance(ep.get("content"), str) or not ep["content"].strip():
++            raise Refusal("spec.engine_profile.content is required (the engine YAML text)")
+     return spec
+ 
+ 
+@@ -425,6 +441,11 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+         if slug.count("/") != 1:
+             raise Refusal(f"local slug {slug!r} must be '<engine>/<name>'")
+         _refuse_if_path_escapes(cpath, _LOCAL_COMPOSES_REL, "spec.compose.path")
++        # Same containment for the optional engine profile: a spec must never be
++        # able to drop a file anywhere on disk under the banner of the local layer.
++        ep = spec.get("engine_profile")
++        if ep is not None:
++            _refuse_if_path_escapes(ep["path"], _LOCAL_ENGINES_REL, "spec.engine_profile.path")
+         if kwargs.get("compose_path") != cpath:
+             raise Refusal(
+                 f"registry kwargs.compose_path {kwargs.get('compose_path')!r} != "
+@@ -508,6 +529,14 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+             f"the {_LOCAL_SLUG_PREFIX!r} namespace belongs to the LOCAL layer — "
+             "core slugs are <engine>/<name>"
+         )
++    # An engine profile is a LOCAL-layer artifact (gitignored engines.d/): a core
++    # write must never smuggle one into the layer, or out of it.
++    if spec.get("engine_profile") is not None:
++        raise Refusal(
++            f"spec.engine_profile is a LOCAL-layer artifact ({_LOCAL_ENGINES_REL}/, "
++            "gitignored) — a curated write must not carry one. Drop the key, or use "
++            "--layer local."
++        )
+     # ── Symmetric to the LOCAL containment check above (#1205 follow-up) ─────
+     # LOCAL writes may not leave the layer; CORE writes may not reach INTO it.
+     # `profiles-local/` is GITIGNORED, so a curated row whose compose_path points
+@@ -546,6 +575,8 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+             f"plan (layer LOCAL — gitignored {_LOCAL_DIR_REL}/, root {root}):",
+             f"  write {_LOCAL_MODELS_REL}/{mid}.yml",
+             f"  write {spec['compose']['path']}",
++            f"  write {spec['engine_profile']['path']}" if spec.get("engine_profile") else
++            f"  (no engine profile: {spec['registry_entry']['kwargs'].get('engine')!r} is already known to the catalog)",
+             f"  merge entry into {_LOCAL_REGISTRY_REL} (JSON — no source edit)",
+             f"  slug: {slug}  model: {mid}  variant: {spec['default_weight_variant']}"
+             f"  status: {_LOCAL_FORCED_STATUS}",
+@@ -585,7 +616,18 @@ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+     except OSError as exc:
+         raise InternalError(f"could not write {compose_abs}: {exc}")
+ 
+-    # ── Write 3/3: the JSON merge into registry.local.json ──────────────────
++    # ── Write 3/4: the LOCAL engine profile, when the spec carries one ───────
++    ep = spec.get("engine_profile")
++    if ep is not None:
++        ep_abs = root / ep["path"]
++        try:
++            ep_abs.parent.mkdir(parents=True, exist_ok=True)
++            ep_abs.write_text(ep["content"], encoding="utf-8")
++            _info(f"wrote {ep_abs}")
++        except OSError as exc:
++            raise InternalError(f"could not write {ep_abs}: {exc}")
++
++    # ── Write 4/4: the JSON merge into registry.local.json ──────────────────
+     reg_path = root / _LOCAL_REGISTRY_REL
+     try:
+         raw = _load_local_raw(root)

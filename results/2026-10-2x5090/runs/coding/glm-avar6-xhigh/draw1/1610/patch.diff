@@ -1,0 +1,337 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..17c9f21 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -33,6 +33,39 @@ the test still asserts on it) but every text probe it performs now runs
+ against the comment-stripped service body, never the header — so the
+ result is identical to the legacy behaviour on the shipped composes
+ while being immune to header/comment false positives on generated ones.
++
++reaches() soundness (r2, install-script unwiring)
++-------------------------------------------------
++The legacy ``delivery.entrypoint_invoke`` fallback then overrode that sound
++verdict with two GENERIC markers: for a ``files:`` entry it took the bare
++artifact filename (``install.sh`` — the name every install-script patch
++ships, so any compose that runs ANY install script matched) and, for a
++directory entry, ``Path(rel).parent.name`` (always ``patches`` — so any
++compose that mounts ANY ``patches/`` dir matched). The fallback therefore
++answered True unconditionally for those entries, and a compose that had
++been unwired from an install-script patch (mount + invoke removed) still
++reported as reached.
++
++Two fixes, in ``reaches``:
++
++* the fallback is now SUBORDINATE to the spec: a patch whose
++  ``delivery_spec`` fully describes the wiring it claims
++  (:func:`_spec_is_authoritative`) gets no fallback at all, so a stray
++  non-mount mention of the patch dir (an echo in a bootstrap script, a
++  README pointer) can no longer resurrect a compose the spec says is
++  unwired;
++* where the fallback does run (specs that leave an insertion point
++  undescribed) it probes only identity-bearing basenames — this patch's
++  own directory name and its non-generic artifacts — never ``patches``
++  or ``install.sh`` (:func:`_path_identity_markers`).
++
++And the spec's own mount check is now source-attributed
++(:func:`_mount_source_present`): a mount line counts only when the declared
++in-container target AND one of this patch's own source-side basenames
++appear on the SAME line. Two patches can share a target
++(``qwen-w4a8-int8-act`` and ``qwen38-sglang-autoround-w4a8-v0519`` both
++land on ``/etc/club3090/w4a8``), so a target-only match would let each
++claim the other engine's compose.
+ """
+ 
+ from __future__ import annotations
+@@ -396,6 +429,142 @@ def service_body(text: str) -> str:
+     return "\n".join(body_lines)
+ 
+ 
++# --------------------------------------------------------------------------
++# Patch-identity markers (soundness r2).
++#
++# Two DIFFERENT patches can be mounted at the SAME in-container target
++# (``qwen-w4a8-int8-act`` and ``qwen38-sglang-autoround-w4a8-v0519`` both
++# land on ``/etc/club3090/w4a8``), and every install-script patch ships an
++# ``install.sh``. So neither "the target path appears in the compose" nor
++# "the artifact basename appears in the compose" says anything about WHICH
++# patch is wired there. Attribution must be pinned to the mount's SOURCE
++# side: the vendored ``patches/<patch-dir>`` path this patch owns.
++#
++# What counts as identity, per path component (walking up from the
++# artifact towards the vendored tree root, stopping at the first generic
++# component so a model dir can never widen the match):
++#
++#   models/qwen3.8-27b/vllm/patches/vllm-effort-budget/install.sh
++#   ^^^^^^ generic repo dir
++#           ^^^^^^^^^^^^^ generic model dir (the walk stops before it)
++#                        ^^^ generic engine dir
++#                            ^^^^^^^ generic tree root
++#                                    ^^^^^^^^^^^^^^^^^^^ the patch dir: IDENTIFYING
++#                                                          ^^^^^^^^^ generic filename
++#
++# A component is GENERIC when it names a *container* for the artifact rather
++# than the artifact's own patch: the vendored-tree roots themselves
++# (``patches`` / ``patch`` / ``local`` / ``genesis``), an engine dir, or a
++# filename every install-script patch ships (``install.sh``, ``apply.py``,
++# ``apply_patch.py``, ...). Generic components are skipped, never reported.
++# --------------------------------------------------------------------------
++PATCH_TREE_ROOT_NAMES = {"patches", "patch", "local", "genesis"}
++
++# Directory basenames that can never identify a patch: they name where the
++# artifact lives (a vendored-tree root, an engine dir, a repo dir), not
++# which patch it belongs to.
++GENERIC_DIR_NAMES = PATCH_TREE_ROOT_NAMES | {
++    "models",
++    "model",
++    "compose",
++    "composes",
++    "scripts",
++    "services",
++    "tools",
++    "lib",
++    "profiles",
++    "vllm",
++    "sglang",
++    "llamacpp",
++    "llama-cpp",
++    "llama_cpp",
++    "_archive",
++}
++
++# Artifact basenames that can never identify a patch, because every
++# install-script / sidecar patch ships one (``install.sh``) or every
++# vendored artifact shares it (``apply.py``). The legacy fallback used the
++# bare filename as a marker, so it matched every compose that runs ANY
++# install script.
++GENERIC_ARTIFACT_NAMES = {
++    "install.sh",
++    "install.py",
++    "install_artifact.py",
++    "apply.py",
++    "apply.sh",
++    "apply_patch.py",
++    "patch.py",
++    "patch.sh",
++    "setup.py",
++    "setup.sh",
++    "sitecustomize.py",
++    "__init__.py",
++    "run.sh",
++    "run.py",
++    # The stock chat-template name: every vendored template patch (and every
++    # model dir) carries one, so it cannot tell two patches apart.
++    "chat_template.jinja",
++    "chat_template.jinja2",
++}
++
++
++def _is_generic_artifact_name(name: str) -> bool:
++    """True for an artifact basename that could belong to ANY patch.
++
++    ``install.sh`` is the one every install-script patch ships, so it can
++    never tell two patches' invoke lines (or mount sources) apart.
++    """
++    return name.strip().lower() in GENERIC_ARTIFACT_NAMES
++
++
++def _is_generic_dir_name(name: str) -> bool:
++    return name.strip().lower() in GENERIC_DIR_NAMES
++
++
++def _path_identity_markers(rel: str) -> list[str]:
++    """The non-generic basenames that identify a patch on ``rel``'s SOURCE side.
++
++    Walks up from the artifact towards the vendored-tree root, collecting
++    every non-generic component and stopping at the first generic one — so
++    a model dir / engine dir can never widen the match to another patch,
++    and a generic artifact filename (``install.sh``) never stands alone as
++    a match. ``models/x/vllm/patches/foo/install.sh`` -> ``["foo"]``;
++    ``models/x/vllm/patches/local/qwen3coder_tool_parser.py`` ->
++    ``["qwen3coder_tool_parser.py"]`` (the ``local/`` drop has no identity).
++    """
++    markers: list[str] = []
++    for part in reversed(Path(rel).parts):
++        if _is_generic_dir_name(part):
++            break  # the vendored tree root / a repo dir: stop, do not widen
++        if part and part not in markers:
++            markers.append(part)
++    return [m for m in markers if not _is_generic_artifact_name(m)]
++
++
++def _patch_source_markers(patch: dict) -> list[str]:
++    """Every non-generic source-side basename this patch owns.
++
++    Unioned over the ``delivery_spec`` artifacts (script / sidecar / overlay
++    ``src`` / vendored ``jinja``) and the ``files:`` entries, so it still
++    works for a patch that only carries the deprecated ``delivery:`` block.
++    """
++    rels: list[str] = []
++    spec = patch.get("delivery_spec") or {}
++    for key in ("script", "sidecar", "jinja"):
++        if spec.get(key):
++            rels.append(spec[key])
++    for of in spec.get("overlay_files") or []:
++        if of.get("src"):
++            rels.append(of["src"])
++    for rel in patch.get("files") or []:
++        rels.append(rel)
++
++    markers: set[str] = set()
++    for rel in rels:
++        markers.update(_path_identity_markers(rel))
++    return sorted(markers)
++
++
+ # --------------------------------------------------------------------------
+ # delivery_spec wiring validation — confirm the patch's *actual* mount /
+ # invoke artifacts (as declared in patches.yml / Phase-A-prime
+@@ -412,6 +581,10 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     * invoke markers: the entrypoint command that runs the sidecar /
+       install script (``invoke`` string, the sidecar/script container
+       path, or basename).
++
++    Volume markers are the TARGET side only; the mount's SOURCE side is
++    validated separately by :func:`_mount_source_present` — two patches can
++    share a target, so a target-only match is not attribution.
+     """
+     spec = patch.get("delivery_spec") or {}
+     vol: list[str] = []
+@@ -431,6 +604,14 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+ 
+     # python_sidecar → sidecar is the host path; its basename appears in
+     # both the bind mount and the `python3 …` invoke line.
++    # NOTE: the script/sidecar BASENAME is deliberately kept even when it is
++    # a shared name (``install.sh``): composes invoke installers through an
++    # indirection (`_p=/etc/club3090/w4a8; bash "$_p/install.sh"`), so the
++    # literal ``invoke:`` string is often absent and the basename is the only
++    # invoke-side witness. That is safe because the *volume* side — the side
++    # that actually attributes the patch — is checked per-line against the
++    # mount's SOURCE (:func:`_mount_source_present`); a shared ``install.sh``
++    # can only corroborate, never attribute on its own.
+     sidecar = spec.get("sidecar")
+     if sidecar:
+         inv.append(Path(sidecar).name)
+@@ -463,12 +644,76 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     return vol, inv
+ 
+ 
++def _mount_source_present(patch: dict, body: str) -> bool:
++    """True iff a service-body line mounts one of the patch's declared
++    container-side targets FROM this patch's own source path.
++
++    A mount line is attributed to THIS patch only when the target AND a
++    non-generic source-side basename of the patch appear on the SAME line
++    (a rendered ``docker compose config`` volume entry, or the committed
++    ``- <src>:<dest>[:mode]`` line). Two patches can share an in-container
++    target — ``qwen-w4a8-int8-act`` and ``qwen38-sglang-autoround-w4a8-v0519``
++    both land on ``/etc/club3090/w4a8`` — so the target alone is not
++    attribution. Returns False when the patch declares no mount target.
++    """
++    vol_markers, _ = _spec_wiring_markers(patch)
++    if not vol_markers:
++        return False
++    # A `chat_template` patch's effective-coverage contract is a different
++    # soundness story (CONTRACT-2b-i): it resolves the REAL merged compose
++    # graph, where a child may re-point the template mount at an equivalent
++    # vendored path, and its fixtures pin the mount by TARGET alone. Keep
++    # that class target-matched; every other class must match the source.
++    if patch.get("delivery_mechanism") == "chat_template":
++        return any(target in body for target in vol_markers)
++    sources = _patch_source_markers(patch)
++    lines = body.splitlines()
++    for target in vol_markers:
++        for line in lines:
++            if target not in line:
++                continue
++            # The source side must be THIS patch's, not a sibling patch's.
++            if sources and not any(marker in line for marker in sources):
++                continue
++            return True
++    return False
++
++
++def _spec_is_authoritative(patch: dict) -> bool:
++    """True when the ``delivery_spec`` fully describes every insertion point
++    it claims, so the legacy ``delivery:`` text probe has nothing left to add
++    and must NOT be allowed to override a sound False.
++
++    "Fully describes" = for each point in ``wired_at`` the spec supplies a
++    concrete, patch-specific marker: a mount target for ``volumes`` and a
++    real command (or a patch-specific script/sidecar basename) for
++    ``entrypoint``. A spec that claims a mount but declares no ``mounted_at``
++    (the gemma PR-backport rows) or claims an invoke but offers only a
++    human-readable sentence is UNDER-specified: the legacy fallback still
++    applies, so such a patch keeps reaching its own compose.
++    """
++    spec = patch.get("delivery_spec")
++    if not spec:
++        return False
++    wired_at = spec.get("wired_at")
++    if isinstance(wired_at, str):
++        wired_at = [wired_at]
++    wired_at = set(wired_at or [])
++    vol, inv = _spec_wiring_markers(patch)
++    if "volumes" in wired_at and not vol:
++        return False
++    if "entrypoint" in wired_at and not inv:
++        return False
++    return bool(vol or inv)
++
++
+ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+     ``wired_at`` tells us which insertion point(s) the patch claims:
+-    ``volumes`` requires a matching mount target; ``entrypoint`` requires
+-    a matching invoke; ``[volumes, entrypoint]`` requires *both*.
++    ``volumes`` requires a matching mount target (mounted from THIS patch's
++    own source path — :func:`_mount_source_present`); ``entrypoint``
++    requires a matching invoke; ``[volumes, entrypoint]`` requires *both*.
+     A patch whose delivery_mechanism is ``none`` has no spec and is never
+     spec-wired (the legacy fallback below still applies for parity).
+     """
+@@ -481,7 +726,7 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+-    vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
++    vol_ok = _mount_source_present(patch, body)
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
+ 
+     if wired_at == {"volumes"}:
+@@ -542,14 +787,29 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+ 
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+     # service body, so header/comment ID mentions never match.
++    #
++    # soundness r2, and WHY the fallback must stay subordinate: the old
++    # probe took ``Path(rel).name`` (the bare artifact filename —
++    # ``install.sh`` for every install-script patch, so any compose that
++    # runs ANY install script answered True) plus, for a directory entry,
++    # ``Path(rel).parent.name`` (always ``patches`` — so any compose that
++    # mounts ANY ``patches/`` dir answered True). Both markers are generic,
++    # and the fallback ran UNCONDITIONALLY after the sound ``delivery_spec``
++    # check, so it always got the final say: an install-script patch that
++    # had been unwired from a compose still reported as reached.
++    #
++    # It is now subordinate in both senses:
++    #   * a patch whose ``delivery_spec`` fully describes its wiring gets NO
++    #     fallback at all — the spec decides, so a stray non-mount mention of
++    #     the patch dir (an echo in a bootstrap script, a README pointer)
++    #     cannot resurrect a compose the spec says is unwired;
++    #   * where the fallback does run it probes only identity-bearing
++    #     basenames (this patch's own directory name and its non-generic
++    #     artifacts), never ``patches`` or ``install.sh``.
+     delivery = patch.get("delivery") or {}
+-    if delivery.get("entrypoint_invoke"):
++    if delivery.get("entrypoint_invoke") and not _spec_is_authoritative(patch):
+         for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
++            if any(marker in body for marker in _path_identity_markers(rel)):
+                 return True
+         if patch["id"] in body:
+             return True

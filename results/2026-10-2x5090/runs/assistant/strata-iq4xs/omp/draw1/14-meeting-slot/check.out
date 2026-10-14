@@ -1,0 +1,6 @@
+PASS one-vevent
+PASS dtstart-dtend-utc-format
+PASS summary-sync
+PASS duration-45-min
+PASS earliest-valid-slot
+PASS: 5 FAIL: 0

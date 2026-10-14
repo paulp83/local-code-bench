@@ -1,0 +1,27 @@
+PASS item-i01
+PASS item-i02
+PASS item-i03
+PASS item-i04
+PASS item-i05
+PASS item-i06
+PASS item-i07
+PASS item-i08
+PASS item-i09
+PASS item-i10
+PASS item-i11
+PASS item-i12
+PASS item-i13
+PASS item-i14
+PASS item-i15
+PASS item-i16
+PASS item-i17
+PASS item-i18
+PASS item-i19
+PASS item-i20
+PASS all-20-items
+PASS summary-count
+PASS summary-total
+PASS summary-retried
+PASS fetched-via-script
+PASS retries-actually-made
+PASS: 26 FAIL: 0

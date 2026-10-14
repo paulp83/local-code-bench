@@ -1,0 +1,73 @@
+[
+  {
+    "name": "fetch",
+    "duration_min": 30,
+    "gpus": 0,
+    "after": [],
+    "not_before_min": 0
+  },
+  {
+    "name": "quant-a",
+    "duration_min": 50,
+    "gpus": 2,
+    "after": [
+      "fetch"
+    ],
+    "not_before_min": 0
+  },
+  {
+    "name": "quant-b",
+    "duration_min": 40,
+    "gpus": 1,
+    "after": [
+      "fetch"
+    ],
+    "not_before_min": 0
+  },
+  {
+    "name": "bench-a",
+    "duration_min": 35,
+    "gpus": 2,
+    "after": [
+      "quant-a"
+    ],
+    "not_before_min": 0
+  },
+  {
+    "name": "bench-b",
+    "duration_min": 25,
+    "gpus": 1,
+    "after": [
+      "quant-b"
+    ],
+    "not_before_min": 0
+  },
+  {
+    "name": "quality-b",
+    "duration_min": 45,
+    "gpus": 1,
+    "after": [
+      "quant-b"
+    ],
+    "not_before_min": 0
+  },
+  {
+    "name": "docs",
+    "duration_min": 20,
+    "gpus": 0,
+    "after": [],
+    "not_before_min": 60
+  },
+  {
+    "name": "report",
+    "duration_min": 15,
+    "gpus": 0,
+    "after": [
+      "bench-a",
+      "bench-b",
+      "quality-b",
+      "docs"
+    ],
+    "not_before_min": 0
+  }
+]

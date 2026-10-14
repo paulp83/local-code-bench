@@ -1,0 +1,52 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 2b0d50f..125c835 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -195,10 +195,17 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# best-effort container for VRAM + cmd introspection (name heuristic)
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++# best-effort container for VRAM + cmd introspection (name heuristic). It must
++# match EVERY club-3090 engine's container prefix, not just vllm-(qwen|gemma): an
++# SGLang serve (container `sglang-…`) was never found, so the card fell back to
++# "spec ?", listed every GPU on the host and measured VRAM rig-wide (#1537).
++CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E '^(vllm|sglang|llama|ik|beellama|tabbyapi)-' || true)}"
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
++# Some composes build their launch flags inside the entrypoint script rather than
++# the command (vLLM derives --speculative-config from SPEC_N there), so introspect
++# the entrypoint too — its flags never reach Cmd (#1537).
++_container_entrypoint() { docker inspect "$CONTAINER" --format '{{join .Config.Entrypoint " "}}' 2>/dev/null || true; }
+ _served_seqs()   { _container_cmd | command grep -oE 'max-num-seqs [0-9]+'  | command grep -oE '[0-9]+' | head -1; }
+ _served_np()     { _container_cmd | command grep -oE '\-np +[0-9]+'         | command grep -oE '[0-9]+' | head -1; }
+ _served_ctx()    { _container_cmd | command grep -oE 'max-model-len [0-9]+' | command grep -oE '[0-9]+' | head -1; }
+@@ -231,12 +238,21 @@ _gpu_fp() {
+ }
+ 
+ _spec_fp() {
+-  local cmd
+-  cmd="$(_container_cmd)"
+-  if [[ -z "$cmd" ]]; then echo "spec ?"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'num-speculative|speculative-config|--speculative'; then echo "MTP"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
++  # Introspect the entrypoint too, not just Cmd: the Qwen vLLM composes derive
++  # --speculative-config from $SPEC_N inside the ENTRYPOINT script, so the flag is
++  # never in Cmd and a Cmd-only grep reported "spec off" with MTP running (#1537).
++  local txt
++  txt="$(_container_cmd)"$'\n'"$(_container_entrypoint)"
++  if [[ -z "${txt//[[:space:]]/}" ]]; then echo "spec ?"; return; fi
++  # DFlash drafter. Match the spec METHOD (vLLM "method":"dflash") or SGLang's
++  # DFLASH knob, never the bare word "dflash" — vLLM's MTP entrypoint drops
++  # "DFlash2" into a code comment, which a loose grep misreads as a drafter once
++  # the entrypoint joins the scan (#1537).
++  if printf '%s' "$txt" | command grep -qiE 'method.{0,8}dflash|speculative-dflash|speculative-algorithm[^&]*DFLASH'; then echo "DFlash"; return; fi
++  # MTP / EAGLE speculation: vLLM builds --speculative-config (method mtp) and
++  # SGLang --speculative-algorithm EAGLE, both inside the entrypoint script.
++  if printf '%s' "$txt" | command grep -qiE 'num-speculative|num_speculative_tokens|speculative-config|speculative-algorithm|speculative-num-steps|speculative-eagle|--speculative'; then echo "MTP"; return; fi
++  if printf '%s' "$txt" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
+   echo "spec off"
+ }
+ 

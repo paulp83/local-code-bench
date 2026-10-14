@@ -1,0 +1,513 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 09ea48e..f029a6c 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -27,8 +27,12 @@
+ #   SWEEP="4 8 12 16" SLUG=vllm/minimal TPS_FLOOR=15 bash scripts/concurrency-probe.sh
+ #
+ # Env: URL (default registry-derived for qwen3.6-27b, currently :8020) · MODEL
+-#   (auto) · CONTAINER (auto for VRAM) · CONCURRENCY (default: served
+-#   max-num-seqs, else 2) · ROUNDS (5; --sweep defaults to 3) ·
++#   (auto) · CONTAINER (auto; it decides WHICH GPUs are measured — VRAM and the
++#   card's GPU label are scoped to the container's cards, never to the rig, and
++#   the run prints "VRAM scope: …" so the scope is on the record. Unresolvable
++#   container (or one that sees every card) = rig-wide, said out loud) ·
++#   CONCURRENCY (default: served max-num-seqs, else 2) · ROUNDS (5; --sweep
++#   defaults to 3) ·
+ #   PROMPT_TOKENS (16000) · GEN_TOKENS (256) ·
+ #   VRAM_GROWTH_MB (200) · REQ_TIMEOUT (600).
+ #   Validation knobs: VALIDATE (0) · TARGET_CTX (auto from --max-model-len) ·
+@@ -224,8 +228,21 @@ _detect_slots() {
+   echo ""
+ }
+ 
++# GPU fingerprint of the CARDS UNDER TEST — not of the rig. ⚠️ An unscoped
++# nvidia-smi query counts every card on the host and names them all after GPU 0,
++# which credits another service's GPUs to the probed container: a container
++# pinned to one RTX 3060 was reported as "4× GeForce RTX 3090". The resolution
++# lives in the lib (concurrency_probe.py --gpu-fp) so the GPU label and the VRAM
++# query can never disagree about which cards this run is about. When no container
++# can be resolved the lib says so on stderr and counts the rig.
+ _gpu_fp() {
+-  local names n first
++  local label names n first
++  # stderr deliberately NOT redirected: the rig-wide fallback notice is worth
++  # reading, and swallowing it is how this mislabelling survived a review.
++  label="$(CONTAINER="${CONTAINER:-}" python3 "$PROBE_PY" --gpu-fp || true)"
++  [[ -n "$label" ]] && { echo "$label"; return; }
++  # Last resort (python3 or the lib unusable): count the rig, and say so.
++  echo "[concurrency-probe] NOTE: GPU fingerprint helper unusable — counting every GPU on the rig" >&2
+   names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null \
+     | sed 's/^NVIDIA //' || true)"
+   [[ -z "$names" ]] && { echo "? GPU"; return; }
+@@ -459,31 +476,46 @@ if [[ "$MATRIX" == "1" ]]; then
+   cells_jsonl="$(mktemp /tmp/cprobe-cells.XXXXXX)"
+   trap 'rm -f "$cells_jsonl"' EXIT
+ 
++  # ⚠️ The row arrives as an ARGUMENT, never on stdin. `python3 -` reads its
++  # PROGRAM from stdin, so a `… | emit_row` pipe is consumed (and replaced) by
++  # the heredoc before json.loads() ever sees it: sys.stdin.read() returned "",
++  # json.loads("") raised, and set -e killed the whole sweep on the FIRST skipped
++  # cell — no card, no === recommend ===, no results/concurrency-*.md. Every skip
++  # path goes through here (budget / clipped / early-stop), and on a small card a
++  # cell almost always overflows the KV pool, so --sweep could not finish there.
+   emit_row() {
+-    python3 - "$cells_jsonl" <<'PY'
++    local row="${1:?emit_row needs the row JSON as \$1}"
++    python3 - "$cells_jsonl" "$row" <<'PY'
+ import json, sys
+ path = sys.argv[1]
+-row = json.loads(sys.stdin.read())
++row = json.loads(sys.argv[2])
+ with open(path, "a", encoding="utf-8") as fh:
+     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+ PY
+   }
+ 
++  # Skip reasons carry spaces and ">" (N*(ctx+gen)=… > KV_TOKENS=…), so the row
++  # is JSON-encoded by python — never by string interpolation.
++  skip_row() {
++    python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":sys.argv[3]}))' \
++      "${1:?skip_row needs ctx}" "${2:?skip_row needs n}" "${3:?skip_row needs the skip reason}"
++  }
++
+   while IFS=$'\t' read -r action ctx n reason; do
+     [[ -z "${action:-}" ]] && continue
+     if [[ "$budget_hit" == "1" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (budget)"
+-      printf '%s\n' "{\"ctx\":$ctx,\"n\":$n,\"skip\":\"budget\"}" | emit_row
++      emit_row "$(skip_row "$ctx" "$n" budget)"
+       continue
+     fi
+     if [[ "$action" == "skip" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (${reason})"
+-      printf '%s\n' "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":sys.argv[3]}))' "$ctx" "$n" "${reason:-clipped}")" | emit_row
++      emit_row "$(skip_row "$ctx" "$n" "${reason:-clipped}")"
+       continue
+     fi
+     if [[ "$EARLY_STOP" == "1" && -n "${ROW_DEAD[$ctx]:-}" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (early-stop — N=${ROW_DEAD[$ctx]} failed)"
+-      printf '%s\n' "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":"early-stop"}))' "$ctx" "$n")" | emit_row
++      emit_row "$(skip_row "$ctx" "$n" early-stop)"
+       continue
+     fi
+     echo
+@@ -526,6 +558,10 @@ row = {
+     "agg": fnum("agg_tps"),
+     "ttft_s": (fnum("ttft_ms") / 1000.0) if fnum("ttft_ms") is not None else None,
+     "vram_gb": (fnum("vram_peak") / 1024.0) if fnum("vram_peak") not in (None, -1.0) else None,
++    # Per-card peaks (bench protocol) for the GPUs the container owns, and which
++    # those were — a summed peak on a multi-GPU rig names no card.
++    "vram_peak_per_gpu": fields.get("vram_peak_per_gpu") or None,
++    "vram_gpus": fields.get("vram_gpus") or None,
+     "running": fields.get("running", "-"),
+     "waiting": fields.get("waiting", "-"),
+     "result": line,
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 9e1eb25..8435afe 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -15,6 +15,10 @@ USAGE (normally invoked by concurrency-probe.sh)
+       action<TAB>ctx<TAB>n<TAB>reason  (driver loop)
+   python3 concurrency_probe.py --card < sweep.json
+       club-3090 concurrency card on stdout
++  CONTAINER=name python3 concurrency_probe.py --container-gpus
++      the nvidia-smi -i selector for that container's GPUs ('' = rig-wide)
++  CONTAINER=name python3 concurrency_probe.py --gpu-fp
++      "1× GeForce RTX 3060" for the container's cards, not for the whole rig
+ """
+ from __future__ import annotations
+ 
+@@ -343,21 +347,246 @@ def engine_stats(container):
+     return (run, wait, run_max, wait_max, hit)
+ 
+ 
+-def vram_used_mb():
++# ---------------------------------------------------------------------------
++# Which GPUs does this measurement belong to?
++# ---------------------------------------------------------------------------
++# ⚠️ Never query nvidia-smi unscoped and attribute the answer to the service
++# under test. A rig has other cards, and they often hold other services: the
++# run that reported this measured a container pinned to ONE RTX 3060 (a flat
++# 10,381 MiB start to finish) while an unrelated SGLang service held the other
++# cards, and the probe printed 55,319 MB on 4× GeForce RTX 3090 — i.e. the
++# whole rig, credited to the one card. That is not cosmetics:
++#   * vram_ok() judges the leak / 0-growth gate on this sum, so a neighbour
++#     growing or freeing memory can fail a clean run OR mask a real leak, and
++#   * vram_peak_gb offered for the envelope row was 54.0 GB for a 12 GB card.
++#
++# Resolution priority (the order verify-stress.sh's VRAM gate uses, and the
++# semantics run_context.visible_gpu_selectors applies to the rig fingerprint):
++#   1. HostConfig.DeviceRequests DeviceIDs — compose `device_ids: ["3"]`
++#      Count: -1 with no DeviceIDs is compose `count: all`: that IS an answer
++#      (the container owns every card), so querying rig-wide is correct.
++#   2. container env NVIDIA_VISIBLE_DEVICES — 'all'/'void'/'none' = every card
++#   3. container env CUDA_VISIBLE_DEVICES — indices INTO whatever it was given
++# GPU UUIDs are a valid answer too: nvidia-smi -i takes them.
++
++GPU_ENV_ALL = ("all", "void", "none")
++# Sentinel, not None: None means "every GPU on the rig", explicitly.
++_AUTO_SCOPE = "__auto__"
++
++
++def docker_inspect(container):
++    """(`docker inspect` first object, raw text) — (None, "") when unavailable."""
++    if not container:
++        return None, ""
++    try:
++        proc = subprocess.run(
++            ["docker", "inspect", container],
++            capture_output=True,
++            text=True,
++            timeout=20,
++            encoding="utf-8",
++            errors="replace",
++        )
++    except Exception:
++        return None, ""
++    raw = proc.stdout or ""
++    try:
++        obj = json.loads(raw)
++    except Exception:
++        return None, raw
++    if isinstance(obj, list):
++        obj = obj[0] if obj else None
++    return (obj if isinstance(obj, dict) else None), raw
++
++
++def _container_gpus(container):
++    """(selectors or None, source) — source: "container" | "all" | "none".
++
++    "all" is a DETERMINED answer (the container was given every card, e.g.
++    compose `count: all` or NVIDIA_VISIBLE_DEVICES=all), not a failure; "none"
++    means there was no container to ask, which is worth saying out loud because
++    the numbers that follow then describe the whole rig.
++    """
++    obj, raw = docker_inspect(container)
++    base = None
++    count_all = False
++    env = {}
++    if obj:
++        for req in (obj.get("HostConfig") or {}).get("DeviceRequests") or []:
++            ids = [str(x).strip() for x in (req.get("DeviceIDs") or []) if str(x).strip()]
++            if ids:
++                base = ids        # explicit IDs beat a `count: all` sibling
++            elif req.get("Count") == -1:
++                count_all = True  # compose `count: all` — every host GPU, by design
++        for entry in (obj.get("Config") or {}).get("Env") or []:
++            key, sep, value = str(entry).partition("=")
++            if sep and value.strip():
++                env[key] = value.strip()
++    else:
++        # A FLAT env listing rather than JSON (`docker inspect --format
++        # '{{range .Config.Env}}…'`, which is what several scripts and test
++        # stubs emit): read the two GPU variables straight off the text.
++        for key in ("NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
++            m = re.search(key + r"=([A-Za-z0-9_.:,-]+)", raw)
++            if m:
++                env[key] = m.group(1)
++    if base is None:
++        nvd = env.get("NVIDIA_VISIBLE_DEVICES", "")
++        if nvd and nvd.strip().lower() not in GPU_ENV_ALL:
++            base = [v.strip() for v in nvd.split(",") if v.strip()]
++    cvd = env.get("CUDA_VISIBLE_DEVICES", "")
++    if cvd and cvd.strip().lower() not in GPU_ENV_ALL:
++        picks = [v.strip() for v in cvd.split(",") if v.strip()]
++        if base is not None and picks and all(p.isdigit() for p in picks):
++            base = [base[int(p)] for p in picks if int(p) < len(base)]
++        elif base is None:
++            base = picks
++    sel = [b for b in (base or []) if b]
++    if sel:
++        return sel, "container"
++    # count_all, or a container we could read but that names no GPU: either way
++    # the container sees every card, which is a DETERMINED answer, not a failure.
++    if obj is not None:
++        return None, "all"
++    return None, "none"
++
++
++def container_gpu_selectors(container):
++    """Host GPU indices/UUIDs the container owns, in order; None = every card.
++
++    None covers both "the container sees every GPU" and "there is no container
++    to ask" — the caller then queries rig-wide AND SAYS SO on the output, since
++    a rig-wide number credited to one service is the bug this guards.
++    """
++    return _container_gpus(container)[0]
++
++
++def resolve_vram_gpus(container=None):
++    """(nvidia-smi -i selector or None, short human label) for this run.
++
++    container=None means $CONTAINER, which is how scripts/concurrency-probe.sh
++    passes it into the probe core.
++    """
++    if container is None:
++        container = os.environ.get("CONTAINER") or ""
++    sel, src = _container_gpus(container)
++    if sel:
++        return ",".join(sel), (
++            "GPU " + "+".join(sel) + (f" (container {container})" if container else "")
++        )
++    if src == "all":
++        return None, f"all GPUs on the rig (container {container} sees every card)"
++    return None, "all GPUs on the rig (no container resolved)"
++
++
++def nvidia_smi_query(query, gpus=None):
++    """Rows of `nvidia-smi --query-gpu=<query>` (no header, no units), scoped.
++
++    gpus is an -i selector: "3", "0,1", a list, or GPU UUIDs. None = every GPU.
++    Returns [] when nvidia-smi is missing or the query failed — callers must
++    read that as NO DATA, never as a zero.
++    """
++    if isinstance(gpus, (list, tuple)):
++        gpus = ",".join(str(g) for g in gpus)
++    cmd = ["nvidia-smi"]
++    if gpus:
++        cmd += ["-i", str(gpus)]
++    cmd += [f"--query-gpu={query}", "--format=csv,noheader,nounits"]
+     try:
+         out = subprocess.run(
+-            [
+-                "nvidia-smi",
+-                "--query-gpu=memory.used",
+-                "--format=csv,noheader,nounits",
+-            ],
++            cmd,
+             capture_output=True,
+             text=True,
+             timeout=10,
++            encoding="utf-8",
++            errors="replace",
+         ).stdout
+-        return sum(int(x) for x in out.split())
+     except Exception:
++        return []
++    rows = []
++    for line in (out or "").splitlines():
++        cells = [c.strip() for c in line.split(",")]
++        if any(cells):
++            rows.append(cells)
++    return rows
++
++
++def _vram_scope(gpus, container):
++    """gpus=_AUTO_SCOPE resolves the scope from $CONTAINER; anything else wins."""
++    if gpus is _AUTO_SCOPE:
++        return resolve_vram_gpus(container)[0]
++    return gpus
++
++
++def vram_used_per_gpu(gpus=_AUTO_SCOPE, container=None):
++    """memory.used (MiB) for EACH probed card; [] when nvidia-smi cannot answer.
++
++    Per-card, because the bench protocol captures per-card peak VRAM (a TP rig
++    OOMs on whichever card fills first, so the rig sum never shows which).
++    """
++    vals = []
++    for row in nvidia_smi_query("memory.used", _vram_scope(gpus, container)):
++        try:
++            vals.append(int(float(row[0])))
++        except (TypeError, ValueError, IndexError):
++            continue
++    return vals
++
++
++def vram_used_mb(gpus=_AUTO_SCOPE, container=None):
++    """VRAM used across the GPUs the probed service owns (-1 = unknown).
++
++    ⚠️ Scoped on purpose — see the block comment above. Called with no argument
++    it resolves the scope from $CONTAINER and falls back to rig-wide, printing
++    nothing here; run_probe says it out loud once per run.
++    """
++    vals = vram_used_per_gpu(gpus=gpus, container=container)
++    if not vals:
+         return -1
++    return sum(vals)
++
++
++def gpu_names(gpus=None):
++    """Product names of the probed cards (host order preserved)."""
++    return [r[0] for r in nvidia_smi_query("name", gpus) if r and r[0]]
++
++
++def gpu_fingerprint(gpus=_AUTO_SCOPE, container=None):
++    """"1× GeForce RTX 3060" — the cards the CONTAINER owns, not the rig.
++
++    Distinct names are counted separately ("2× RTX 3090 + 1× RTX 4090"): the
++    old label took the GPU COUNT and GPU 0's NAME from an unscoped query, which
++    mislabelled a het rig in both directions. Falls back to rig-wide when the
++    container's cards cannot be resolved (or are not in nvidia-smi's view) and
++    warns on stderr — a rig-wide label is a claim about a different machine.
++    """
++    auto = gpus is _AUTO_SCOPE
++    scope = _vram_scope(gpus, container)
++    names = gpu_names(scope)
++    if not names and scope:
++        print(
++            f"[concurrency-probe] WARNING: nvidia-smi reports nothing for -i {scope}"
++            " — labelling the whole rig instead of the probed card(s)",
++            file=sys.stderr,
++        )
++        names = gpu_names(None)
++    if not names:
++        return "? GPU"
++    if auto and not scope:
++        # "Say so": a rig-wide label is a claim about the machine, not about the
++        # service under test — on a multi-GPU rig it is the wrong claim.
++        print(
++            "[concurrency-probe] NOTE: GPU label is RIG-WIDE — "
++            f"{len(names)} card(s) counted, {resolve_vram_gpus(container)[1]}",
++            file=sys.stderr,
++        )
++    counts = {}
++    for name in names:
++        # Vendor prefix dropped, as the rig fingerprint does — the card line is
++        # narrow and every card on this bench is an NVIDIA one.
++        key = re.sub(r"^NVIDIA ", "", name).strip()
++        counts[key] = counts.get(key, 0) + 1
++    return " + ".join(f"{c}× {name}" for name, c in counts.items())
+ 
+ 
+ def parse_result_line(line):
+@@ -397,6 +626,8 @@ def format_result(fields):
+         "retention",
+         "leak",
+         "vram_peak",
++        "vram_peak_per_gpu",
++        "vram_gpus",
+         "floor_ok",
+         "ttft_ms",
+         "pf_tps",
+@@ -497,6 +728,28 @@ def run_probe():
+     RETENTION_MIN = float(os.environ["RETENTION_MIN"])
+     VALIDATE = os.environ.get("VALIDATE", "0") == "1"
+     CONTAINER = os.environ.get("CONTAINER") or ""
++    # VRAM belongs to the probed service's card(s), not to the rig — see the
++    # scoping block above. Resolved once: the leak gate compares samples across
++    # rounds, so the scope must not drift mid-run.
++    VRAM_GPUS, VRAM_SCOPE = resolve_vram_gpus(CONTAINER)
++    if VRAM_GPUS:
++        print(
++            f"[concurrency-probe] VRAM scope: {VRAM_SCOPE}  (nvidia-smi -i {VRAM_GPUS})",
++            flush=True,
++        )
++    else:
++        print(
++            f"[concurrency-probe] VRAM scope: {VRAM_SCOPE} — ⚠️ every GPU on the rig is "
++            "summed into these numbers, so an unrelated service can fail a clean run or hide "
++            "a real leak; set CONTAINER=<name> (or run where docker can see it) to scope it",
++            flush=True,
++        )
++
++    def vram_sample():
++        """(sum MiB, per-card [MiB]) over the probed card(s); (-1, []) = no data."""
++        per_gpu = vram_used_per_gpu(VRAM_GPUS)
++        return (sum(per_gpu) if per_gpu else -1), per_gpu
++
+     CACHE = (os.environ.get("CACHE") or "cold").strip().lower()
+     if CACHE not in ("cold", "shared"):
+         CACHE = "cold"
+@@ -607,8 +860,19 @@ def run_probe():
+         f"{'agg_t/s':>8} {'per-strm':>9} {'ttft_ms':>8} {'pf_t/s':>7}"
+         f" {'ttft_p95':>9} {'tps_p05':>8} {'run/wait':>10} {'pfxhit':>6}"
+     )
+-    vram0 = vram_used_mb()
++    vram0, _vram0_per_gpu = vram_sample()
++    if VRAM_GPUS and not _vram0_per_gpu:
++        # The container names GPUs nvidia-smi cannot see (a CDI/MIG/UUID skew).
++        # Falling back to the rig sum here would silently re-credit someone
++        # else's memory to this service, so VRAM stays honestly unmeasured.
++        print(
++            f"[concurrency-probe] WARNING: nvidia-smi has no data for -i {VRAM_GPUS}"
++            " — VRAM reads n/a for this run (NOT summed across the rig); check that "
++            "CONTAINER names the serving container on this host",
++            flush=True,
++        )
+     vram_by_round = []
++    vram_per_gpu_by_round = []
+     mtps_by_round = []
+     agg_by_round = []
+     ttft_by_round = []
+@@ -632,8 +896,9 @@ def run_probe():
+         done = sum(1 for r in res if r["ok"])
+         silent = sum(1 for r in res if r["silent"])
+         errs = sum(1 for r in res if r["err"])
+-        v = vram_used_mb()
++        v, per_gpu = vram_sample()
+         vram_by_round.append(v)
++        vram_per_gpu_by_round.append(per_gpu)
+         agg = sum(r["toks"] for r in res) / wall if wall else 0
+         tps_ok = [r["tps"] for r in res if r["ok"] and r["tps"] > 0]
+         mtps = statistics.median(tps_ok) if tps_ok else 0.0
+@@ -681,6 +946,21 @@ def run_probe():
+     pool_fill = warm - vram0 if vram0 >= 0 else -1
+     leak = vram_by_round[-1] - warm if vram0 >= 0 else -1
+     vram_peak = max(vram_by_round) if vram_by_round else -1
++    # PER-CARD peaks, because that is what the bench protocol asks for and what
++    # a TP rig needs: a summed 48 GB says nothing about which card hit its
++    # ceiling, and TP OOMs on whichever card fills first.
++    _per_gpu_rounds = [r for r in vram_per_gpu_by_round if r]
++    vram_peak_per_gpu = [max(col) for col in zip(*_per_gpu_rounds)] if _per_gpu_rounds else []
++    _gpu_labels = (
++        VRAM_GPUS.split(",") if VRAM_GPUS else [str(i) for i in range(len(vram_peak_per_gpu))]
++    )
++    vram_peak_per_gpu_txt = (
++        " + ".join(
++            f"GPU{lbl} {val} MB"
++            for lbl, val in zip(_gpu_labels, vram_peak_per_gpu)
++        )
++        or "n/a (no per-card sample from nvidia-smi)"
++    )
+     report_tps = mtps_by_round[-1] if mtps_by_round else 0.0
+     report_agg = agg_by_round[-1] if agg_by_round else 0.0
+     # An aggregate computed over a round that had errors is not a throughput number:
+@@ -723,6 +1003,7 @@ def run_probe():
+         f"-> final {vram_by_round[-1]} MB (post-warm growth {leak} MB / {GROWTH})  "
+         f"peak {vram_peak} MB"
+     )
++    print(f"  per-card peak: {vram_peak_per_gpu_txt}  [{VRAM_SCOPE}]")
+     print(
+         f"  per-stream decode: {report_tps:.1f} tok/s (steady) · aggregate "
+         f"{report_agg:.1f} tok/s "
+@@ -796,6 +1077,10 @@ def run_probe():
+         "retention": f"{retention:.3f}",
+         "leak": leak,
+         "vram_peak": vram_peak,
++        "vram_peak_per_gpu": (
++            ",".join(str(int(v)) for v in vram_peak_per_gpu) if vram_peak_per_gpu else "-"
++        ),
++        "vram_gpus": VRAM_GPUS or "rig-wide",
+         "floor_ok": int(floor_ok),
+         "ttft_ms": f"{steady_ttft * 1000:.0f}",
+         "pf_tps": _fmt_num(steady_pf, 1),
+@@ -1127,8 +1412,27 @@ def main(argv=None):
+     p.add_argument("--plan-tsv", action="store_true")
+     p.add_argument("--card", action="store_true")
+     p.add_argument("--detect-kv", action="store_true")
++    p.add_argument(
++        "--container-gpus",
++        action="store_true",
++        help="print the nvidia-smi -i selector for $CONTAINER's GPUs ('' = rig-wide)",
++    )
++    p.add_argument(
++        "--gpu-fp",
++        action="store_true",
++        help="print the GPU fingerprint of $CONTAINER's GPUs, not of the whole rig",
++    )
+     args = p.parse_args(argv)
+ 
++    if args.container_gpus:
++        # '' on stdout = not resolvable / the container owns every card. The
++        # caller (concurrency-probe.sh's _gpu_fp) then falls back to rig-wide.
++        print(resolve_vram_gpus(_env("CONTAINER"))[0] or "")
++        return 0
++    if args.gpu_fp:
++        print(gpu_fingerprint(container=_env("CONTAINER")))
++        return 0
++
+     if args.detect_kv:
+         tok = detect_kv_tokens(_env("CONTAINER"))
+         if tok:

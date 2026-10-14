@@ -1,0 +1,178 @@
+diff --git a/scripts/lib/bench-row-formatter.sh b/scripts/lib/bench-row-formatter.sh
+index 6961abd..2e15379 100644
+--- a/scripts/lib/bench-row-formatter.sh
++++ b/scripts/lib/bench-row-formatter.sh
+@@ -400,7 +400,10 @@ def load() -> dict[str, Any]:
+     name = str(config_blob.get("Name") or "").lstrip("/")
+     served = flag(cmd, "--served-model-name")
+     tp = flag(cmd, "--tensor-parallel-size")
+-    compose = rel(labels.get("com.docker.compose.project.config_files") or "")
++    # The label holds the compose files comma-joined since #1498 (slug-label
++    # override appended at up time): rel() must see ONE path — the slug's
++    # compose, the first entry — not the joined pair.
++    compose = rel((labels.get("com.docker.compose.project.config_files") or "").split(",")[0])
+     if not compose:
+         compose = infer_compose_path(name, served, tp)
+     rig = parse_rig(read_text(require_file("rig.txt")))
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index b9da2b1..e17ee7f 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1027,7 +1027,33 @@ down_running() {
+     lbl_dir=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null || true)
+     lbl_file=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.config_files"}}' "$c" 2>/dev/null || true)
+     if [[ -n "$lbl_dir" && -n "$lbl_file" ]]; then
+-      (cd "$lbl_dir" && ${COMPOSE_BIN} -f "$lbl_file" down --remove-orphans) || docker stop "$c" >/dev/null
++      # The label holds SEVERAL comma-joined paths: since #1498 every launcher
++      # brings a slug up as `-f <compose> -f <slug-label override>`, and compose
++      # records BOTH in the label. Passing the joined string to one `-f` made
++      # every teardown's compose attempt fail ("no such file or directory") and
++      # silently fall back to docker stop — the network and any orphans stayed
++      # behind. Mirror litellm-log.sh: one -f per entry. Entries whose file no
++      # longer exists are dropped (the override can outlive its data dir; a
++      # relative entry resolves against the project's working dir); when none
++      # remains there is no -f to pass, so compose would read the cwd instead —
++      # fall back to docker stop without calling it.
++      local -a cfg_files=()
++      IFS=',' read -ra cfg_files <<< "$lbl_file"
++      local -a cfg_args=()
++      local cfg
++      for cfg in "${cfg_files[@]}"; do
++        [[ -n "$cfg" ]] || continue
++        if [[ -f "$cfg" ]]; then
++          cfg_args+=(-f "$cfg")
++        elif [[ -f "$lbl_dir/$cfg" ]]; then
++          cfg_args+=(-f "$lbl_dir/$cfg")
++        fi
++      done
++      if [[ "${#cfg_args[@]}" -gt 0 ]]; then
++        (cd "$lbl_dir" && ${COMPOSE_BIN} "${cfg_args[@]}" down --remove-orphans) || docker stop "$c" >/dev/null
++      else
++        docker stop "$c" >/dev/null
++      fi
+     else
+       docker stop "$c" >/dev/null
+     fi
+diff --git a/scripts/tests/test-switch-orphan-teardown.sh b/scripts/tests/test-switch-orphan-teardown.sh
+index ba3d7ef..6cf60b2 100755
+--- a/scripts/tests/test-switch-orphan-teardown.sh
++++ b/scripts/tests/test-switch-orphan-teardown.sh
+@@ -16,6 +16,11 @@
+ #   5. Teardown passes --remove-orphans.
+ #   6. When only unmanaged containers run, nothing is torn down and the
+ #      "no club-3090 container running" path is taken.
++#   7. The config_files label can hold SEVERAL comma-joined paths (#1498: every
++#      launch is `-f <compose> -f <slug-label override>`): each becomes its own
++#      -f, entries whose file no longer exists are dropped (compose still runs
++#      with what remains), and when nothing remains we fall back to docker stop
++#      without calling compose.
+ #
+ # Harness: extract down_running() via sed, source it, inject a VARIANT_CONTAINER
+ # managed set + a mock `docker` on PATH that records compose-down / stop calls.
+@@ -61,7 +66,12 @@ trap cleanup EXIT
+ # --- Mock `docker`: records compose-down / stop to $DOCKER_MOCK_LOG -----------
+ # Labels are returned non-empty so the compose-down branch is taken; the
+ # config_files label embeds the container name so the log identifies which
+-# container was brought down.
++# container was brought down. The default label names a file the mock
++# materialises in the working dir: down_running drops label entries whose file
++# no longer exists, so the compose-down branch needs an on-disk file.
++# DOCKER_MOCK_CONFIG_FILES overrides per container: "name=path1,path2" entries,
++# ';'-joined — the #1498 shape where the label holds the slug compose AND the
++# slug-label override, comma-joined.
+ cat > "${tmp_dir}/docker" <<'EOF'
+ #!/usr/bin/env bash
+ sub="$1"; shift || true
+@@ -80,7 +90,19 @@ case "$sub" in
+     if [[ "$fmt" == *working_dir* ]]; then
+       printf '%s\n' "$DOCKER_MOCK_WORKDIR"
+     elif [[ "$fmt" == *config_files* ]]; then
+-      printf 'compose-%s.yml\n' "$cname"
++      lbl=""
++      if [[ -n "${DOCKER_MOCK_CONFIG_FILES:-}" ]]; then
++        IFS=';' read -ra pairs <<< "$DOCKER_MOCK_CONFIG_FILES"
++        for p in "${pairs[@]}"; do
++          case "$p" in "$cname="*) lbl="${p#*=}" ;; esac
++        done
++      fi
++      if [[ -n "$lbl" ]]; then
++        printf '%s\n' "$lbl"
++      else
++        : > "$DOCKER_MOCK_WORKDIR/compose-$cname.yml" 2>/dev/null || true
++        printf 'compose-%s.yml\n' "$cname"
++      fi
+     fi
+     ;;
+   stop)
+@@ -135,6 +157,47 @@ assert_not_contains "$log" "COMPOSE"                          "nothing torn down
+ assert_not_contains "$log" "STOP"                             "nothing stopped when only unmanaged running"
+ assert_contains     "$out" "no club-3090 container running"   "reports no managed container running"
+ 
++# --- Scenario 3: the #1498 shape — label holds compose + slug-label override ---
++# Every launch since #1498 is `-f <slug compose> -f <data-dir override>`, so
++# compose records BOTH paths comma-joined in the label. Each must become its
++# own -f — the regression was passing the joined string to a single -f, whose
++# compose attempt always failed ("no such file or directory") into docker stop.
++mkdir -p "$tmp_dir/models" "$tmp_dir/labels"
++: > "$tmp_dir/models/main.yml"
++: > "$tmp_dir/labels/override.yml"
++: > "$DOCKER_MOCK_LOG"
++export DOCKER_MOCK_RUNNING="vllm-qwen36-27b"
++export DOCKER_MOCK_CONFIG_FILES="vllm-qwen36-27b=$tmp_dir/models/main.yml,$tmp_dir/labels/override.yml"
++( set +u; down_running ) >/dev/null 2>&1 || true
++log="$(cat "$DOCKER_MOCK_LOG")"
++
++assert_contains "$log" \
++  "COMPOSE -f $tmp_dir/models/main.yml -f $tmp_dir/labels/override.yml down --remove-orphans" \
++  "two-file label: one -f per entry, one down --remove-orphans"
++assert_not_contains "$log" "STOP" "no docker-stop fallback when the compose down runs"
++
++# --- Scenario 4: a stale entry is dropped, compose still runs with the rest ---
++# The override can outlive its data dir (e.g. the data dir moved since launch);
++# dropping it keeps the down path working instead of failing into docker stop.
++: > "$DOCKER_MOCK_LOG"
++export DOCKER_MOCK_CONFIG_FILES="vllm-qwen36-27b=$tmp_dir/models/main.yml,$tmp_dir/gone.yml"
++( set +u; down_running ) >/dev/null 2>&1 || true
++log="$(cat "$DOCKER_MOCK_LOG")"
++
++assert_contains "$log" \
++  "COMPOSE -f $tmp_dir/models/main.yml down --remove-orphans" \
++  "stale label entry dropped, compose runs with the remainder"
++assert_not_contains "$log" "$tmp_dir/gone.yml" "stale label entry not passed to compose"
++
++# --- Scenario 5: no label entry survives -> docker stop, compose not called ---
++: > "$DOCKER_MOCK_LOG"
++export DOCKER_MOCK_CONFIG_FILES="vllm-qwen36-27b=$tmp_dir/gone1.yml,$tmp_dir/gone2.yml"
++( set +u; down_running ) >/dev/null 2>&1 || true
++log="$(cat "$DOCKER_MOCK_LOG")"
++
++assert_not_contains "$log" "COMPOSE" "compose not called when no label entry survives"
++assert_contains "$log" "STOP vllm-qwen36-27b" "falls back to docker stop"
++
+ # --- Summary ------------------------------------------------------------------
+ echo "----------------------------------------"
+ echo "PASS: $PASS   FAIL: $FAIL"
+diff --git a/scripts/tests/test-switch-refuse-before-teardown.sh b/scripts/tests/test-switch-refuse-before-teardown.sh
+index cc87196..32bccdb 100755
+--- a/scripts/tests/test-switch-refuse-before-teardown.sh
++++ b/scripts/tests/test-switch-refuse-before-teardown.sh
+@@ -37,7 +37,7 @@ case "$sub" in
+     fmt=""
+     while [[ $# -gt 0 ]]; do case "$1" in --format) fmt="$2"; shift 2 ;; *) shift ;; esac; done
+     if [[ "$fmt" == *working_dir* ]]; then printf '%s\n' "$MOCK_WORKDIR"
+-    elif [[ "$fmt" == *config_files* ]]; then printf 'running.yml\n'; fi ;;
++    elif [[ "$fmt" == *config_files* ]]; then printf '%s/running.yml\n' "$MOCK_WORKDIR"; fi ;;
+   stop|rm|kill) printf 'TEARDOWN %s %s\n' "$sub" "$*" >> "$MOCK_LOG" ;;
+   compose)
+     case " $* " in
+@@ -51,6 +51,10 @@ chmod +x "$T/bin/docker"
+ 
+ export MOCK_LOG="$T/calls.log"
+ export MOCK_WORKDIR="$T/running"
++# The config_files label must name a file that exists: down_running drops
++# entries whose file is gone (#1498), and the positive control needs the
++# compose-down path (not the docker-stop fallback) to fire.
++: > "$MOCK_WORKDIR/running.yml"
+ # A container switch.sh manages (it is in the registry), so down_running takes it down.
+ export MOCK_RUNNING="vllm-qwen38-27b-dual-fast"
+ # No network, no /dev/shm cleanup, no OWUI / gateway sync — only the launch path.

@@ -1,0 +1,7 @@
+PASS pairs-header
+PASS pairs-exact
+PASS superseded-exact
+PASS unpaired-rig-exact
+PASS unpaired-quality-exact
+PASS no-nearest-date-pairing
+PASS: 6 FAIL: 0

@@ -1,0 +1,16 @@
+diff --git a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+index 81a4f45..fb5b2b4 100644
+--- a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
++++ b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+@@ -275,6 +275,11 @@ services:
+         _gmu="$${GPU_MEMORY_UTILIZATION:-$$_gmu_tier}"; _seqs="$${MAX_NUM_SEQS:-$$_seqs_tier}"
+         _mnbt="$${MAX_NUM_BATCHED_TOKENS:-$$_mnbt_tier}"; _lptt="$${LONG_PREFILL_TOKEN_THRESHOLD:-$$_lptt_tier}"
+         _mml="$${MAX_MODEL_LEN:-$$_mml_tier}"
++        # ⚠️ initialised BEFORE the case, like every other *_ARGS in this file
++        # (SPEC_ARGS / ASYNC_ARGS / MAMBA_ARGS / ARGS): the exec below expands
++        # "$${LM_ONLY_ARGS[@]}" unconditionally, so the array has to be DEFINED on
++        # every path that reaches it -- not only on the two arms that match.
++        LM_ONLY_ARGS=()
+         case "$$VISION" in
+           on) LM_ONLY_ARGS=() ;;
+           off) LM_ONLY_ARGS=(--language-model-only) ;;

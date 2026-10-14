@@ -1,0 +1,29 @@
+[
+  {
+    "comment_id": 2,
+    "requests": [
+      "Could you rerun with `--ctx 32768` and post the preflight output.",
+      "Also please attach the compose file you used."
+    ]
+  },
+  {
+    "comment_id": 6,
+    "requests": [
+      "Can you confirm that GPU 0 stays under 20 GiB."
+    ]
+  },
+  {
+    "comment_id": 9,
+    "requests": [
+      "Could you open a PR with the one-line fix.",
+      "Please link this issue in the description."
+    ]
+  },
+  {
+    "comment_id": 11,
+    "requests": [
+      "please add a regression test.",
+      "Can you also run `bash scripts/preflight.sh` before pushing."
+    ]
+  }
+]

@@ -1,0 +1,14 @@
+{
+ "task": "04-archive-filing",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 11.6,
+ "tool_calls": 8,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 7,
+ "checks_total": 7,
+ "partial": 1.0
+}

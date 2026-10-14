@@ -1,0 +1,8 @@
+From: tess@example.net
+Date: 2026-07-05T17:22:00Z
+Subject: ledger amendment
+
+T-00930 belongs to ACC-10, not the account it is under.
+
+Thanks,
+tess

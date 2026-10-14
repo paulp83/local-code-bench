@@ -1,0 +1,121 @@
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 06b4696..65a6761 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -464,14 +464,18 @@ spec = {
+         "max_ctx": max_ctx, "max_num_seqs": 1, "mem_util": 0.9,
+         "compose_path": cpath, "default_port": port, "kvcalc_key": "SKIP"}},
+ }
+-Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++# The engine profile is CARRIED in the spec (local_engine_profile), NOT written
++# here. catalog.sh has no plan, no --dry-run exit and no confirm — promote.py
++# owns all three. A write that happened in this Python could not be stopped by
++# anything downstream, so a `--dry-run` register leaked an engines.d/<engine>.yml
++# into the local layer. Hand it to promote and let its plan gate the write.
+ if engine_yaml:
+-    d = Path(wroot) / "scripts/lib/profiles-local/engines.d"
+-    d.mkdir(parents=True, exist_ok=True)
+-    (d / f"{engine}.yml").write_text(engine_yaml, encoding="utf-8")
+-    print(f"[catalog] wrote a local ENGINE profile: profiles-local/engines.d/{engine}.yml "
++    spec["local_engine_profile"] = engine_yaml
++    print(f"[catalog] a local ENGINE profile for {engine!r} will be written "
+           f"(type={etype}, capabilities evidenced from the compose)")
+ 
++Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++
+ def mark(v, given):  # show the user which values THEY chose vs which we guessed
+     return "given" if given else "derived"
+ 
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index 1e903c2..f661832 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -33,6 +33,11 @@ TWO write targets (--layer, DEFAULT **local**):
+      ``scripts/lib/profiles-local/composes/``)
+   3. a JSON MERGE into ``scripts/lib/profiles-local/registry.local.json``
+      (plain-dict ``_entry`` kwargs — never a python-source edit).
++  4. when the spec carries ``local_engine_profile`` (a minimal ENGINE profile
++     for an engine the curated catalog does not know — written by
++     ``scripts/catalog.sh register``), ``engines.d/<engine>.yml``. It is CARRIED
++     in the spec rather than written by the front door so it goes through THIS
++     module's plan, ``--dry-run`` exit and confirm; ``--dry-run`` writes nothing.
+ The slug MUST carry the ``local/`` namespace prefix and the entry is written
+ with ``status="incubating"`` (hidden from ``switch.sh --list``, ``--force`` to
+ launch — see compose_registry.STATUS_VALUES).
+@@ -82,6 +87,7 @@ _EMIT_REL = "scripts/lib/registry-emit.sh"
+ _LOCAL_DIR_REL = "scripts/lib/profiles-local"
+ _LOCAL_MODELS_REL = f"{_LOCAL_DIR_REL}/models.d"
+ _LOCAL_COMPOSES_REL = f"{_LOCAL_DIR_REL}/composes"
++_LOCAL_ENGINES_REL = f"{_LOCAL_DIR_REL}/engines.d"
+ _LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
+ _LOCAL_SLUG_PREFIX = "local/"
+ # Local entries ALWAYS land here (the enum's pre-experimental rung: hidden from
+@@ -537,21 +543,44 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+     return spec
+ 
+ 
++def _local_engine_profile_content(spec: dict) -> Optional[str]:
++    """The carried local ENGINE profile text, or None.
++
++    catalog.sh register builds a minimal engine profile for an engine the
++    curated catalog does not know and CARRIES it here instead of writing it
++    itself — so the write goes through this module's plan, ``--dry-run`` exit
++    and confirm like every other artifact. Without this, a ``--dry-run``
++    register leaked an ``engines.d/<engine>.yml`` that nothing downstream could
++    stop."""
++    lep = spec.get("local_engine_profile")
++    if isinstance(lep, str) and lep.strip():
++        return lep
++    return None
++
++
+ def plan_lines(root: Path, spec: dict) -> list[str]:
+     """The dry-run plan (also printed before a real run)."""
+     mid = spec["model_id"]
+     slug = spec["registry_entry"]["slug"]
+     if spec["_layer"] == "local":
+-        return [
++        lines = [
+             f"plan (layer LOCAL — gitignored {_LOCAL_DIR_REL}/, root {root}):",
+             f"  write {_LOCAL_MODELS_REL}/{mid}.yml",
+             f"  write {spec['compose']['path']}",
++        ]
++        if _local_engine_profile_content(spec) is not None:
++            engine = slug.split("/", 1)[0]
++            lines.append(
++                f"  write engines.d/{engine}.yml (new local ENGINE profile)"
++            )
++        lines += [
+             f"  merge entry into {_LOCAL_REGISTRY_REL} (JSON — no source edit)",
+             f"  slug: {slug}  model: {mid}  variant: {spec['default_weight_variant']}"
+             f"  status: {_LOCAL_FORCED_STATUS}",
+             "  then: get_registry() import-sanity + registry-emit.sh --json re-check",
+             "  NO core file is touched. Rollback: delete the written files.",
+         ]
++        return lines
+     return [
+         f"plan (layer CORE — maintainer, root {root}):",
+         f"  write {_MODELS_DIR_REL}/{mid}.yml",
+@@ -585,6 +614,22 @@ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+     except OSError as exc:
+         raise InternalError(f"could not write {compose_abs}: {exc}")
+ 
++    # ── Write: the local ENGINE profile (carried as spec.local_engine_profile) ─
++    # Only an engine the curated catalog does not know needs one, and catalog.sh
++    # cannot write it there (no plan, no --dry-run exit) — so it hands the text
++    # here, where it is gated with the rest. The engine is the slug's first
++    # segment, already validated by _SLUG_RE, so the filename cannot escape.
++    lep = _local_engine_profile_content(spec)
++    if lep is not None:
++        engine = spec["registry_entry"]["slug"].split("/", 1)[0]
++        engine_abs = root / _LOCAL_ENGINES_REL / f"{engine}.yml"
++        try:
++            engine_abs.parent.mkdir(parents=True, exist_ok=True)
++            engine_abs.write_text(lep, encoding="utf-8")
++            _info(f"wrote local ENGINE profile: {_LOCAL_ENGINES_REL}/{engine}.yml")
++        except OSError as exc:
++            raise InternalError(f"could not write {engine_abs}: {exc}")
++
+     # ── Write 3/3: the JSON merge into registry.local.json ──────────────────
+     reg_path = root / _LOCAL_REGISTRY_REL
+     try:

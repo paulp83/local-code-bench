@@ -1,0 +1,203 @@
+diff --git a/scripts/lib/profiles/hf_fetch.py b/scripts/lib/profiles/hf_fetch.py
+index c7728f4..46200e6 100644
+--- a/scripts/lib/profiles/hf_fetch.py
++++ b/scripts/lib/profiles/hf_fetch.py
+@@ -144,6 +144,24 @@ def is_xet_refusal(blob: str) -> bool:
+     return all(m in low for m in _XET_REFUSAL_MARKERS)
+ 
+ 
++def is_tool_unavailable(rc: int, blob: str) -> bool:
++    """True iff a rung-1 failure means the `hf` CLI is ABSENT from this host
++    (command-not-found, rc=127), NOT that a download failed.
++
++    Such a failure is fallback-eligible: rung 3 (raw resolve + curl) has no
++    dependency on `hf` at all, so a curl-only rig must still be able to pull
++    instead of dying at the very first rung. Matches on the rc, and on the
++    merged output for runners that surface it differently — never on a bare
++    "not found", so an unrelated missing file mid-download cannot false-
++    trigger an escalation (the same false-positive discipline as
++    `is_xet_refusal`)."""
++    if rc == 127:
++        return True
++    low = (blob or "").lower()
++    return ("command not found" in low
++            or "neither `hf` nor `huggingface-cli` is on path" in low)
++
++
+ def hf_xet_importable(python: Optional[str] = None) -> bool:
+     """Is `hf_xet` ALREADY importable in the environment the `hf` CLI runs under?
+ 
+@@ -804,6 +822,7 @@ def verify_fetched(local_dir: Path, names: Iterable[str],
+ 
+ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+              classic_error: str,
++             reason: str = "too-large",
+              meta: Optional[dict[str, FileMeta]] = None,
+              revision: str = "main",
+              allow_xet: Optional[bool] = None,
+@@ -814,7 +833,15 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+              xet_available: Optional[Callable[[], bool]] = None,
+              tree_fn: Optional[Callable] = None,
+              stall_timeout: int = 300) -> LadderResult:
+-    """Rungs 2 and 3, entered ONLY after rung 1 hit the too-large refusal.
++    """Rungs 2 and 3, entered ONLY after rung 1 failed for an
++    escalation-worthy `reason`:
++
++    * ``"too-large"`` — rung 1 hit the client-side 50 GB refusal: a hard
++      policy wall, retrying it cannot succeed;
++    * ``"tool-unavailable"`` — the `hf` CLI is not on this host
++      (command-not-found, rc=127): rung 2 re-runs that same CLI, so it is
++      announced as unavailable and rung 3 (raw resolve + curl) — which has no
++      `hf` dependency — serves the pull.
+ 
+     Each rung announces why the previous one could not deliver, so a log shows
+     the whole decision chain rather than a bare "downloading (again)"."""
+@@ -822,11 +849,20 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+     allow = allow_xet_enabled() if allow_xet is None else allow_xet
+     notes: list[str] = []
+ 
+-    log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: huggingface_hub "
+-        "client-side blocks the plain HTTP path for files over 50 GB. This is "
+-        "a hard policy wall, not flakiness — retrying it cannot succeed.")
+-    if classic_error:
+-        log(f"[hf-fetch]   hub said: {classic_error.strip()[:300]}")
++    if reason == "tool-unavailable":
++        log("[hf-fetch] rung 1 (classic LFS) cannot run on this host: the "
++            "`hf` CLI is not on PATH (command not found, rc=127). Unlike the "
++            "50 GB policy wall this is a missing tool, not a refusal — and "
++            "rung 3 (raw resolve + curl) has no dependency on `hf`, so the "
++            "pull can still be served.")
++        if classic_error:
++            log(f"[hf-fetch]   rung 1 said: {classic_error.strip()[:300]}")
++    else:
++        log("[hf-fetch] rung 1 (classic LFS) REFUSED this repo: huggingface_hub "
++            "client-side blocks the plain HTTP path for files over 50 GB. This is "
++            "a hard policy wall, not flakiness — retrying it cannot succeed.")
++        if classic_error:
++            log(f"[hf-fetch]   hub said: {classic_error.strip()[:300]}")
+ 
+     # --- enumerate the concrete files (curl fetches one named file at a time)
+     metas: dict[str, FileMeta] = dict(meta or {})
+@@ -852,7 +888,16 @@ def escalate(repo_id: str, local_dir: Path, includes: list[str], *,
+ 
+     # --- rung 2: Xet, opt-in only, never auto-installed --------------------
+     avail_fn = xet_available or hf_xet_importable
+-    if not allow:
++    if reason == "tool-unavailable":
++        # Rung 2 reruns the SAME `hf download` invocation (with Xet
++        # enabled). The CLI is absent, so no amount of opt-in or an
++        # importable hf_xet changes that — announce it and go straight
++        # to the rung that has no such dependency.
++        notes.append("rung 2 (Xet) skipped: it re-runs the missing `hf` CLI")
++        log("[hf-fetch] rung 2 (Xet) SKIPPED — it re-runs the very `hf` CLI "
++            "that is not on this host, so it cannot run either. Proceeding to "
++            "rung 3, which depends on nothing but curl.")
++    elif not allow:
+         notes.append("rung 2 (Xet) skipped: not opted in")
+         log("[hf-fetch] rung 2 (Xet) SKIPPED — operator opt-in required "
+             "(ALLOW_XET=1 or pull.sh --allow-xet). Xet has a stall/restart-"
+@@ -932,14 +977,27 @@ def fetch(repo_id: str, local_dir: Path, includes: list[str], *,
+           revision: str = "main", allow_xet: Optional[bool] = None,
+           do_verify_in_place: Optional[bool] = None,
+           token: Optional[str] = None,
+-          log: Callable[[str], None] = default_log) -> LadderResult:
++          log: Callable[[str], None] = default_log,
++          hf_runner: Optional[Callable] = None,
++          xet_runner: Optional[Callable] = None,
++          curl_runner: Optional[Callable] = None,
++          xet_available: Optional[Callable[[], bool]] = None,
++          tree_fn: Optional[Callable] = None,
++          stall_timeout: int = 300) -> LadderResult:
+     """The whole thing, for callers that are NOT `downloader.download_model`:
+-    preflight -> announce/verify-in-place -> rung 1 -> escalate on the refusal.
++    preflight -> announce/verify-in-place -> rung 1 -> escalate when rung 1
++    failed for an escalation-worthy reason (the 50 GB refusal, or the `hf`
++    CLI being absent from the host).
+ 
+     `download_model` drives the rungs itself (it owns atomic staging and the
+     CONTRACT-3 failure vocabulary); this is the standalone entry the module CLI
+     exposes so a GGUF pull or a shell script gets the same ladder + the same
+-    honest announcements without reimplementing either."""
++    honest announcements without reimplementing either.
++
++    The `*_runner`/`tree_fn`/`xet_available`/`stall_timeout` parameters are
++    the same injection seams as `HubFetcher` and `escalate`, so every rung can
++    be exercised hermetically (no network, no multi-GB transfer). Production
++    leaves them all None."""
+     token = token if token is not None else _token()
+     allow = allow_xet_enabled() if allow_xet is None else allow_xet
+     do_hash = (verify_in_place_enabled() if do_verify_in_place is None
+@@ -947,7 +1005,11 @@ def fetch(repo_id: str, local_dir: Path, includes: list[str], *,
+     local_dir = Path(local_dir)
+     local_dir.mkdir(parents=True, exist_ok=True)
+ 
+-    metas = tree_meta(repo_tree(repo_id, revision=revision, token=token))
++    if tree_fn is not None:
++        tf = tree_fn
++    else:
++        tf = lambda: repo_tree(repo_id, revision=revision, token=token)
++    metas = tree_meta(tf())
+     names = expand_includes(metas.keys(), includes) if metas else list(includes)
+     if metas and not names:
+         return LadderResult(ok=False, failure="fallback-failed",
+@@ -970,20 +1032,36 @@ def fetch(repo_id: str, local_dir: Path, includes: list[str], *,
+         f"({len(todo)} file(s) to fetch"
+         + (f", {len(adopted)} kept" if adopted else "") + ")")
+ 
+-    rc, blob = _hf_download(repo_id, local_dir, todo, xet=False)
++    rc, blob = _hf_download(repo_id, local_dir, todo, xet=False,
++                            runner=hf_runner)
+     if rc == 0:
+         log(f"[hf-fetch] DONE via rung 1 (classic LFS) — {len(todo)} file(s); "
+             f"`hf download` hashes as it writes, so no separate gate is run "
+             f"on this rung.")
+         return LadderResult(ok=True, rung="classic", files=list(names))
+-    if not is_xet_refusal(blob):
++    # Two rung-1 failures are escalation-worthy, and ONLY those two:
++    #   * the 50 GB client-side refusal — a policy wall, retrying is futile;
++    #   * the `hf` CLI missing from this host (rc=127) — rung 3 (raw resolve
++    #     + curl) has no dependency on `hf` and serves the pull anyway, so a
++    #     curl-only rig must not die at the first rung.
++    # Every other non-zero exit keeps its pre-existing mapping: a bare
++    # failure with the hub's own words as the detail.
++    if is_xet_refusal(blob):
++        reason = "too-large"
++    elif is_tool_unavailable(rc, blob):
++        reason = "tool-unavailable"
++    else:
+         return LadderResult(ok=False, failure="fallback-failed",
+                             detail=f"rung 1 failed (rc={rc}): "
+                                    f"{blob.strip()[-400:]}")
+     try:
+         return escalate(repo_id, local_dir, todo, classic_error=blob,
++                        reason=reason,
+                         meta=metas, revision=revision, allow_xet=allow,
+-                        token=token, log=log)
++                        token=token, log=log,
++                        xet_runner=xet_runner, curl_runner=curl_runner,
++                        xet_available=xet_available, tree_fn=tree_fn,
++                        stall_timeout=stall_timeout)
+     except LadderError as exc:
+         log(f"[hf-fetch] FAILED: {exc.detail or exc.token}")
+         return LadderResult(ok=False, failure=exc.token, detail=exc.detail)
+@@ -1031,7 +1109,19 @@ def _main(argv: list[str]) -> int:
+     res = fetch(args.repo, Path(args.local_dir), includes,
+                 revision=args.revision, allow_xet=args.allow_xet or None,
+                 do_verify_in_place=args.verify_in_place or None)
+-    return 0 if res.ok else 1
++    if not res.ok:
++        # The ladder's contract is that every rung announces what ran and why
++        # it could not deliver, so logs stay auditable — that includes the
++        # very moment of failure. A bare exit-1 here (the pre-fix behaviour)
++        # printed nothing at all on the one path where diagnostics matter most.
++        msg = f"[hf-fetch] FAILED: {res.failure or 'unknown'}"
++        if res.detail:
++            msg += f": {res.detail}"
++        for n in res.notes:
++            msg += f" ({n})"
++        print(msg, file=sys.stderr, flush=True)
++        return 1
++    return 0
+ 
+ 
+ if __name__ == "__main__":       # pragma: no cover - CLI wrapper

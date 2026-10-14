@@ -1,0 +1,4 @@
+$ bash scripts/run_quality.sh --slug glm53 --port 8000
+preflight: checking port 8000
+preflight: ERROR port 8000 already in use by pid 4411
+exit status 3

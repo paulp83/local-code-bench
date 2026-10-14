@@ -1,0 +1,8 @@
+From: tess@example.net
+Date: 2026-07-07T20:47:00Z
+Subject: ledger amendment
+
+On T-00726 the direction is backwards, reverse the sign.
+
+Thanks,
+tess

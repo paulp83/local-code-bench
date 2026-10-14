@@ -1,0 +1,9 @@
+PASS valid-against-schema
+PASS full_name
+PASS email
+PASS country-US
+PASS years-7
+PASS skills-in-order
+PASS degree-BSc
+PASS available-true
+PASS: 8 FAIL: 0

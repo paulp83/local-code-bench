@@ -1,0 +1,447 @@
+diff --git a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+index 81a4f45..2276675 100644
+--- a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
++++ b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+@@ -275,6 +275,7 @@ services:
+         _gmu="$${GPU_MEMORY_UTILIZATION:-$$_gmu_tier}"; _seqs="$${MAX_NUM_SEQS:-$$_seqs_tier}"
+         _mnbt="$${MAX_NUM_BATCHED_TOKENS:-$$_mnbt_tier}"; _lptt="$${LONG_PREFILL_TOKEN_THRESHOLD:-$$_lptt_tier}"
+         _mml="$${MAX_MODEL_LEN:-$$_mml_tier}"
++        LM_ONLY_ARGS=()
+         case "$$VISION" in
+           on) LM_ONLY_ARGS=() ;;
+           off) LM_ONLY_ARGS=(--language-model-only) ;;
+diff --git a/scripts/tests/fixtures/args-array-scope/bad-case-arm-falls-through.yml b/scripts/tests/fixtures/args-array-scope/bad-case-arm-falls-through.yml
+new file mode 100644
+index 0000000..7ecd8b3
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/bad-case-arm-falls-through.yml
+@@ -0,0 +1,17 @@
++# Fixture (must FAIL): an arm that NEITHER assigns the array NOR exits falls
++# through to `esac` with NOPE_ARGS unset on that path. A line-start-only scan
++# misses the arm-head assignment entirely (old "never assigned" false positive);
++# an arm-aware guard must still flag it: the case is not exhaustive, and the
++# in-arm assignment does not dominate the exec.
++services:
++  fixture:
++    image: example/fixture
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$$MODE" in
++          a) NOPE_ARGS=(--a) ;;
++          b) ;;
++        esac
++        exec vllm serve "$${NOPE_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/bad-case-in-unshared-branch.yml b/scripts/tests/fixtures/args-array-scope/bad-case-in-unshared-branch.yml
+new file mode 100644
+index 0000000..550d547
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/bad-case-in-unshared-branch.yml
+@@ -0,0 +1,18 @@
++# Fixture (must FAIL): the case IS exhaustive (catch-all that exits, every other
++# arm assigns), but it sits inside an `if` branch the exec never shares -- the
++# no-else path reaches the exec with BRANCH_ARGS unset. Exhaustiveness alone does
++# not make it dominate; the case's enclosing branch must dominate the exec too.
++services:
++  fixture:
++    image: example/fixture
++    entrypoint:
++      - bash
++      - -c
++      - |
++        if [ "$$X" = 1 ]; then
++          case "$$Y" in
++            a) BRANCH_ARGS=(--a) ;;
++            *) exit 1 ;;
++          esac
++        fi
++        exec vllm serve "$${BRANCH_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/bad-case-missing-catchall.yml b/scripts/tests/fixtures/args-array-scope/bad-case-missing-catchall.yml
+new file mode 100644
+index 0000000..0dfed03
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/bad-case-missing-catchall.yml
+@@ -0,0 +1,16 @@
++# Fixture (must FAIL): every arm that exists either assigns or exits, but there
++# is no `*)` catch-all -- any value not matching `off|OFF|…` skips the arm and
++# reaches the exec with NOPE_ARGS unset. This is the real ASYNC_SCHED case shape
++# WITHOUT the pre-init that makes the shipped composes safe.
++services:
++  fixture:
++    image: example/fixture
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$${ASYNC_SCHED:-}" in off|OFF|Off|false|no|0)
++          NOPE_ARGS=(--no-async-scheduling)
++          echo "[fixture] off" >&2 ;;
++        esac
++        exec vllm serve "$${NOPE_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/bad-cross-arm-read.yml b/scripts/tests/fixtures/args-array-scope/bad-cross-arm-read.yml
+new file mode 100644
+index 0000000..f91d930
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/bad-cross-arm-read.yml
+@@ -0,0 +1,15 @@
++# Fixture (must FAIL): the exec lives inside the `b` arm and reads an array
++# assigned in the `a` arm. Arms are mutually exclusive -- on the path into `b`,
++# `a` never ran, so CROSS_ARGS is unset. An in-arm assignment never dominates a
++# sibling arm's statements.
++services:
++  fixture:
++    image: example/fixture
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$$W" in
++          a) CROSS_ARGS=(--a) ;;
++          b) exec vllm serve "$${CROSS_ARGS[@]}" ;;
++        esac
+diff --git a/scripts/tests/fixtures/args-array-scope/ok-case-exhaustive.yml b/scripts/tests/fixtures/args-array-scope/ok-case-exhaustive.yml
+new file mode 100644
+index 0000000..c1fe3ab
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/ok-case-exhaustive.yml
+@@ -0,0 +1,18 @@
++# Fixture: the #1540 VISION shape. The assignments live on the ARM HEADS
++# (`on) LM_ONLY_ARGS=()`) -- invisible to a line-start-only assignment scan --
++# but the case is EXHAUSTIVE: every arm assigns the array or exits, and the `*)`
++# catch-all means no value falls through. The case dominates the exec below it,
++# so this file must stay CLEAN.
++services:
++  fixture:
++    image: example/fixture
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$$VISION" in
++          on) LM_ONLY_ARGS=() ;;
++          off) LM_ONLY_ARGS=(--language-model-only) ;;
++          *) echo "[fixture] VISION='$$VISION' must be on or off" >&2; exit 1 ;;
++        esac
++        exec vllm serve "$${LM_ONLY_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/ok-case-multiline-arms.yml b/scripts/tests/fixtures/args-array-scope/ok-case-multiline-arms.yml
+new file mode 100644
+index 0000000..3b25cd3
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/ok-case-multiline-arms.yml
+@@ -0,0 +1,22 @@
++# Fixture: multi-line arms, with a nested if inside one arm body. The `fast` arm
++# assigns in BOTH if-branches, `slow` assigns, and `*)` exits -- the case is
++# exhaustive, so the exec after `esac` is dominated. The nested if must not break
++# arm tracking (its `fi ;;` line must leave the arm open). Must stay CLEAN.
++services:
++  fixture:
++    image: example/fixture
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$$MODE" in
++          fast)
++            if [ -z "$$X" ]; then
++              MULTI_ARGS=(--fast)
++            else
++              MULTI_ARGS=(--fast2)
++            fi ;;
++          slow) MULTI_ARGS=(--slow) ;;
++          *) exit 1 ;;
++        esac
++        exec vllm serve "$${MULTI_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/ok-case-preinit.yml b/scripts/tests/fixtures/args-array-scope/ok-case-preinit.yml
+new file mode 100644
+index 0000000..4115549
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/ok-case-preinit.yml
+@@ -0,0 +1,17 @@
++# Fixture: the pre-init shape (the 5 ASYNC_SCHED composes, and the fix for the
++# single-card VISION case). `PRE_ARGS=()` at line start before the case dominates
++# every path to the exec, so the case's one arm -- which assigns only when
++# ASYNC_SCHED=off and has no `*)` catch-all -- is irrelevant. Must stay CLEAN.
++services:
++  fixture:
++    image: example/fixture
++    entrypoint:
++      - bash
++      - -c
++      - |
++        PRE_ARGS=()
++        case "$${ASYNC_SCHED:-}" in off|OFF|Off|false|no|0)
++          PRE_ARGS=(--no-async-scheduling)
++          echo "[fixture] async scheduling off" >&2 ;;
++        esac
++        exec vllm serve "$${PRE_ARGS[@]}"
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..bea3ac4 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -16,6 +16,16 @@
+ # ⚠️ Indentation is NOT a sufficient proxy: in these composes the branch execs sit
+ # at the same column as a block nudged inside the branch. Depth is tracked from the
+ # shell keywords instead.
++#
++# Case arms are branches too (the #1540 VISION case first burned this, 2026-10-13):
++# `on) ARR=(…)` on an arm HEAD is an assignment a line-start-only scan never sees,
++# and a case dominates a statement after it only when the case is EXHAUSTIVE for
++# the array -- a `*)` catch-all arm plus EVERY arm either assigning the array or
++# exiting. A one-armed `case … in off) …` with no catch-all falls through on every
++# other value; a case nested in an `if` branch the exec skips never dominates; an
++# exec inside one arm cannot read an array another arm assigned. The fixtures in
++# scripts/tests/fixtures/args-array-scope/ pin both sides (ok-* must stay clean,
++# bad-* must be flagged).
+ set -uo pipefail
+ export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
+ # #779: this gate parses compose YAML through python3; without PYTHONUTF8 a
+@@ -51,47 +61,218 @@ OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
+ CLOSE = re.compile(r'^\s*(fi|done|esac)\b')
+ ALT   = re.compile(r'^\s*(else|elif)\b')
+ ONELINE = re.compile(r'\b(fi|done|esac)\s*;?\s*$')
++# A case-arm head: `  on) …`, `  full|lean)`, `  *) …` -- a |-list of glob words
++# (or `*` / empty), a literal `)`, then the arm's first statement (or EOL when the
++# body sits on later lines). `=` and `$` are excluded so `_x="$(cmd)"` never reads
++# as an arm head.
++PAT = r'''[A-Za-z0-9_"'!.*?\[\]:-]+(?:\|[A-Za-z0-9_"'!.*?\[\]:-]+)*'''
++ARM  = re.compile(r'^\s*(' + PAT + r'|\))\)\s*(.*)$')
++INLINE_ARM = re.compile(r'^(' + PAT + r'|\))\)\s*(.*)$')   # same shape, after `case … in`
++EXIT_STMT = re.compile(r'exit(\s+[0-9]+)?$')
++
++def analyze(lines):
++    """Scope path per line + case/arm bookkeeping.
+ 
+-def scope_paths(lines):
+-    """Path of enclosing BRANCH ids per line.  `else`/`elif` starts a NEW id at the
+-    same depth, so an assignment in the then-branch does not dominate the
+-    else-branch -- which plain depth counting cannot express."""
+-    paths, stack, nxt = [], [], [0]
++    paths[i] = tuple of enclosing branch-scope ids at line i.  if/else/elif,
++    for/while, and each CASE ARM open a scope; else/elif replace the top (a
++    sibling branch); a new arm head replaces a still-open arm (arms are
++    siblings); `esac` pops back through any open branches/arms to the case
++    itself (an `elif c; then X; else Y; fi ;;` line closes its if-chain inline
++    and is popped here, not later).  An assignment in one branch never
++    dominates a statement in a sibling branch; an in-arm assignment dominates a
++    statement AFTER the case only when the whole case is exhaustive
++    (`case_covers`)."""
++    nid = [0]
+     def fresh():
+-        nxt[0] += 1
+-        return nxt[0]
+-    for ln in lines:
+-        if CLOSE.match(ln) and stack: stack.pop()
+-        elif ALT.match(ln) and stack: stack[-1] = fresh()
+-        paths.append(tuple(stack))
+-        if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+-    return paths
++        nid[0] += 1
++        return nid[0]
++
++    stack = []            # (id, kind); kind in {block, case, arm}
++    case_stack = []       # id of every open case, innermost last
++    arm_of = {}           # arm id -> case id
++    arm_head = {}         # arm id -> head line
++    arm_pattern = {}      # arm id -> arm pattern text
++    case_enc = {}         # case id -> enclosing path at its opening line
++    case_esac = {}        # case id -> line of its closing esac
++    paths, line_arm = [], []
++
++    for i, ln in enumerate(lines):
++        if CLOSE.match(ln) and stack:
++            if re.match(r'^\s*esac', ln):
++                # Pop open branches/arms down to the case itself, then the case.
++                while stack and stack[-1][1] in ("arm", "block"):
++                    stack.pop()
++                if stack and stack[-1][1] == "case":
++                    case_esac[stack.pop()[0]] = i
++                    case_stack.pop()
++            else:
++                stack.pop()
++        elif ALT.match(ln) and stack and stack[-1][1] == "block":
++            stack[-1] = (fresh(), "block")
++            # `elif c; then X; else Y; fi ;;` closes the whole if-chain on this
++            # line. (A one-line if INSIDE an else branch would look the same;
++            # that shape does not occur in this repo's entrypoints.)
++            if re.search(r';\s*fi\s*(;{1,2})?\s*$', ln):
++                stack.pop()
++        elif ARM.match(ln) and stack and stack[-1][1] in ("case", "arm"):
++            m = ARM.match(ln)
++            aid = fresh()
++            if stack[-1][1] == "arm":
++                # Arms are siblings: a new arm head closes the previous arm.
++                stack[-1] = (aid, "arm")
++            else:
++                stack.append((aid, "arm"))
++            arm_of[aid] = case_stack[-1]
++            arm_head[aid] = i
++            arm_pattern[aid] = m.group(1)
++        mo = OPEN.match(ln)
++        if mo and not ONELINE.search(ln):
++            if mo.group(1) == "case":
++                cid = fresh()
++                case_enc[cid] = tuple(x[0] for x in stack)
++                stack.append((cid, "case"))
++                case_stack.append(cid)
++                # The first arm may sit on the `case … in` line itself:
++                # `case "$${X:-}" in off|OFF|…) …`
++                rest = re.sub(r'^\s*case\b.*?\bin\b\s*', '', ln, count=1)
++                mi = INLINE_ARM.match(rest)
++                if mi:
++                    aid = fresh()
++                    stack.append((aid, "arm"))
++                    arm_of[aid] = cid
++                    arm_head[aid] = i
++                    arm_pattern[aid] = mi.group(1)
++            else:
++                stack.append((fresh(), "block"))
++        top = stack[-1] if stack else None
++        paths.append(tuple(x[0] for x in stack))
++        line_arm.append(top[0] if top and top[1] == "arm" else None)
++
++    return paths, line_arm, arm_of, arm_head, arm_pattern, case_enc, case_esac
++
++def line_statements(lines, i):
++    """The shell statements of line i, with any leading case-arm pattern stripped.
++    A statement that IS `ARR=(…` is an unconditional assignment of ARR; branch
++    keywords (if/then/else/case/…) prefix the statements they guard, so a guarded
++    assignment never reads as a bare one. `;;` closes the arm, not the statement
++    list; `;` splits it."""
++    ln = lines[i]
++    m = ARM.match(ln)
++    text = m.group(2) if m else ln
++    text = text.rstrip()
++    if text.endswith(";;"):
++        text = text[:-2]
++    out = []
++    for s in text.split(";"):
++        s = s.strip()
++        if not s or s.startswith("#"):
++            continue
++        out.append(s)
++    return out
++
++class Scope:
++    def __init__(self, lines):
++        self.lines = lines
++        (self.paths, self.line_arm, self.arm_of, self.arm_head,
++         self.arm_pattern, self.case_enc, self.case_esac) = analyze(lines)
++        self._covers = {}
++
++    def assigns(self, j, arr):
++        pat = re.compile(r'^' + arr + r'=\(')
++        return any(pat.match(s) for s in line_statements(self.lines, j))
++
++    def dominates(self, j, i, arr):
++        """Assignment at line j dominates the use at line i iff every path that
++        reaches i has already executed it: same-or-enclosing branch, or -- for an
++        in-arm assignment -- the whole case is exhaustive and i sits after it."""
++        pi, pj = self.paths[i], self.paths[j]
++        a = self.line_arm[j]
++        if a is None:
++            return pj == tuple(pi[:len(pj)])
++        c = self.arm_of[a]
++        if c in pi:
++            # i is INSIDE this case: only a statement of the same arm, before it,
++            # can have run. Arms are mutually exclusive.
++            return pj == tuple(pi[:len(pj)])
++        enc = self.case_enc[c]
++        return enc == tuple(pi[:len(enc)]) and self.case_covers(c, arr)
++
++    def case_covers(self, c, arr):
++        """Every path through the case leaves arr assigned: it has a `*)`
++        catch-all arm, and EVERY arm either assigns arr or exits."""
++        key = (c, arr)
++        if key not in self._covers:
++            arms = [a for a, cc in self.arm_of.items() if cc == c]
++            has_catchall = any(self.arm_pattern[a] in ("*", ")") for a in arms)
++            self._covers[key] = has_catchall and all(self.arm_covers(a, arr) for a in arms)
++        return self._covers[key]
++
++    def arm_covers(self, a, arr):
++        """This arm assigns arr, or exits before the arm ends."""
++        c = self.arm_of[a]
++        nxt = [h for a2, cc in self.arm_of.items()
++               if cc == c and (h := self.arm_head[a2]) > self.arm_head[a]]
++        end = (min(nxt) if nxt else self.case_esac.get(c, self.arm_head[a])) - 1
++        for k in range(self.arm_head[a], max(end, self.arm_head[a]) + 1):
++            for s in line_statements(self.lines, k):
++                if s.startswith(arr + "=(") or EXIT_STMT.fullmatch(s):
++                    return True
++        return False
+ 
+ checked = refs = 0
+ problems = []
+ 
++def check_entrypoint(name, s):
++    """Return (problems, nrefs) for one entrypoint script."""
++    sc = Scope(s.splitlines())
++    found, nrefs = [], 0
++    for i, ln in enumerate(sc.lines):
++        # The exec may sit on a case-arm head (`b) exec …`), so match the
++        # STATEMENT, not the line start.
++        for stmt in line_statements(sc.lines, i):
++            if not re.match(r'exec\b', stmt): continue
++            for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', stmt)):
++                nrefs += 1
++                asg = [j for j in range(i) if sc.assigns(j, arr)]
++                if not asg:
++                    found.append(f"{name}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
++                if not any(sc.dominates(j, i, arr) for j in asg):
++                    found.append(
++                        f"{name}: {arr} is assigned only inside a branch that the exec on line "
++                        f"{i+1} does not share (case arm / if-branch) -- that path expands an "
++                        f"unset array, silently dropping the feature")
++    return found, nrefs
++
+ for p in sorted(pathlib.Path("models").rglob("*.yml")):
+     if "compose" not in str(p): continue
+     s = script_of(p)
+     if not s: continue
+     checked += 1
+-    lines = s.splitlines()
+-    paths = scope_paths(lines)
+-    for i, ln in enumerate(lines):
+-        if not re.match(r'^\s*exec\b', ln): continue
+-        for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+-            refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
+-            if not asg:
+-                problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
+-            # an assignment dominates the exec iff it comes first AND its branch
+-            # path is a prefix of the exec's (same scope, or an enclosing one)
+-            ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
+-            if not ok:
+-                problems.append(
+-                    f"{p}: {arr} is assigned only inside a branch that the exec on line "
+-                    f"{i+1} does not share -- that path expands an unset array, silently "
+-                    f"dropping the feature")
++    found, nrefs = check_entrypoint(str(p), s)
++    refs += nrefs
++    problems += found
++
++# Fixtures pin both sides of the guard: ok-* must stay clean, bad-* must be
++# flagged. A guard change that loses either side is a regression.
++fixdir = pathlib.Path("scripts/tests/fixtures/args-array-scope")
++if not fixdir.is_dir() or not sorted(fixdir.glob("*.yml")):
++    problems.append(f"{fixdir}/ is missing or empty -- the ok-/bad- fixtures are this guard's negative control")
++else:
++    for f in sorted(fixdir.glob("*.yml")):
++        s = script_of(f)
++        if s is None:
++            problems.append(f"{f}: fixture has no readable entrypoint")
++            continue
++        found, nrefs = check_entrypoint(str(f), s)
++        refs += nrefs
++        if not nrefs:
++            problems.append(f"{f}: vacuous fixture (no array reference on any exec statement)")
++        elif f.name.startswith("ok-") and found:
++            problems += [f"{f}: expected clean, but: {m}" for m in found]
++        elif f.name.startswith("bad-") and not found:
++            problems.append(f"{f}: expected a failure, but the guard found nothing")
++        elif not f.name.startswith(("ok-", "bad-")):
++            problems.append(f"{f}: fixture name must start with ok- or bad-")
+ 
+ if checked == 0 or refs == 0:
+     print(f"FAIL: vacuous run (checked={checked}, refs={refs}) -- extraction is broken", file=sys.stderr); sys.exit(1)

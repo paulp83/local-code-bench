@@ -1,0 +1,7 @@
+PASS header-exact
+PASS row-count
+PASS sorted
+PASS all-cells-correct
+PASS at-least-90pct-cells
+PASS transfers-ignored
+PASS: 6 FAIL: 0

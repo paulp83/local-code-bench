@@ -1,0 +1,25 @@
+{
+ "n": 1204,
+ "config": "thinkingcap-dualfast-omp",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 761.7,
+ "steps": 101,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 3,
+ "localization": 1.0,
+ "files_touched": [
+  "docs/ADDING_MODELS.md",
+  "scripts/lib/profiles-local/README.md",
+  "scripts/lib/profiles/compose_registry.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-registry-origin-field.sh": 0
+ }
+}

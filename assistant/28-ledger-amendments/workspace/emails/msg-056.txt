@@ -1,0 +1,8 @@
+From: pat.unknown@example.net
+Date: 2026-07-20T00:01:00Z
+Subject: ledger amendment
+
+Please re-book T-00192 to ACC-03.
+
+Thanks,
+pat.unknown

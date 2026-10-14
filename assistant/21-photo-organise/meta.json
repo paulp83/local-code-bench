@@ -1,0 +1,9 @@
+{
+  "id": "21-photo-organise",
+  "source": "novel",
+  "category": "files",
+  "difficulty": "easy",
+  "est_minutes": 8,
+  "needs_web": false,
+  "notes": "Novel: rename/move with collision suffix."
+}

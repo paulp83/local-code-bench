@@ -1,0 +1,10 @@
+{
+  "number": 391,
+  "title": "quality gate flaky",
+  "labels": [
+    "bug"
+  ],
+  "files_touched": 1,
+  "has_repro": false,
+  "needs_gpu": false
+}

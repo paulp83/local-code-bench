@@ -1,0 +1,9 @@
+{
+  "id": "06-job-chain-status",
+  "source": "session-derived",
+  "category": "summarising",
+  "difficulty": "medium",
+  "est_minutes": 8,
+  "needs_web": false,
+  "notes": "Shape from sessions that chained long eval/quant/bench jobs and had to report what ran, failed or was skipped."
+}

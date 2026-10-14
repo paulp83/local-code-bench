@@ -1,0 +1,14 @@
+{
+ "task": "32-event-plan-issues",
+ "config": "strata-iq4xs",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "qwen3.8-flash-next-unsloth-ud-iq4_xs",
+ "agent_s": 47.3,
+ "tool_calls": 12,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 13,
+ "checks_total": 13,
+ "partial": 1.0
+}

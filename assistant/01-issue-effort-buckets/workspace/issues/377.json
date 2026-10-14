@@ -1,0 +1,12 @@
+{
+  "number": 377,
+  "title": "docs: explain tok/s columns",
+  "labels": [
+    "design",
+    "docs",
+    "good first issue"
+  ],
+  "files_touched": 4,
+  "has_repro": false,
+  "needs_gpu": false
+}

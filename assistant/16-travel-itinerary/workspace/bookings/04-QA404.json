@@ -1,0 +1,9 @@
+{
+  "flight": "QA404",
+  "from_city": "Mumbai",
+  "depart_local": "2026-11-05 22:10",
+  "depart_utc_offset": "+05:30",
+  "to_city": "Tokyo",
+  "arrive_local": "2026-11-06 09:35",
+  "arrive_utc_offset": "+09:00"
+}

@@ -1,0 +1,37 @@
+[
+  {
+    "owner": "Dana",
+    "task": "send the vendor quote",
+    "due": "2026-10-09"
+  },
+  {
+    "owner": "Lee",
+    "task": "review the rig report",
+    "due": "2026-10-13"
+  },
+  {
+    "owner": "Priya",
+    "task": "draft the results post",
+    "due": "2026-10-21"
+  },
+  {
+    "owner": "Omar",
+    "task": "book the test window",
+    "due": "2026-10-31"
+  },
+  {
+    "owner": "Dana",
+    "task": "update the runbook",
+    "due": "2026-10-08"
+  },
+  {
+    "owner": "Lee",
+    "task": "rerun the bench",
+    "due": "2026-10-19"
+  },
+  {
+    "owner": "Priya",
+    "task": "confirm the budget",
+    "due": "2026-10-12"
+  }
+]

@@ -1,0 +1,23 @@
+{
+ "n": 1470,
+ "config": "strata-iq4xs",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 270.5,
+ "steps": 22,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 13,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/p2p-state.sh",
+  "scripts/report.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-p2p-state.sh": 0
+ }
+}

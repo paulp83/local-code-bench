@@ -1,0 +1,23 @@
+{
+ "n": 1174,
+ "config": "thinkingcap-dualfast-omp",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 259.1,
+ "steps": 32,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.8,
+ "checks_passed": 56,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/profiles/hf_fetch.py"
+ ],
+ "p2p_run": 2,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-pull-download-ladder.sh": 1
+ }
+}

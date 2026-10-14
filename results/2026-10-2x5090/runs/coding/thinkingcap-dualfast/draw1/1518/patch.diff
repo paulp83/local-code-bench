@@ -1,0 +1,58 @@
+diff --git a/scripts/lib/bench-row-formatter.sh b/scripts/lib/bench-row-formatter.sh
+index 6961abd..5adaa83 100644
+--- a/scripts/lib/bench-row-formatter.sh
++++ b/scripts/lib/bench-row-formatter.sh
+@@ -400,7 +400,10 @@ def load() -> dict[str, Any]:
+     name = str(config_blob.get("Name") or "").lstrip("/")
+     served = flag(cmd, "--served-model-name")
+     tp = flag(cmd, "--tensor-parallel-size")
+-    compose = rel(labels.get("com.docker.compose.project.config_files") or "")
++    # The config_files label is a comma-joined list since #1498 (the slug's
++    # compose + the <data dir>/compose-labels override). The bench record wants
++    # the slug's own compose, so take the first entry before relativising.
++    compose = rel((labels.get("com.docker.compose.project.config_files") or "").split(",")[0])
+     if not compose:
+         compose = infer_compose_path(name, served, tp)
+     rig = parse_rig(read_text(require_file("rig.txt")))
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index b9da2b1..5dd4911 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1022,12 +1022,34 @@ down_running() {
+     [[ -n "${managed[$c]:-}" ]] || continue   # not ours — leave it alone
+     brought_down=1
+     echo "[switch] bringing down: ${c}"
+-    # derive the compose dir/file from the container's labels — stop fallback
++    # derive the compose dir/files from the container's labels — stop fallback.
++    # Since #1498 the config_files label is a comma-joined list: the slug's own
++    # compose plus the <data dir>/compose-labels label override. Pass each path as
++    # its own -f; the old code handed the whole joined string to a single -f, so
++    # `down` always failed and quietly fell back to a bare `docker stop` — leaving
++    # the container, its network and any orphans behind (#1512).
+     local lbl_dir lbl_file
+     lbl_dir=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null || true)
+     lbl_file=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.config_files"}}' "$c" 2>/dev/null || true)
+-    if [[ -n "$lbl_dir" && -n "$lbl_file" ]]; then
+-      (cd "$lbl_dir" && ${COMPOSE_BIN} -f "$lbl_file" down --remove-orphans) || docker stop "$c" >/dev/null
++    local -a cfg_args=() _cfgs=()
++    local f
++    IFS=',' read -ra _cfgs <<< "$lbl_file"
++    for f in "${_cfgs[@]}"; do
++      [[ -n "$f" ]] || continue
++      # Drop files that no longer exist (e.g. the label override after a data-dir
++      # move): `down` only needs the slug's compose. Resolve the same way compose
++      # does — absolute paths as-is, relative paths against the working dir.
++      if [[ "$f" = /* ]]; then
++        [[ -e "$f" ]] || continue
++      elif [[ -n "$lbl_dir" && -e "$lbl_dir/$f" ]]; then
++        :
++      else
++        continue
++      fi
++      cfg_args+=(-f "$f")
++    done
++    if [[ -n "$lbl_dir" && ${#cfg_args[@]} -gt 0 ]]; then
++      (cd "$lbl_dir" && ${COMPOSE_BIN} "${cfg_args[@]}" down --remove-orphans) || docker stop "$c" >/dev/null
+     else
+       docker stop "$c" >/dev/null
+     fi

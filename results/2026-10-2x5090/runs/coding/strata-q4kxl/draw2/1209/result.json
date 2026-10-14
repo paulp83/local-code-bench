@@ -1,0 +1,23 @@
+{
+ "n": 1209,
+ "config": "strata-q4kxl",
+ "draw": 2,
+ "exit_status": "Submitted",
+ "agent_s": 650.3,
+ "steps": 34,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 12,
+ "localization": 0.667,
+ "files_touched": [
+  "scripts/catalog.sh",
+  "scripts/lib/profiles/amend.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-catalog-amend.sh": 0
+ }
+}

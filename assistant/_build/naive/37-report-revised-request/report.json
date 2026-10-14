@@ -1,0 +1,14 @@
+{
+  "quarter": "2026-Q2",
+  "revenue_by_region": {
+    "West": 109528.78,
+    "East": 107723.4,
+    "North": 101025.38,
+    "South": 90041.75
+  },
+  "top_products": [
+    "Prod-D",
+    "Prod-K",
+    "Prod-C"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+ "n": 1621,
+ "config": "thinkingcap-dualfast",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 751.8,
+ "steps": 38,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 0.333,
+ "files_touched": [
+  "scripts/quality-test.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-quality-server-budget.sh": 1
+ }
+}

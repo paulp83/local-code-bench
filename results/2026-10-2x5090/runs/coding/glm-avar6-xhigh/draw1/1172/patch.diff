@@ -1,0 +1,109 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..34865ad 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,13 +6,31 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
+-  * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+-    triggers a SECOND allocation and both are logged; summing all matches
+-    double-counts (measured 13,947 against a live 6,820 -- 2.05x).
++Traps this encodes, each paid for on a real boot:
++
++  * moe-cache pool (2026-08-31): take the LAST report per (device, pool index).
++    A drafter load triggers a SECOND allocation and both are logged; summing all
++    matches double-counts (measured 13,947 against a live 6,820 -- 2.05x).
++  * weights / KV / state: SUM every report per device. A GPU-pinned drafter logs
++    the SAME line shapes as the target model and both allocations are LIVE at
++    once, so last-wins let the drafter overwrite the target -- `model=` reported
++    656 MiB on a card whose target model held 3,313, while the drafter's
++    recurrent state matched nothing at all. Both vanished into `unaccounted`
++    (6,082 of 22,992 MiB -- 84% of that gap is under-attribution, not genuine
++    overhead, and it read as a CUDA1-vs-CUDA0 routing asymmetry). `kv` was
++    already summed; `model` and `state` now are too.
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
+ 
++Known residual: the drafter's COMPUTE reservation. `compute` keeps last-wins,
++which is the right rule for a single model -- the target RE-reserves after the
++drafter loads and that is the same buffer again, so summing would double-count
++the re-reserve. The log does not label which context a `sched_reserve` line
++belongs to, so a drafter's reservation cannot be separated from a re-reserve by
++position alone (target 5208.35 -> drafter 1606.48 -> target re-reserve 5240.16
++on the same card); the drafter's share stays in `unaccounted` until the engine
++labels the reservation.
++
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+ number, so the two sections can never disagree.
+@@ -23,10 +41,26 @@ import sys
+ 
+ 
+ def _per_dev(text, pat, agg=False):
++    """Map device -> MiB for every match of a buffer-size line.
++
++    `pat` is one regex, or a tuple of them, each with two capture groups:
++    (device, MiB). The aggregation rule is the whole bug class here:
++
++      agg=False -- LAST match wins. Right for a buffer the engine re-logs while
++        it re-sizes the SAME allocation (the moe-cache pool above; the target's
++        compute re-reserve below).
++
++      agg=True  -- sum every match. Right for buffers that exist SEPARATELY and
++        all hold VRAM at once: the KV caches, the recurrent state, and the
++        weights -- a drafter pinned to a GPU loads a second model there.
++    """
++    if isinstance(pat, str):
++        pat = (pat,)
+     out = {}
+-    for m in re.finditer(pat, text):
+-        dev, val = m.group(1), float(m.group(2))
+-        out[dev] = out.get(dev, 0.0) + val if agg else val
++    for p in pat:
++        for m in re.finditer(p, text):
++            dev, val = m.group(1), float(m.group(2))
++            out[dev] = out.get(dev, 0.0) + val if agg else val
+     return out
+ 
+ 
+@@ -38,10 +72,34 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+-    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # DRAFTER TRAP: a GPU-pinned drafter emits the same line shape as the target
++    # model, so last-wins here put the DRAFTER's weights on the card and dropped
++    # the target's entirely. Both allocations are live at once -- they sum.
++    model = _per_dev(
++        text,
++        r"load_tensors:\s+(CUDA\d+) model buffer size\s*=\s*([\d.]+) MiB",
++        agg=True,
++    )
++    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d+) compute buffer size\s*=\s*([\d.]+) MiB")
++    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d+) KV buffer size\s*=\s*([\d.]+) MiB", agg=True)
++    # The recurrent-state buffer has no single log tag: a hybrid model's
++    # pre-allocated state logs under `llama_memory_recurrent`, DeepSeek's
++    # compressed-state cache under `_comp_state`. Matching only one of them is
++    # how a hybrid drafter's state fell into `unaccounted`. A device can hold
++    # BOTH (target + drafter), so they sum.
++    state = _per_dev(
++        text,
++        (
++            r"_comp_state:\s+(CUDA\d+) \S+ \S+ state buffer size\s*=\s*([\d.]+) MiB",
++            # `[ \t]` (not `\s`) keeps a match inside its own log line -- a tag
++            # line without a buffer-size figure on it must not swallow the next
++            # line's number. The optional tokens cover the fork's variants:
++            # "RS buffer size", "RS.cell buffer size", "RS state buffer size".
++            r"llama_memory_recurrent:\s+(CUDA\d+)(?:[ \t]+\S+){0,2}"
++            r"[ \t]+buffer size[ \t]*=[ \t]*([\d.]+) MiB",
++        ),
++        agg=True,
++    )
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

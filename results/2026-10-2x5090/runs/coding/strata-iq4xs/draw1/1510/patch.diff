@@ -1,0 +1,268 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 09ea48e..0ea08cf 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -224,16 +224,17 @@ _detect_slots() {
+   echo ""
+ }
+ 
++# GPU label for the probed container, NOT the whole rig. On a multi-GPU rig an
++# unrelated service on another card made us report every GPU under GPU 0's name
++# and attribute their VRAM to the slug under test (e.g. "4× RTX 3090 / 55319 MB"
++# for a 1× RTX 3060 pinned container). concurrency_probe.py resolves the cards
++# behind CONTAINER via docker inspect and scopes nvidia-smi to them; when it
++# cannot resolve (no container / docker) it falls back to rig-wide and says so.
+ _gpu_fp() {
+-  local names n first
+-  names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null \
+-    | sed 's/^NVIDIA //' || true)"
+-  [[ -z "$names" ]] && { echo "? GPU"; return; }
+-  n="$(printf '%s\n' "$names" | wc -l | tr -d ' ')"
+-  first="$(printf '%s\n' "$names" | head -1)"
+-  if [[ "$n" == "1" ]]; then echo "1× ${first}"
+-  else echo "${n}× ${first}"
+-  fi
++  local fp
++  fp="$(CONTAINER="${CONTAINER:-}" python3 "$PROBE_PY" --gpu-fp 2>/dev/null || true)"
++  [[ -z "$fp" ]] && { echo "? GPU"; return; }
++  echo "$fp"
+ }
+ 
+ _spec_fp() {
+@@ -346,6 +347,13 @@ fi
+ # (retention >= RETENTION_MIN, if VALIDATE).
+ run_probe() {
+   local N="$1"
++  # Test seam: CONCURRENCY_PROBE_CELL_CMD replaces the one-cell probe with an
++  # arbitrary command (must print a RESULT line). Lets a GPU-free regression test
++  # drive the whole --sweep loop — including every skip path through emit_row —
++  # without a server. Unset in production: zero behaviour change.
++  if [[ -n "${CONCURRENCY_PROBE_CELL_CMD:-}" ]]; then
++    N="$N" PROMPT_TOKENS="$PROMPT_TOKENS" bash -c "$CONCURRENCY_PROBE_CELL_CMD"; return $?
++  fi
+   URL="$URL" MODEL="$MODEL" CONTAINER="$CONTAINER" CONCURRENCY="$N" \
+   ROUNDS="$ROUNDS" PROMPT_TOKENS="$PROMPT_TOKENS" GEN_TOKENS="$GEN_TOKENS" \
+   VRAM_GROWTH_MB="$VRAM_GROWTH_MB" REQ_TIMEOUT="$REQ_TIMEOUT" \
+@@ -459,11 +467,15 @@ if [[ "$MATRIX" == "1" ]]; then
+   cells_jsonl="$(mktemp /tmp/cprobe-cells.XXXXXX)"
+   trap 'rm -f "$cells_jsonl"' EXIT
+ 
++  # Row JSON goes in as ARGV, not stdin: `python3 - <<PY` already spends stdin on
++  # the program, so a piped row (`printf … | emit_row`) is silently replaced by
++  # the heredoc, sys.stdin.read() returns "", and json.loads("") raises — which,
++  # under set -e, killed the whole sweep at the first skipped cell.
+   emit_row() {
+-    python3 - "$cells_jsonl" <<'PY'
++    python3 - "$cells_jsonl" "$1" <<'PY'
+ import json, sys
+ path = sys.argv[1]
+-row = json.loads(sys.stdin.read())
++row = json.loads(sys.argv[2])
+ with open(path, "a", encoding="utf-8") as fh:
+     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+ PY
+@@ -473,17 +485,17 @@ PY
+     [[ -z "${action:-}" ]] && continue
+     if [[ "$budget_hit" == "1" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (budget)"
+-      printf '%s\n' "{\"ctx\":$ctx,\"n\":$n,\"skip\":\"budget\"}" | emit_row
++      emit_row "{\"ctx\":$ctx,\"n\":$n,\"skip\":\"budget\"}"
+       continue
+     fi
+     if [[ "$action" == "skip" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (${reason})"
+-      printf '%s\n' "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":sys.argv[3]}))' "$ctx" "$n" "${reason:-clipped}")" | emit_row
++      emit_row "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":sys.argv[3]}))' "$ctx" "$n" "${reason:-clipped}")"
+       continue
+     fi
+     if [[ "$EARLY_STOP" == "1" && -n "${ROW_DEAD[$ctx]:-}" ]]; then
+       echo "[sweep] ${ctx} tok  N=${n}: skip (early-stop — N=${ROW_DEAD[$ctx]} failed)"
+-      printf '%s\n' "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":"early-stop"}))' "$ctx" "$n")" | emit_row
++      emit_row "$(python3 -c 'import json,sys; print(json.dumps({"ctx":int(sys.argv[1]),"n":int(sys.argv[2]),"skip":"early-stop"}))' "$ctx" "$n")"
+       continue
+     fi
+     echo
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 9e1eb25..554d28d 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -343,14 +343,94 @@ def engine_stats(container):
+     return (run, wait, run_max, wait_max, hit)
+ 
+ 
+-def vram_used_mb():
++# --- GPU scoping (the probed container's cards, not the whole rig) ----------
++# On a multi-GPU rig an unrelated service on another card must not be attributed
++# to the container under test: a rig-wide memory.used sum can fail a clean run's
++# VRAM-leak gate (or hide a real leak), and labelling every GPU with GPU 0's name
++# reports the wrong hardware. We resolve the host GPUs the container's CUDA can
++# actually see and scope every nvidia-smi query to them. When nothing can be
++# resolved we fall back to rig-wide and SAY SO, never silently mislabel.
++_GPU_SCOPE_CACHE: dict = {}
++
++
++def _inspect_container(container):
++    """docker inspect <container> -> first JSON object, or None on any failure."""
++    if not container:
++        return None
+     try:
+         out = subprocess.run(
+-            [
+-                "nvidia-smi",
+-                "--query-gpu=memory.used",
+-                "--format=csv,noheader,nounits",
+-            ],
++            ["docker", "inspect", container],
++            capture_output=True,
++            text=True,
++            timeout=10,
++        ).stdout
++        if not out.strip():
++            return None
++        data = json.loads(out)
++    except Exception:
++        return None
++    if isinstance(data, list):
++        return data[0] if data else None
++    return data
++
++
++def container_gpu_selectors(container=None):
++    """Host GPU indices/UUIDs the container's CUDA sees, in CUDA order.
++
++    Resolved from docker inspect: HostConfig.DeviceRequests[].DeviceIDs (the
++    --gpus path) first, then NVIDIA_VISIBLE_DEVICES, remapped by
++    CUDA_VISIBLE_DEVICES. None means "could not resolve / all GPUs" — callers
++    fall back to rig-wide and should say so."""
++    if container is None:
++        container = _env("CONTAINER")
++    container = (container or "").strip()
++    if not container:
++        return None
++    ckey = ("sel", container)
++    if ckey in _GPU_SCOPE_CACHE:
++        return _GPU_SCOPE_CACHE[ckey]
++    sel = None
++    info = _inspect_container(container)
++    if isinstance(info, dict):
++        base = None
++        for req in (info.get("HostConfig") or {}).get("DeviceRequests") or []:
++            if req.get("DeviceIDs"):
++                base = [str(x) for x in req["DeviceIDs"]]
++        cenv = {}
++        for entry in (info.get("Config") or {}).get("Env") or []:
++            key, sep, value = str(entry).partition("=")
++            if sep and value.strip():
++                cenv[key] = value.strip()
++        nvd = cenv.get("NVIDIA_VISIBLE_DEVICES", "")
++        if base is None and nvd and nvd.strip().lower() not in ("all", "void", "none"):
++            base = [v.strip() for v in nvd.split(",") if v.strip()]
++        cvd = cenv.get("CUDA_VISIBLE_DEVICES", "")
++        if cvd:
++            picks = [v.strip() for v in cvd.split(",") if v.strip()]
++            if base is not None and all(p.isdigit() for p in picks):
++                base = [base[int(p)] for p in picks if int(p) < len(base)]
++            elif base is None:
++                base = picks
++        sel = base or None
++    _GPU_SCOPE_CACHE[ckey] = sel
++    return sel
++
++
++def _nvidia_smi_cmd(scope, query, nounits=True):
++    """nvidia-smi query command scoped to `scope` (list of ids) or rig-wide."""
++    fmt = "csv,noheader" + (",nounits" if nounits else "")
++    cmd = ["nvidia-smi", "--query-gpu=" + query, "--format=" + fmt]
++    if scope:
++        cmd += ["-i", ",".join(str(s) for s in scope)]
++    return cmd
++
++
++def vram_used_mb(container=None):
++    """MB used summed over the container's GPUs (rig-wide when unresolvable)."""
++    sel = container_gpu_selectors(container)
++    try:
++        out = subprocess.run(
++            _nvidia_smi_cmd(sel, "memory.used"),
+             capture_output=True,
+             text=True,
+             timeout=10,
+@@ -360,6 +440,54 @@ def vram_used_mb():
+         return -1
+ 
+ 
++def vram_used_per_card_mb(container=None):
++    """[(index, name, used_mb)] for the container's GPUs (bench per-card peaks)."""
++    sel = container_gpu_selectors(container)
++    rows = []
++    try:
++        out = subprocess.run(
++            _nvidia_smi_cmd(sel, "index,name,memory.used"),
++            capture_output=True,
++            text=True,
++            timeout=10,
++        ).stdout
++    except Exception:
++        return rows
++    for line in out.splitlines():
++        cells = [c.strip() for c in line.split(",")]
++        if len(cells) >= 3:
++            try:
++                rows.append((cells[0], cells[1], int(cells[2])))
++            except ValueError:
++                continue
++    return rows
++
++
++def gpu_fingerprint(container=None):
++    """GPU label scoped to the container's cards, e.g. '1× GeForce RTX 3060'.
++
++    Matches the historical '<n>× <first name>' shape (NVIDIA prefix stripped);
++    when the container cannot be resolved it reports rig-wide and appends a
++    '(all host GPUs)' note so a multi-GPU rig is never silently mislabelled."""
++    sel = container_gpu_selectors(container)
++    try:
++        out = subprocess.run(
++            _nvidia_smi_cmd(sel, "name", nounits=False),
++            capture_output=True,
++            text=True,
++            timeout=10,
++        ).stdout
++    except Exception:
++        return "? GPU"
++    names = [re.sub(r"^NVIDIA ", "", n.strip()) for n in out.splitlines() if n.strip()]
++    if not names:
++        return "? GPU"
++    label = f"{len(names)}× {names[0]}"
++    if not sel:
++        label += " (all host GPUs)"
++    return label
++
++
+ def parse_result_line(line):
+     """Parse 'RESULT k=v …' into a dict. Missing keys stay absent."""
+     if not line:
+@@ -1127,6 +1255,10 @@ def main(argv=None):
+     p.add_argument("--plan-tsv", action="store_true")
+     p.add_argument("--card", action="store_true")
+     p.add_argument("--detect-kv", action="store_true")
++    p.add_argument("--gpu-fp", action="store_true",
++                   help="GPU fingerprint scoped to CONTAINER's cards")
++    p.add_argument("--vram-mb", action="store_true",
++                   help="VRAM used (MB) scoped to CONTAINER's cards")
+     args = p.parse_args(argv)
+ 
+     if args.detect_kv:
+@@ -1134,6 +1266,12 @@ def main(argv=None):
+         if tok:
+             print(tok)
+         return 0
++    if args.gpu_fp:
++        print(gpu_fingerprint(_env("CONTAINER")))
++        return 0
++    if args.vram_mb:
++        print(vram_used_mb(_env("CONTAINER")))
++        return 0
+     if args.plan or args.plan_tsv:
+         plan = _plan_from_env()
+         extra = _env("PLAN_HEADER")

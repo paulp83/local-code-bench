@@ -1,0 +1,23 @@
+{
+  "id": "37-report-revised-request",
+  "set": "hard-v1",
+  "axis": "F",
+  "source": "novel",
+  "category": "changed-requirements",
+  "difficulty": "hard",
+  "est_minutes": 25,
+  "needs_web": false,
+  "notes": "The first message asks for Q2/all regions/by units; a follow-up changes quarter, regions and ranking, a later one adds a field, and two distractors (a colleague, a look-alike domain) must be ignored. A report built to message 01 fails quarter, west-dropped, regions, top-products, total.",
+  "spec_map": {
+    "report-parses": "Write `/workspace/report.json` as the requester's instructions finally stand.",
+    "report-keys-exact": "Output format comes from the first message and later additions.",
+    "quarter-is-2026-Q3": "On any point the requester changed, the **newest** requester message wins",
+    "west-dropped": "On any point the requester changed, the **newest** requester message wins",
+    "regions-exact": "On any point the requester changed, the **newest** requester message wins",
+    "revenue-East": "Revenue is `revenue_cents` / 100.",
+    "revenue-North": "Revenue is `revenue_cents` / 100.",
+    "revenue-South": "Revenue is `revenue_cents` / 100.",
+    "top-products-by-revenue": "On any point the requester changed, the **newest** requester message wins",
+    "total-revenue": "Output format comes from the first message and later additions."
+  }
+}

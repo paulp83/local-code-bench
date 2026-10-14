@@ -1,0 +1,70 @@
+diff --git a/scripts/lib/profiles/compose_registry.py b/scripts/lib/profiles/compose_registry.py
+index 31b69e8..49b729c 100644
+--- a/scripts/lib/profiles/compose_registry.py
++++ b/scripts/lib/profiles/compose_registry.py
+@@ -190,12 +190,21 @@ def _entry(
+     spec_method=None,
+     category=None,
+     weights_companions=None,
++    # Catalog provenance (#1202 P2): which layer this row was loaded from.
++    # "core" = the curated catalog (registry.yaml — the default), "local" = the
++    # gitignored scripts/lib/profiles-local layer (load_local_registry stamps its
++    # rows "local"). First-class on every entry so a consumer reads provenance
++    # from the field, not by sniffing the slug's `local/` prefix. Never persisted
++    # to a data file (see _DERIVED_ENTRY_KEYS) — the source file IS the truth.
++    origin="core",
+ ):
+     if status not in STATUS_VALUES:
+         raise ValueError(
+             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
+         )
+     entry = {
++        # Provenance first (#1202 P2): core by default; the local loader flips it.
++        "origin": origin,
+         "model": model,
+         "weights_variant": weights_variant,
+         "workload": workload,
+@@ -338,9 +347,13 @@ def compose_header_status(text):
+ _REGISTRY_YAML_REL = "scripts/lib/profiles/registry.yaml"
+ _REGISTRY_YAML_SCHEMA = 1
+ 
+-# Built-entry keys that _entry() DERIVES (never kwargs): stripped before entry
+-# kwargs are written back to YAML — the migrator and promote.py share this.
+-_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode"})
++# Keys that must NEVER appear in a registry DATA file — stripped before entry
++# kwargs are written back (the migrator and promote.py share this) and rejected
++# if hand-added. `pp` / `gpu_assignment_mode` are computed by _entry(); `origin`
++# is the row's provenance (the curated CORE catalog vs. the gitignored LOCAL
++# layer), stamped from the file the row is loaded from — first-class on every
++# loaded entry but deliberately not persisted to a data file.
++_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode", "origin"})
+ 
+ # Top-level keys the schema allows — anything else is a loud error, not a
+ # silently ignored section.
+@@ -858,6 +871,9 @@ def load_local_registry(root=None):
+             ) from exc
+         except ValueError as exc:
+             raise LocalRegistryError(f"{path}: local entry {slug!r}: {exc}") from exc
++        # Provenance is stamped from the SOURCE file, not the row's content:
++        # everything in this layer is LOCAL regardless of any stray field.
++        entry["origin"] = "local"
+         local[slug] = entry
+         local_models.add(model)
+     return local
+@@ -875,7 +891,15 @@ def get_registry(root=None):
+     if not local:
+         return COMPOSE_REGISTRY
+     merged = dict(COMPOSE_REGISTRY)
+-    merged.update(local)
++    for slug, entry in local.items():
++        # CORE WINS (#1202 P2): a local row can never shadow a curated slug — on
++        # a collision the CORE entry (origin="core") is kept and the local one is
++        # dropped. While the local layer carries the `local/` prefix such a slug
++        # is refused upstream (load_local_registry); this makes the rule explicit
++        # so it holds once the prefix-less slugs of the hard-cut arrive.
++        if slug in COMPOSE_REGISTRY:
++            continue
++        merged[slug] = entry
+     return merged
+ 
+ 

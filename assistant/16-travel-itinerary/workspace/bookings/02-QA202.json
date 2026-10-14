@@ -1,0 +1,9 @@
+{
+  "flight": "QA202",
+  "from_city": "Reykjavik",
+  "depart_local": "2026-11-04 08:05",
+  "depart_utc_offset": "+00:00",
+  "to_city": "Frankfurt",
+  "arrive_local": "2026-11-04 12:50",
+  "arrive_utc_offset": "+01:00"
+}

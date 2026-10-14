@@ -1,0 +1,727 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 2b0d50f..d0a1478 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -27,8 +27,10 @@
+ #   SWEEP="4 8 12 16" SLUG=vllm/minimal TPS_FLOOR=15 bash scripts/concurrency-probe.sh
+ #
+ # Env: URL (default registry-derived for qwen3.6-27b, currently :8020) · MODEL
+-#   (auto) · CONTAINER (auto for VRAM) · CONCURRENCY (default: served
+-#   max-num-seqs, else 2) · ROUNDS (5; --sweep defaults to 3) ·
++#   (auto) · CONTAINER (auto: the container PUBLISHING $URL, else the running
++#   engine container; it scopes the VRAM, the GPU label and the drafter — #1537) ·
++#   CONCURRENCY (default: served max-num-seqs, else 2) ·
++#   ROUNDS (5; --sweep defaults to 3) ·
+ #   PROMPT_TOKENS (16000) · GEN_TOKENS (256) ·
+ #   VRAM_GROWTH_MB (200) · REQ_TIMEOUT (600).
+ #   Validation knobs: VALIDATE (0) · TARGET_CTX (auto from --max-model-len) ·
+@@ -195,8 +197,78 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# best-effort container for VRAM + cmd introspection (name heuristic)
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++# ── WHICH CONTAINER DO THESE NUMBERS BELONG TO? (#1537) ───────────────────────
++# The card named the wrong container, and so reported the wrong GPUs and the
++# wrong drafter. The old line was
++#     docker ps | grep -m1 -E 'vllm-(qwen|gemma)'
++# which (a) never finds an SGLang container — VRAM then summed EVERY card on the
++# rig (the #1502 gate, decided by a neighbour's memory) and the spec field read
++# "spec ?" — and (b) takes whichever vllm-* matches FIRST no matter which endpoint
++# is being probed, so on a rig serving vLLM and SGLang side by side the card for
++# the SGLang server was drawn from the vLLM container.
++#
++# This probe measures $URL, so the container is whichever publishes $URL's HOST
++# PORT. The name fallback is engine-agnostic and comes from
++# scripts/lib/club-containers.sh — registry-derived, so a new engine is covered
++# the moment its slug lands, instead of being forgotten by a hardcoded prefix list
++# (which is the whole defect that file exists to kill). It is reached only when
++# the URL cannot be matched: a port-less or remote URL, or an endpoint docker
++# cannot read.
++#
++# ⚠️ Still empty ⇒ every GPU on the host is in scope, and the probe says so out
++# loud rather than quietly summing the rig (#1502).
++_url_port() {  # the HOST port in a URL ('' when it has none)
++  local u="${1:-}" p
++  u="${u#*://}"; u="${u%%/*}"; u="${u##*@}"
++  [[ "$u" == *:* ]] || { echo ""; return; }
++  # A bare IPv6 literal (`http://[::1]/v1`) ends in `]` — its colons are not a port.
++  case "$u" in *\]) echo ""; return ;; esac
++  p="${u##*:}"
++  [[ "$p" =~ ^[0-9]+$ ]] && echo "$p" || echo ""
++}
++
++# the running container publishing HOST port $1 (docker ps `name|ports` column:
++# `0.0.0.0:8142->30000/tcp, [::]:8142->30000/tcp` — match the LEFT side)
++_container_for_port() {
++  local port="${1:-}" line
++  [[ -n "$port" ]] || return 0
++  while IFS= read -r line; do
++    [[ -n "$line" && "$line" == *\|* ]] || continue
++    if command grep -qE "(^|[^0-9])${port}->" <<<"${line#*|}"; then
++      echo "${line%%|*}"; return 0
++    fi
++  done < <(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null || true)
++  return 0
++}
++
++# The container the probe's numbers belong to: $URL's publisher, else the first
++# running club-3090 engine container (any engine), else empty = rig-wide.
++_detect_container() {
++  local c=""
++  c="$(_container_for_port "$(_url_port "$URL")")"
++  [[ -n "$c" ]] && { echo "$c"; return; }
++  if [[ -z "${_CLUB_CONTAINERS_SOURCED:-}" ]]; then   # :- for function-level extraction in tests
++    if [[ -f "${ROOT_DIR}/scripts/lib/club-containers.sh" ]]; then
++      # shellcheck source=lib/club-containers.sh
++      source "${ROOT_DIR}/scripts/lib/club-containers.sh"
++    fi
++    _CLUB_CONTAINERS_SOURCED=1
++  fi
++  if command -v club_running_container >/dev/null 2>&1; then
++    c="$(club_running_container 2>/dev/null || true)"
++  fi
++  echo "$c"
++}
++_CLUB_CONTAINERS_SOURCED=""
++
++CONTAINER_PINNED="${CONTAINER:+1}"          # an explicit CONTAINER always wins
++CONTAINER="${CONTAINER:-$(_detect_container)}"
++if [[ -n "$CONTAINER" ]]; then
++  echo "[concurrency-probe] container=$CONTAINER"
++else
++  echo "[concurrency-probe] WARNING: no container resolved for ${URL} — VRAM and the GPU" \
++       "label below cover EVERY GPU on the host (#1502). Pass CONTAINER=<name> to scope them." >&2
++fi
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ _served_seqs()   { _container_cmd | command grep -oE 'max-num-seqs [0-9]+'  | command grep -oE '[0-9]+' | head -1; }
+@@ -230,14 +302,21 @@ _gpu_fp() {
+   CONTAINER="$CONTAINER" python3 "$PROBE_PY" --gpu-label 2>/dev/null || echo "? GPU"
+ }
+ 
++# The drafter label for the card, e.g. "MTP n=4".
++#
++# ⚠️ This is NOT a `grep` of the container Cmd (#1537). The flag is not there:
++# every club-3090 vLLM compose builds `--speculative-config` inside its ENTRYPOINT
++# script from SPEC_N (compose puts `entrypoint:` in .Config.Entrypoint, so the Cmd
++# only ever holds the `command:` half), and the SGLang composes keep the flags in
++# a `"${SPEC[@]}"` array with the depth in `${SPEC_N:-4}`. Grepping the Cmd, the
++# reference rig printed "spec off" over an MTP n=4 server. The library reads what
++# the ENGINE applied (its startup dump), then what the container RECEIVED
++# (Entrypoint + Cmd + Env, resolving the depth the launch script resolves it) and
++# falls back to the compose's own `[spec]` log line — see spec_fingerprint().
+ _spec_fp() {
+-  local cmd
+-  cmd="$(_container_cmd)"
+-  if [[ -z "$cmd" ]]; then echo "spec ?"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'num-speculative|speculative-config|--speculative'; then echo "MTP"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
+-  echo "spec off"
++  local fp
++  fp="$(CONTAINER="$CONTAINER" python3 "$PROBE_PY" --spec-fp 2>/dev/null || true)"
++  printf '%s\n' "${fp:-spec ?}"
+ }
+ 
+ # --- per-rig #249 record: self-tee stdout so the per-N `RESULT` lines (whichever
+@@ -560,7 +639,7 @@ PY
+   else engine=""
+   fi
+   MODEL="$MODEL" SLUG="${SLUG:-}" SPEC="$(_spec_fp)" GPUS="$(_gpu_fp)" \
+-  KV_TOKENS="${KV_TOKENS:-}" SLOTS="${slots:-}" GEN_TOKENS="$GEN_TOKENS" \
++  CONTAINER="$CONTAINER" KV_TOKENS="${KV_TOKENS:-}" SLOTS="${slots:-}" GEN_TOKENS="$GEN_TOKENS" \
+   CACHE_LABEL="$cache_label" ENGINE="$engine" SERVED_MAX_LEN="${max_len:-}" \
+   PROBE_LIBDIR="$ROOT_DIR/scripts/lib" \
+   python3 - "$cells_jsonl" "$rec_json" <<'PY'
+@@ -581,6 +660,9 @@ rec = {
+     "slug": os.environ.get("SLUG") or "",
+     "spec": os.environ.get("SPEC") or "spec ?",
+     "gpus": os.environ.get("GPUS") or "? GPU",
++    # Which container the GPU set, the VRAM total and the drafter were read from
++    # (#1537); empty when nothing could be resolved (the numbers are then rig-wide).
++    "container": os.environ.get("CONTAINER") or "",
+     "kv_tokens": int(kv) if kv and str(kv).isdigit() else None,
+     "slots": int(slots) if slots and str(slots).isdigit() else None,
+     "served_max_len": int(served) if served and str(served).isdigit() else None,
+@@ -650,6 +732,17 @@ if [[ -n "$SWEEP" ]]; then
+       sleep 2
+     done
+     if [[ "$ready" != "1" ]]; then echo "[sweep] N=$N: not ready in ${BOOT_TIMEOUT}s — skipping"; continue; fi
++    # Re-resolve the CONTAINER after the boot too, when the caller did not pin it:
++    # this arm is a different container than whatever was serving before the
++    # switch (#1537 — the card is drawn from the container, so a stale name is a
++    # stale GPU set and a stale drafter on every arm of the sweep).
++    if [[ -z "$CONTAINER_PINNED" ]]; then
++      re="$( _detect_container || true)"
++      if [[ -n "$re" && "$re" != "$CONTAINER" ]]; then
++        echo "[sweep] container: $re (re-resolved post-boot; was: ${CONTAINER:-none})"
++        CONTAINER="$re"
++      fi
++    fi
+     # Re-resolve the served model AFTER the boot. The top-of-script autodetect
+     # ran BEFORE the sweep booted anything on $URL, so it silently fell back to
+     # the default — which 404s every request against any other model (the whole
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 4a75db5..3407506 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -417,6 +417,375 @@ def gpu_label(selectors=None):
+         name = re.sub(r"^NVIDIA ", "", r["name"])
+         names[name] = names.get(name, 0) + 1
+     return " + ".join(f"{n}× {name}" for name, n in names.items())
++# ── which drafter the container is running (#1537) ────────────────────────────
++# The card said "spec off" on a rig serving MTP n=4. The old check grepped the
++# container's `.Config.Cmd` for `--speculative-config`, and that flag is NOT in
++# the Cmd: every club-3090 vLLM compose builds it inside its ENTRYPOINT script
++# from SPEC_N (`SPEC_ARGS=(--speculative-config "{…"num_speculative_tokens":$_spec_n…}")`),
++# and compose maps `entrypoint:` to `.Config.Entrypoint` — so the Cmd carries
++# only the `command:` half of the launch. The SGLang composes invert the split:
++# the whole launch script IS the Cmd, the flags sit in a `"${SPEC[@]}"` array and
++# the depth in `${SPEC_N:-4}`, so neither the method nor n can be read off a flat
++# flag list either. Read, in decreasing order of authority:
++#   1. what the ENGINE applied — its own startup dump (`non-default args:` for
++#      vLLM, `server_args=` for SGLang, the same two dumps run_context.py reads).
++#      A dump that parsed and named no drafter IS a real "spec off", not a gap.
++#   2. what the container RECEIVED — `.Config.Entrypoint` + `.Config.Cmd` +
++#      `.Config.Env`, resolving the depth the way the launch script resolves it:
++#      env SPEC_N when non-empty, else the script's own `${SPEC_N:-4}` default, so
++#      the default is read from the compose that ships it instead of being
++#      hardcoded here (test-spec-depth-default-drift.sh: those defaults differ);
++#   3. the COMPOSE's own verdict, the `[spec] drafter ON - mtp n=4` line its
++#      entrypoint echoes into the log — same authority as (2), reached only when
++#      `docker inspect` says nothing (its method names are matched by a
++#      vocabulary, so it reads after the argv it describes).
++# Absence of evidence stays distinguishable from evidence of absence: "spec ?"
++# when nothing was readable, "spec off" when a launch was read and carries none.
++SPEC_OFF = "spec off"
++SPEC_UNKNOWN = "spec ?"
++
++# Engine method names -> the label this repo prints them under. Anything else is
++# echoed upper-cased rather than dropped: a drafter this file has never heard of
++# must still read as a drafter on the card.
++SPEC_METHOD_LABELS = {
++    "mtp": "MTP",
++    "eagle": "EAGLE", "eagle1": "EAGLE", "eagle2": "EAGLE", "eagle3": "EAGLE3",
++    "dflash": "DFlash", "dflash2": "DFlash2", "dspark": "DSpark",
++    "ngram": "ngram", "medusa": "Medusa", "standalone": "Standalone",
++}
++# Longest first: `dflash2` must not match as `dflash`, `eagle3` not as `eagle`.
++SPEC_METHOD_WORDS = sorted(SPEC_METHOD_LABELS, key=len, reverse=True)
++
++
++def _spec_label(method, n=None):
++    """'mtp'/4 -> 'MTP n=4'; a method this table does not know is upper-cased."""
++    if method is None:
++        return ""
++    raw = str(method).strip().strip("'\"{}")
++    if raw.lower().startswith("draft-"):
++        raw = raw[len("draft-"):]                       # llama.cpp: draft-mtp
++    if not raw:
++        return ""
++    label = SPEC_METHOD_LABELS.get(raw.lower(), raw.upper())
++    n = "" if n is None else str(n).strip().strip("'\"")
++    return f"{label} n={n}" if re.fullmatch(r"[0-9]+", n or "") else label
++
++
++def _dump_value(line, key):
++    """One value out of an engine startup dump, from either dump shape.
++
++    vLLM prints a dict literal (`'speculative_config': {'method': 'mtp', …}`),
++    SGLang a dataclass repr (`speculative_algorithm='EAGLE'`); the key is quoted
++    in the first and bare in the second. Regex rather than a dict parse so a line
++    truncated mid-dump still yields what it carries.
++    """
++    m = re.search(r"['\"]?\b%s\b['\"]?\s*[:=]\s*['\"]?([^,'\"})\s]+)" % re.escape(key),
++                  line or "")
++    return m.group(1).strip() if m else None
++
++
++def _last_line(text, marker):
++    """The LAST line of `text` carrying `marker` ("" when there is none).
++
++    `docker logs` of a restarted container holds every boot, and SPEC_N is a HOST
++    env var — so an older boot can name a different drafter than the one serving.
++    Every reader below scans the single line it is given, which is what makes
++    "the newest boot wins" the rule.
++    """
++    for ln in reversed((text or "").splitlines()):
++        if marker in ln:
++            return ln
++    return ""
++
++
++def spec_from_engine_dump(text):
++    """What the ENGINE says it applied — 'MTP n=4' / 'spec off' / "" (no dump)."""
++    text = text or ""
++    line = _last_line(text, "non-default args:")        # vLLM
++    if line:
++        if "speculative_config" in line:
++            lab = _spec_label(_dump_value(line, "method"),
++                              _dump_value(line, "num_speculative_tokens"))
++            if lab:
++                return lab
++        if "{" in line:
++            return SPEC_OFF       # vLLM printed its config; no drafter is in it
++    line = _last_line(text, "server_args=")             # SGLang
++    if line:
++        algo = _dump_value(line, "speculative_algorithm")
++        if algo and algo.lower() not in ("none", ""):
++            # The depth the compose calls SPEC_N is --speculative-num-steps.
++            # num_draft_tokens is steps+1 (it counts the token being verified).
++            n = _dump_value(line, "speculative_num_steps")
++            if n in (None, ""):
++                n = _dump_value(line, "speculative_num_draft_tokens")
++            return _spec_label(algo, n) or "spec on"
++        if "ServerArgs" in line or "server_args={" in line:
++            return SPEC_OFF
++    return ""
++
++
++def spec_from_echo(text):
++    """The compose's own verdict, echoed by its entrypoint into the container log:
++
++        [spec] drafter ON - mtp n=4, draft sampling probabilistic    (vLLM)
++        [spec] native MTP ON (n=4)                                   (SGLang)
++        [spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative …  (both)
++
++    The LAST `[spec]` line wins (see _last_line). "" when the log has none — an
++    engine whose log scrolled past the boot, or a compose with no drafter toggle.
++    """
++    line = _last_line(text or "", "[spec]")
++    if not line:
++        return ""
++    if re.search(r"\bON\b", line):
++        n = re.search(r"\bn[ =]?=?\s*([0-9]+)", line)
++        for word in SPEC_METHOD_WORDS:
++            if re.search(r"\b%s\b" % re.escape(word), line, re.I):
++                return _spec_label(word, n.group(1) if n else None)
++        return "spec on"
++    if re.search(r"\bOFF\b", line):
++        return SPEC_OFF
++    return ""
++
++
++def _script_default(text, var):
++    """What a launch script falls back to for `${VAR:-<default>}`, following a
++    nested chain (`${SPEC_N:-${NUM_SPEC_TOKENS:-3}}`, the multi-card composes) the
++    way the shell does — every club-3090 entrypoint writes the default inline.
++    None when the text alone cannot know it (a bare `${SPEC_N}`)."""
++    body = text or ""
++    m = re.search(r"\$\{\s*" + re.escape(var) + r"\s*:-", body)
++    if not m:
++        return None
++    start, depth, i = m.end(), 1, m.end()
++    while i < len(body) and depth:
++        if body[i] == "{":
++            depth += 1
++        elif body[i] == "}":
++            depth -= 1
++        i += 1
++    default = body[start:i - 1].strip().strip('"').strip("'").strip()
++    if re.fullmatch(r"[0-9]+", default):
++        return int(default)
++    nested = re.match(r"\s*\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:-", default)
++    if nested:
++        return _script_default(default, nested.group(1))
++    return None
++
++
++def _spec_depth(text, env=None):
++    """The drafter depth a launch script would compute, or None.
++
++    Exactly how those scripts compute it: SPEC_N from the environment when it is
++    non-empty — the composes forward it BARE, so an unset host var arrives as the
++    empty string and the script's own default applies — `SPEC=off` forcing 0, and
++    otherwise `${SPEC_N:-<default>}`. The default is read from the compose that
++    ships it, never hardcoded here: the shipped depths run 1 through 7
++    (test-spec-depth-default-drift.sh guards the composes against drifting apart).
++    """
++    env = env or {}
++    raw = (env.get("SPEC_N") or "").strip()
++    if re.fullmatch(r"[0-9]+", raw):
++        return int(raw)
++    # A non-numeric SPEC_N hard-errors in every entrypoint (`exit 1`), so there is
++    # no honest depth in it — fall through to the script's own default.
++    if (env.get("SPEC") or "").strip().lower() in ("off", "false", "no", "0"):
++        return 0
++    for target in ("_spec_n", "_n", "spec_n"):
++        m = re.search(r"\b%s\s*=\s*"\s*\$\{\s*SPEC_N\s*:-" % target, text or "")
++        if m:
++            return _script_default(text[m.start():], "SPEC_N")
++    return _script_default(text, "SPEC_N")
++
++
++def _flag_value(body, *flags):
++    """A launch flag's value, with `${VAR:-value}` resolved the way the shell
++    resolves it (the prism compose passes `--spec-type "${SPEC_TYPE:-draft-mtp}"`).
++    None when the flag is absent, or when its value is a variable with no default
++    (`"$_spec_n"`) — the caller then falls back to _spec_depth.
++    """
++    for flag in flags:
++        m = re.search(r"--%s[\s=]+(\S+)" % re.escape(flag), body or "")
++        if not m:
++            continue
++        tok = m.group(1).strip().strip('"').strip("'").strip("\\").strip()
++        nested = re.match(r"^\$\{[A-Za-z_][A-Za-z0-9_]*:-(.*)\}$", tok)
++        if nested:
++            tok = nested.group(1).strip().strip('"').strip("'")
++        if not tok or tok.startswith(("$", "%", ")")):
++            return None
++        return tok
++    return None
++
++
++def _flag_int(body, *flags):
++    val = _flag_value(body, *flags)
++    return val if val is not None and re.fullmatch(r"[0-9]+", val) else None
++
++
++def spec_from_launch(text, env=None):
++    """'MTP n=4' from what the container received (Entrypoint + Cmd), or "".
++
++    ⚠️ Comment lines AND echo lines are dropped before extracting anything. Both
++    name flags in prose: the composes document "`--speculative-draft-model-
++    quantization` IS LOAD-BEARING" in comments — resolved_config.py strips them
++    for the same reason — and they echo the drafter's removal message, which
++    contains the literal text `--spec-type flags emitted`. Read as a flag, the
++    sentence announcing that a drafter was REMOVED reports a drafter.
++    """
++    text = text or ""
++    if not text.strip():
++        return ""
++    body = "\n".join(ln for ln in text.splitlines()
++                      if not re.match(r"\s*(#|echo\b|printf\b)", ln))
++    depth = _spec_depth(body, env)
++    if depth == 0:
++        # The flags live behind `if [ "$_spec_n" -gt 0 ]`, so a depth of 0 is the
++        # drafter being OFF even though the flag text is still in the script.
++        return SPEC_OFF
++    n = str(depth) if depth is not None else None
++
++    if "--speculative-config" in body:                                     # vLLM
++        cfg = re.search(r"--speculative-config[\s=]+(.*)", body)
++        blob = (cfg.group(1) if cfg else body).lower()
++        method = re.search(r'\\?"method\\?"\s*:\s*\\?"([a-z0-9_.-]+)', blob)
++        tok = re.search(r'\\?"num_speculative_tokens\\?"\s*:\s*\\?"?([0-9]+)', blob)
++        return _spec_label(method.group(1) if method else None,
++                           tok.group(1) if tok else n) or "spec on"
++    if "--speculative-algorithm" in body:                                   # SGLang
++        algo = _flag_value(body, "speculative-algorithm")
++        steps = _flag_int(body, "speculative-num-steps")
++        if steps is None:
++            steps = _flag_int(body, "speculative-num-draft-tokens")
++        return _spec_label(algo, steps or n) or "spec on"
++    kind = _flag_value(body, "spec-type")                          # llama.cpp family
++    if kind:
++        return _spec_label(kind, _flag_int(body, "spec-draft-n-max") or n) or "spec on"
++    if re.search(r"--spec\w*|--model-draft|--draft\b|(^|\s)-md(\s|$)", body, re.I):
++        # A drafter with no flag shape this file knows. Only words that name a
++        # DRAFTER and never a main model may be trusted by substring — `mtp`
++        # appears in main-model filenames (`…-MTP-Q8_0.gguf`), and the old Cmd
++        # grep read one of those as a drafter on a spec-off server.
++        for word in ("dflash2", "dflash", "dspark", "ngram"):
++            if word in body.lower():
++                return _spec_label(word, n)
++        return "spec on"
++    return ""
++
++
++def _container_launch(container):
++    """(.Config.Entrypoint + .Config.Cmd as one text, .Config.Env as a dict).
++
++    ⚠️ Entrypoint AND Cmd. Reading only the Cmd is the #1537 bug: the vLLM
++    composes' `entrypoint:` is where the drafter flag is built, and compose puts
++    it in `.Config.Entrypoint`, never in `.Config.Cmd`.
++    """
++    if not container:
++        return "", {}
++    cfg = {}
++    try:
++        out = subprocess.run(["docker", "inspect", container],
++                             capture_output=True, text=True, encoding="utf-8",
++                             errors="replace", timeout=15)
++        info = json.loads(out.stdout)[0]
++        cfg = (info.get("Config") or {}) if isinstance(info, dict) else {}
++    except Exception:
++        # A bare inspect that will not parse (a warning line ahead of the JSON, a
++        # deprecated-flag notice on stdout) still yields the two fields this needs.
++        argv = []
++        for key in ("Entrypoint", "Cmd"):
++            try:
++                out = subprocess.run(
++                    ["docker", "inspect", container, "--format",
++                     "{{join .Config.%s \" \"}}" % key],
++                    capture_output=True, text=True, encoding="utf-8",
++                    errors="replace", timeout=15)
++                if out.returncode == 0 and out.stdout.strip() and "template parsing" not in out.stderr:
++                    argv.append(out.stdout.strip())
++            except Exception:
++                pass
++        if not argv:
++            return "", {}
++        return "\n".join(argv), _container_env(container)
++    argv = []
++    for key in ("Entrypoint", "Cmd"):
++        val = cfg.get(key) or []
++        if isinstance(val, str):
++            val = [val]
++        argv += [str(x) for x in val]
++    env = {}
++    for entry in cfg.get("Env") or []:
++        key, sep, value = str(entry).partition("=")
++        if sep:
++            env[key] = value
++    return "\n".join(argv), env
++
++
++def _container_env(container):
++    """.Config.Env as a dict (the fallback path of _container_launch)."""
++    env = {}
++    try:
++        out = subprocess.run(
++            ["docker", "inspect", container, "--format",
++             "{{range .Config.Env}}{{println .}}{{end}}"],
++            capture_output=True, text=True, encoding="utf-8",
++            errors="replace", timeout=15)
++    except Exception:
++        return env
++    for line in (out.stdout or "").splitlines():
++        key, sep, value = line.partition("=")
++        if sep:
++            env[key] = value
++    return env
++
++
++def boot_log(container, tail=4000):
++    """The container's log, bounded — never an unbounded `docker logs` slurp.
++
++    The engine dumps and the entrypoint's `[spec]` line are at the HEAD of the
++    log, and a long-lived engine's log is hundreds of megabytes, so read a
++    bounded prefix with resolved_config's helper (it also handles a log driver
++    that is not json-file); fall back to a tail when that helper is unavailable.
++    """
++    if not container:
++        return ""
++    try:
++        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++        from resolved_config import _boot_log_prefix
++        text, _truncated, _err = _boot_log_prefix(container)
++        if text:
++            return text
++    except Exception:
++        pass
++    try:
++        out = subprocess.run(["docker", "logs", "--tail", str(tail), container],
++                             capture_output=True, text=True, encoding="utf-8",
++                             errors="replace", timeout=30)
++        return (out.stdout or "") + (out.stderr or "")
++    except Exception:
++        return ""
++
++
++def spec_fingerprint(container=""):
++    """One-line drafter label for the card: 'MTP n=4', 'EAGLE n=4', 'DFlash',
++    'ngram', 'spec off', or 'spec ?' when nothing readable was found.
++    """
++    launch, env = _container_launch(container)
++    log = boot_log(container) if container else ""
++    # ⚠️ The launch argv is read BEFORE the `[spec]` line: both state what the
++    # compose DECLARED, but the argv yields method + depth structurally while the
++    # line is free text matched against a vocabulary — and the two composes of one
++    # model word the same drafter differently (SGLang's entrypoint prints
++    # "native MTP ON" while passing `--speculative-algorithm EAGLE`). The line is
++    # the fallback for the case where only the log is readable.
++    for found in (spec_from_engine_dump(log), spec_from_launch(launch, env),
++                  spec_from_echo(log)):
++        if found:
++            return found
++    return SPEC_UNKNOWN if not (launch or log) else SPEC_OFF
++
++
+ 
+ 
+ def parse_result_line(line):
+@@ -900,8 +1269,12 @@ def _fnum(v):
+ def render_card(record):
+     """Unicode card. record is the JSON object written by --sweep."""
+     model = record.get("model") or "?"
+-    spec = record.get("spec") or "spec off"
++    # An absent spec field is UNKNOWN, not "spec off" (#1537): the card that read
++    # `spec off` over an unreadable container is how a rig running MTP n=4 got
++    # published as serving no drafter at all.
++    spec = record.get("spec") or SPEC_UNKNOWN
+     gpus = record.get("gpus") or "?"
++    container = record.get("container") or ""
+     kv = record.get("kv_tokens")
+     slots = record.get("slots")
+     gen = record.get("gen_tokens") or 256
+@@ -958,6 +1331,10 @@ def render_card(record):
+     out.append(row_line())
+     out.append(row_line(f"{ident} · {spec}"[: inner_w - 4]))
+     out.append(row_line(f"{gpus} · {kv_s} · {slot_s}"))
++    if container:
++        # Which container the VRAM total, the GPU label and the drafter came from
++        # (#1537) — without it a card cannot be told apart from a rig-wide read.
++        out.append(row_line(f"container {container}"[: inner_w - 4]))
+     if by_ctx:
+         ctx_span = (
+             f"{fmt_ctx(min(by_ctx))}–{fmt_ctx(max(by_ctx))} in / {gen} out · cache {cache}"
+@@ -1200,8 +1577,13 @@ def main(argv=None):
+     p.add_argument("--detect-kv", action="store_true")
+     p.add_argument("--gpu-label", action="store_true",
+                    help="'N× <GPU name>' for the GPUs $CONTAINER sees (every GPU when it can't be resolved)")
++    p.add_argument("--spec-fp", action="store_true",
++                   help="drafter label for $CONTAINER ('MTP n=4' / 'spec off' / 'spec ?')")
+     args = p.parse_args(argv)
+ 
++    if args.spec_fp:
++        print(spec_fingerprint(_env("CONTAINER")))
++        return 0
+     if args.gpu_label:
+         print(gpu_label(container_gpus(_env("CONTAINER"))[0]))
+         return 0
+diff --git a/scripts/tests/test-concurrency-probe.sh b/scripts/tests/test-concurrency-probe.sh
+index ba69a32..f7d0983 100755
+--- a/scripts/tests/test-concurrency-probe.sh
++++ b/scripts/tests/test-concurrency-probe.sh
+@@ -263,4 +263,139 @@ got="$(PATH="$GPU_STUB:$PATH" CONTAINER=pinned-ids python3 "$LIB" --gpu-label)"
+ rm -rf "$GPU_STUB"
+ echo "  ✓ VRAM + GPU label scoped to the container's GPUs (ids, UUIDs, NVIDIA_VISIBLE_DEVICES; rig-wide fallback)"
+ 
++
++# 13. #1537 (1): the card names the right CONTAINER. The old
++#     `docker ps | grep -m1 -E 'vllm-(qwen|gemma)'` never found an SGLang
++#     container, and on a rig serving two engines it took whichever vllm-* matched
++#     first whatever the URL was. The probe measures $URL, so the container is the
++#     one PUBLISHING $URL's host port.
++SPEC_STUB="$(mktemp -d)"
++cat > "$SPEC_STUB/docker" <<'DOCK'
++#!/usr/bin/env bash
++[ "$1" = ps ] || exit 0
++fmt="$3"
++case "$fmt" in
++  '{{.Names}}')
++    printf 'sglang-qwen38-27b-mtp-dual\nvllm-qwen38-27b-dual-fast\n' ;;
++  '{{.Names}}|{{.Ports}}')
++    printf 'sglang-qwen38-27b-mtp-dual|0.0.0.0:8142->30000/tcp, [::]:8142->30000/tcp\n'
++    printf 'vllm-qwen38-27b-dual-fast|0.0.0.0:8113->8000/tcp, [::]:8113->8000/tcp\n' ;;
++  *) printf 'sglang-qwen38-27b-mtp-dual\nvllm-qwen38-27b-dual-fast\n' ;;
++esac
++DOCK
++chmod +x "$SPEC_STUB/docker"
++cp_fn() { awk -v n="$1" '$0 ~ "^"n"\\(\\)" {f=1} f{print} f&&/^\}$/ {exit}' "$PROBE"; }
++eval "$(cp_fn _url_port)"; eval "$(cp_fn _container_for_port)"; eval "$(cp_fn _detect_container)"
++export ROOT_DIR
++[[ "$(_url_port http://localhost:8142)" == "8142" ]]   || fail "_url_port: host port of http://localhost:8142"
++[[ "$(_url_port http://127.0.0.1:8113/v1)" == "8113" ]] || fail "_url_port: port with a path"
++[[ "$(_url_port 'http://[::1]:8113')" == "8113" ]]   || fail "_url_port: IPv6 literal with a port"
++[[ -z "$(_url_port 'http://[::1]/v1')" ]]               || fail "_url_port: an IPv6 literal without a port has no port"
++[[ -z "$(_url_port http://example.com/v1)" ]]           || fail "_url_port: a port-less URL has no port"
++got="$(PATH="$SPEC_STUB:$PATH" _container_for_port 8113)"
++[[ "$got" == "vllm-qwen38-27b-dual-fast" ]] || fail "_container_for_port 8113: got '$got'"
++got="$(PATH="$SPEC_STUB:$PATH" _container_for_port 8142)"
++[[ "$got" == "sglang-qwen38-27b-mtp-dual" ]] || fail "_container_for_port 8142 (the SGLang server): got '$got'"
++got="$(PATH="$SPEC_STUB:$PATH" URL=http://127.0.0.1:8142 _detect_container)"
++[[ "$got" == "sglang-qwen38-27b-mtp-dual" ]] \
++  || fail "a probe aimed at the SGLang port must scope to the SGLang container: got '$got'"
++# A URL nothing publishes (no port at all, a remote endpoint) still lands on the
++# engine-agnostic name set — the vLLM-only grep is what left SGLang unfound.
++got="$(PATH="$SPEC_STUB:$PATH" URL=http://rig.internal:9000 _detect_container)"
++[[ "$got" == "sglang-qwen38-27b-mtp-dual" || "$got" == "vllm-qwen38-27b-dual-fast" ]] \
++  || fail "an unmatchable URL must still resolve an engine container (any engine): got '$got'"
++command grep -vE '^[[:space:]]*#' "$PROBE" | command grep -q "vllm-(qwen|gemma)" \
++  && fail "the hardcoded vllm-(qwen|gemma) container grep is back (it forgets every other engine)"
++rm -rf "$SPEC_STUB"
++echo "  ✓ container resolved from the URL's published port, engine-agnostic fallback (#1537)"
++
++# 14. #1537 (2): the card names the right DRAFTER. The vLLM composes build
++#     --speculative-config inside their ENTRYPOINT script from SPEC_N, so the flag
++#     never appears in .Config.Cmd — grepping the Cmd read "spec off" over an MTP
++#     n=4 server. The SGLang composes keep the flags in a "${SPEC[@]}" array with
++#     the depth in ${SPEC_N:-4}.
++SPEC_STUB="$(mktemp -d)"
++cat > "$SPEC_STUB/docker" <<'DOCK'
++#!/usr/bin/env bash
++[ "$1" = inspect ] || exit 0
++case "$2" in
++  vllm-entrypoint-spec)
++    cat <<'JSON'
++[{"Config":{"Image":"vllm/vllm-openai:v0.30.0",
++ "Cmd":["--model","/root/.cache/huggingface/qwen3.8-27b-autoround-int4","--max-num-seqs","8","--max-model-len","262144"],
++ "Entrypoint":["bash","-c","set -e\n_spec_n=\"${SPEC_N:-4}\"\ncase \"${SPEC:-}\" in off|0) _spec_n=0 ;; esac\nSPEC_ARGS=()\nif [ \"$_spec_n\" -gt 0 ]; then\n  SPEC_ARGS=(--speculative-config \"{\\\"method\\\":\\\"mtp\\\",\\\"num_speculative_tokens\\\":$_spec_n}\")\nfi\nexec vllm serve \"$@\" \"${SPEC_ARGS[@]}\"\n","--"],
++ "Env":["PATH=/usr/local/bin:/bin","SPEC_N=","SPEC=","NVIDIA_VISIBLE_DEVICES=0,1"]}}]
++JSON
++    ;;
++  vllm-entrypoint-spec-off)
++    cat <<'JSON'
++[{"Config":{"Image":"vllm/vllm-openai:v0.30.0",
++ "Cmd":["--model","/models/x","--max-num-seqs","8"],
++ "Entrypoint":["bash","-c","_spec_n=\"${SPEC_N:-4}\"\nSPEC_ARGS=(--speculative-config \"{\\\"method\\\":\\\"mtp\\\",\\\"num_speculative_tokens\\\":$_spec_n}\")\nexec vllm serve \"$@\" \"${SPEC_ARGS[@]}\"\n","--"],
++ "Env":["SPEC_N=0"]}}]
++JSON
++    ;;
++  sglang-script-cmd)
++    cat <<'JSON'
++[{"Config":{"Image":"lmsysorg/sglang:v0.5.21",
++ "Cmd":["set -euo pipefail\n_n=\"${SPEC_N:-4}\"\nSPEC=()\nif [ \"$_n\" -gt 0 ]; then\n  SPEC=(--speculative-algorithm EAGLE --speculative-draft-model-path \"$M\" --speculative-num-steps \"$_n\" --speculative-num-draft-tokens $((_n + 1)))\nfi\nexec python3 -m sglang.launch_server --model-path $M --max-running-requests 2 \"${SPEC[@]}\"\n"],
++ "Entrypoint":["/bin/bash","-c"],
++ "Env":["SPEC_N=","NVIDIA_VISIBLE_DEVICES=all"]}}]
++JSON
++    ;;
++  llama-flat-cmd)
++    cat <<'JSON'
++[{"Config":{"Image":"ggml-org/llama.cpp",
++ "Cmd":["llama-server","-m","/models/x.gguf","--spec-type","draft-mtp","--spec-draft-model","/models/d.gguf","--spec-draft-n-max","3"],
++ "Entrypoint":null,"Env":["NVIDIA_VISIBLE_DEVICES=0"]}}]
++JSON
++    ;;
++  specless)
++    cat <<'JSON'
++[{"Config":{"Image":"vllm/vllm-openai:v0.30.0","Cmd":["vllm","serve","--model","/models/x","--max-num-seqs","4"],"Entrypoint":[],"Env":[]}}]
++JSON
++    ;;
++  *) echo "Error: No such object: $2" >&2; exit 1 ;;
++esac
++DOCK
++chmod +x "$SPEC_STUB/docker"
++spec_fp() { PATH="$SPEC_STUB:$PATH" CONTAINER="$1" python3 "$LIB" --spec-fp; }
++got="$(spec_fp vllm-entrypoint-spec)"
++[[ "$got" == "MTP n=4" ]] \
++  || fail "MTP n=4 built from SPEC_N inside the entrypoint (the #1537 card read 'spec off'): got '$got'"
++[[ "$(spec_fp vllm-entrypoint-spec-off)" == "spec off" ]] \
++  || fail "SPEC_N=0 in the container env must read 'spec off': got '$(spec_fp vllm-entrypoint-spec-off)'"
++[[ "$(spec_fp sglang-script-cmd)" == "EAGLE n=4" ]] \
++  || fail "SGLang flags inside \${SPEC[@]} with the depth in \${SPEC_N:-4}: got '$(spec_fp sglang-script-cmd)'"
++[[ "$(spec_fp llama-flat-cmd)" == "MTP n=3" ]] \
++  || fail "llama.cpp --spec-type draft-mtp keeps working: got '$(spec_fp llama-flat-cmd)'"
++[[ "$(spec_fp specless)" == "spec off" ]] \
++  || fail "a launch that carries no drafter is 'spec off': got '$(spec_fp specless)'"
++[[ "$(spec_fp no-such-container)" == "spec ?" ]] \
++  || fail "an unreadable container must say 'spec ?', never 'spec off': got '$(spec_fp no-such-container)'"
++# the engine's own dump outranks the launch script (it is what was APPLIED), and
++# the shell's card field runs through the library rather than a Cmd grep
++got="$(PATH="$SPEC_STUB:$PATH" python3 - "$LIB" <<'PY'
++import os, sys; sys.path.insert(0, os.path.dirname(sys.argv[1]))
++import concurrency_probe as c
++print(c.spec_from_engine_dump(
++  'non-default args: {"model": "x", "max_num_seqs": 8, "speculative_config": {"method": "dflash", "num_speculative_tokens": 2}}\n'))
++print(c.spec_from_engine_dump('non-default args: {"model": "x", "max_num_seqs": 8}\n'))
++print(c.spec_from_engine_dump('server_args=ServerArgs(model_path="x", speculative_algorithm="DFLASH", speculative_num_steps=3)\n'))
++PY
++)"
++[[ "$(head -1 <<<"$got")" == "DFlash n=2" ]] || fail "engine dump outranks the argv (vLLM): got '$got'"
++[[ "$(sed -n 2p <<<"$got")" == "spec off" ]] || fail "a vLLM dump naming no drafter IS spec off: got '$got'"
++[[ "$(sed -n 3p <<<"$got")" == "DFLASH n=3" || "$(sed -n 3p <<<"$got")" == "DFlash n=3" ]] \
++  || fail "SGLang server_args dump: got '$got'"
++spec_fn="$(awk '/^_spec_fp\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$PROBE")"
++[[ -n "$spec_fn" ]] || fail "_spec_fp() not found in concurrency-probe.sh"
++command grep -q 'container_cmd' <<<"$spec_fn" \
++  && fail "_spec_fp greps the container Cmd again — the drafter flag is in the Entrypoint (#1537)"
++got="$(PROBE_PY="$LIB" CONTAINER=vllm-entrypoint-spec PATH="$SPEC_STUB:$PATH" bash -c "$spec_fn"'
++_spec_fp')"
++[[ "$got" == "MTP n=4" ]] || fail "the card's spec field (_spec_fp) for the entrypoint-script compose: got '$got'"
++rm -rf "$SPEC_STUB"
++echo "  ✓ drafter read from the entrypoint script / engine dump, not the Cmd (#1537)"
++
+ echo "test-concurrency-probe: ok"

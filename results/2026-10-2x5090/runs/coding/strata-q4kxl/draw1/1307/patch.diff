@@ -1,0 +1,55 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..6e407b8 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -1330,7 +1330,11 @@ preflight_compose_deps() {
+     # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+     # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+     # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    # Also exclude `\` — JSON `--speculative-config` writes the drafter path as
++    # `".../gemma-...-assistant\"`, and without excluding backslash the match
++    # consumes the trailing `\`, yielding an unusable subdir ending in `\` and a
++    # false "missing" for every gemma external-drafter slug.
++    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+diff --git a/scripts/tests/test-preflight-compose-deps.sh b/scripts/tests/test-preflight-compose-deps.sh
+index 1a44e11..2167563 100755
+--- a/scripts/tests/test-preflight-compose-deps.sh
++++ b/scripts/tests/test-preflight-compose-deps.sh
+@@ -113,6 +113,33 @@ out="$(run_deps "$vllm_compose" "${TMP_DIR}/models")"
+ [[ -z "$out" ]]
+ 
+ 
++# Escaped-JSON drafter (the gemma external-drafter bug): SPEC_ARGS embeds the
++# drafter path inside escaped JSON `\"...assistant\"`. The trailing backslash
++# used to be captured into the subdir, yielding `gemma-...-assistant\` and a
++# false "missing" no host file could satisfy. Backslash must be a delimiter.
++esc_json_compose="${TMP_DIR}/gemma-escaped.yml"
++cat > "$esc_json_compose" <<'YAML'
++services:
++  vllm:
++    image: vllm/vllm-openai:v0.21.0
++    entrypoint: ["/bin/bash", "-lc"]
++    command:
++      - |
++        SPEC_ARGS=(--speculative-config "{\"model\":\"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\",\"num_speculative_tokens\":4}")
++        exec vllm serve /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit "${SPEC_ARGS[@]}"
++YAML
++mkdir -p "${TMP_DIR}/esc-models/gemma-4-26b-a4b-awq-4bit" "${TMP_DIR}/esc-models/gemma-4-26b-a4b-it-assistant"
++touch "${TMP_DIR}/esc-models/gemma-4-26b-a4b-awq-4bit/config.json" "${TMP_DIR}/esc-models/gemma-4-26b-a4b-it-assistant/config.json"
++out="$(run_deps "$esc_json_compose" "${TMP_DIR}/esc-models")"
++[[ -z "$out" ]]
++# When only the drafter dir is absent, the reported path must NOT carry a backslash.
++mkdir -p "${TMP_DIR}/esc-partial/gemma-4-26b-a4b-awq-4bit"
++touch "${TMP_DIR}/esc-partial/gemma-4-26b-a4b-awq-4bit/config.json"
++out="$(expect_missing "$esc_json_compose" "${TMP_DIR}/esc-partial")"
++assert_contains "$out" "gemma-4-26b-a4b-it-assistant/config.json"
++assert_not_contains "$out" "assistant\\"
++
++
+ extends_base="${TMP_DIR}/base.yml"
+ extends_stub="${TMP_DIR}/stub.yml"
+ cat > "$extends_base" <<'YAML'

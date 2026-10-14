@@ -1,0 +1,9 @@
+{
+  "id": "01-issue-effort-buckets",
+  "source": "session-derived",
+  "category": "triage",
+  "difficulty": "easy",
+  "est_minutes": 10,
+  "needs_web": false,
+  "notes": "Shape from omp sessions in the club-3090 repo and a private notes project: review open issues, bucket by level of effort for a part-time contributor."
+}

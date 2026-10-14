@@ -1,0 +1,12 @@
+photos/IMG_0001.jpg
+photos/IMG_0001.json
+photos/IMG_0002.jpg
+photos/IMG_0002.json
+photos/IMG_0003.jpg
+photos/IMG_0003.json
+photos/IMG_0004.jpg
+photos/IMG_0004.json
+photos/IMG_0005.jpg
+photos/IMG_0005.json
+photos/IMG_0006.jpg
+photos/IMG_0006.json

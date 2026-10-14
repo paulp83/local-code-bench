@@ -1,0 +1,25 @@
+{
+ "n": 1555,
+ "config": "strata-iq4xs-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 1313.8,
+ "steps": 59,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.5,
+ "checks_passed": 14,
+ "localization": 0.667,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 1
+ },
+ "effort_note": "ran as \"low\" but omp sent no reasoning_effort; Qwen3.8 template default xhigh (relabelled 2026-10-12)"
+}

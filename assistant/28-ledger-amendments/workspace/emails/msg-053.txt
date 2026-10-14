@@ -1,0 +1,8 @@
+From: rina@example.net
+Date: 2026-07-22T06:54:00Z
+Subject: ledger amendment
+
+T-03002 should not be on the books; take it out entirely.
+
+Thanks,
+rina

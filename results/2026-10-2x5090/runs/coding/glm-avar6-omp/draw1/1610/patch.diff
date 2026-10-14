@@ -1,0 +1,284 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..d3238b8 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -401,6 +401,80 @@ def service_body(text: str) -> str:
+ # invoke artifacts (as declared in patches.yml / Phase-A-prime
+ # delivery_spec) are present in the service body.
+ # --------------------------------------------------------------------------
++GENERIC_BASENAMES = {
++    "install.sh",
++    "install.py",
++    "apply.py",
++    "apply.sh",
++    "chat_template.jinja",
++    "README.md",
++}
++
++
++def _identity_tokens(rel: str) -> set[str]:
++    """Name(s) that identify *this* patch inside a compose mount source.
++
++    Returns the artifact's own basename when it is distinctive, and/or its
++    patch directory's name when the basename is generic (`install.sh`,
++    `apply.py`, …). Deliberately EXCLUDES the parent-of-a-directory marker
++    (`patches`) the legacy fallback used — every compose that mounts any
++    patch dir contains that string, so it identifies nothing.
++    """
++    path = Path(rel)
++    toks: set[str] = set()
++    name = path.name
++    parent = path.parent.name
++    if name and name not in GENERIC_BASENAMES:
++        toks.add(name)
++    if parent and parent not in GENERIC_BASENAMES and parent != "patches":
++        toks.add(parent)
++    return toks
++
++
++def _patch_source_tokens(patch: dict) -> set[str]:
++    """Every token that identifies this patch's on-disk artifacts."""
++    toks: set[str] = set()
++    for rel in patch.get("files") or []:
++        toks |= _identity_tokens(rel)
++    spec = patch.get("delivery_spec") or {}
++    for key in ("script", "sidecar", "jinja"):
++        if spec.get(key):
++            toks |= _identity_tokens(spec[key])
++    return toks
++
++
++def _mount_sources_for_target(body: str, target: str) -> list[str]:
++    """Host-side source strings of the mount entries whose container-side
++    target is ``target`` — best-effort over short syntax (`- src:dst:ro`,
++    one line) and long syntax (`source:` / `target:` keys, which is what
++    `docker compose config` renders, source and target on separate lines
++    of the same list item)."""
++    sources: list[str] = []
++    lines = body.splitlines()
++    for i, line in enumerate(lines):
++        if target not in line:
++            continue
++        stripped = line.strip()
++        if re.match(r"^(?:-\s+)?target:\s", stripped):
++            # Long syntax: pair with a `source:` key at the same indent
++            # within the same list item.
++            indent = len(line) - len(line.lstrip())
++            for j in range(max(0, i - 8), min(len(lines), i + 8)):
++                if j == i:
++                    continue
++                m = re.match(r"(\s*)(?:-\s+)?source:\s*(\S+)", lines[j])
++                if m and abs(len(m.group(1)) - indent) <= 2:
++                    sources.append(m.group(2))
++        else:
++            # Short syntax: the source is the text between the list
++            # marker and the first `:` that precedes the target.
++            idx = line.find(target)
++            m = re.search(r"-\s*(\S+)\s*$", line[:idx])
++            if m:
++                sources.append(m.group(1))
++    return sources
++
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -437,7 +511,11 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+ 
+     script = spec.get("script")
+     if script:
+-        inv.append(Path(script).name)
++        # Identity tokens only — a generic basename (`install.sh`,
++        # `apply.py`) matches any compose running ANY install script, so
++        # it identifies nothing (the same false-positive class the legacy
++        # fallback shipped).
++        inv.extend(sorted(_identity_tokens(script)))
+ 
+     invoke = spec.get("invoke")
+     # Only treat `invoke` as a literal body marker when it is an actual
+@@ -481,7 +559,26 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+-    vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
++    # Sound (install-script unwiring, 2026-10-14): a mount target alone is
++    # NOT proof — two install-script patches can declare the same
++    # container-side target (`/etc/club3090/w4a8`, …), so a compose that
++    # mounts a DIFFERENT patch's directory at this patch's target must not
++    # count. Pair the target with the mount's host-side SOURCE and require
++    # it to name this patch's own artifacts; if the pairing can't be
++    # parsed, fall back to "this patch's identity token appears anywhere in
++    # the body".
++    src_tokens = sorted(_patch_source_tokens(patch))
++    vol_ok = not vol_markers
++    for marker in vol_markers:
++        if marker not in body:
++            continue
++        paired = _mount_sources_for_target(body, marker)
++        if any(tok in src for tok in src_tokens for src in paired):
++            vol_ok = True
++            break
++        if any(tok in body for tok in src_tokens):
++            vol_ok = True
++            break
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
+ 
+     if wired_at == {"volumes"}:
+@@ -542,13 +639,35 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+ 
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+     # service body, so header/comment ID mentions never match.
++    #
++    # Soundness (install-script unwiring, 2026-10-14): when the entry
++    # declares a `delivery_spec`, `_spec_wiring_present` above ALREADY
++    # answered — skip this fallback entirely. The legacy probes below are
++    # too weak to override it: a directory `files` entry added its parent's
++    # name (always `patches`) as a marker — matched by every compose that
++    # mounts ANY patches/ dir — and a file entry used the bare basename
++    # (`install.sh`), matched by every compose that runs ANY install
++    # script. With a spec present those probes therefore reported an
++    # unwired patch as reached, overriding the sound False.
+     delivery = patch.get("delivery") or {}
+-    if delivery.get("entrypoint_invoke"):
++    spec = patch.get("delivery_spec") or {}
++    wired_at = spec.get("wired_at")
++    if isinstance(wired_at, str):
++        wired_at = [wired_at]
++    wired_at = set(wired_at or [])
++    vol_m, _ = _spec_wiring_markers(patch)
++    # The spec decides UNLESS it claims `volumes` wiring without declaring
++    # any mount target — an under-declared spec cannot answer, and the
++    # (now sound, identity-token) fallback still must.
++    has_spec = bool(spec) and not ("volumes" in wired_at and not vol_m)
++    if delivery.get("entrypoint_invoke") and not has_spec:
+         for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
++            # Identity tokens only: the artifact's own non-generic name,
++            # or (for a generic filename like `install.sh`) its patch
++            # directory's name. The old parent-dir marker (`patches`)
++            # matched any compose mounting any patch dir; a generic
++            # basename matched any compose running any install script.
++            markers = sorted(_identity_tokens(rel))
+             if any(marker in body for marker in markers):
+                 return True
+         if patch["id"] in body:
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 6f4aabf..b71be67 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -200,13 +200,22 @@ if chat_template_patches:
+         reset_child = _tdp / "reset.yml"
+         noextend = _tdp / "noextend.yml"
+         base.write_text(
+-            "services:\n"
+-            "  base-svc:\n"
+-            "    image: scratch\n"
+-            "    command: [--model, m, --chat-template, %s]\n"
+-            "    volumes:\n"
+-            "      - ../../patches/froggeric-chat-template/chat_template.jinja:%s:ro\n"
+-            % (mounted, mounted),
++            (
++                "services:\n"
++                "  base-svc:\n"
++                "    image: scratch\n"
++                "    command: [--model, m, --chat-template, %s]\n"
++                "    volumes:\n"
++                # Mount THIS patch's own vendored artifact — a source
++                # naming a different patch's dir must not satisfy the
++                # source-aware wiring check below.
++                "      - ../../patches/%s:%s:ro\n"
++                % (
++                    mounted,
++                    Path(ctp["delivery_spec"]["jinja"]).parent.name,
++                    mounted,
++                )
++            ),
+             encoding="utf-8",
+         )
+         # (a) Child that KEEPS inheritance (only overrides an env) -> still
+@@ -427,6 +436,82 @@ for patch in patches:
+         errors.append(f"patch {patch.get('id')}: {len(_unlisted)} slug(s) mount its template but are missing "
+                       f"from load_bearing_when (generate_compose would leave the template out): {_unlisted}")
+ 
++
++# ---------------------------------------------------------------------------
++# Install-script unwiring negative control (2026-10-14): for every
++# `delivery.entrypoint_invoke: true` patch, strip its mount + invoke lines
++# from a copy of a load-bearing compose and assert reaches() == False. The
++# legacy fallback used to answer True regardless (a dir entry added its
++# parent's `patches` marker, a file entry the bare `install.sh` basename),
++# overriding the sound delivery_spec check — an unwired patch looked
++# reached. A compose that mounts a DIFFERENT patch at the same in-container
++# target must also stay False.
++# ---------------------------------------------------------------------------
++import tempfile as _tf
++
++for patch in patches:
++    if not ((patch.get("delivery") or {}).get("entrypoint_invoke")):
++        continue
++    lb_composes = [c for lb in patch.get("load_bearing_when") or [] for c in lb.get("composes") or []]
++    if not lb_composes:
++        continue
++    spec = patch.get("delivery_spec") or {}
++    src_tokens = pa._patch_source_tokens(patch)
++    target = spec.get("mounted_at")
++    with _tf.TemporaryDirectory() as _td:
++        _tdp = Path(_td)
++        for compose_name in lb_composes:
++            if compose_name not in COMPOSE_REGISTRY:
++                continue
++            cpath = root / COMPOSE_REGISTRY[compose_name]["compose_path"]
++            text = cpath.read_text(encoding="utf-8")
++            stripped = [
++                ln for ln in text.splitlines()
++                if not (any(t in ln for t in src_tokens) or (target and target in ln))
++            ]
++            stripped_path = _tdp / f"stripped-{compose_name.replace('/', '-')}.yml"
++            stripped_path.write_text("\n".join(stripped), encoding="utf-8")
++            if pa.reaches(root, patch, str(stripped_path)):
++                errors.append(
++                    f"{patch['id']} negative control FAILED: reaches() reported "
++                    f"True on {compose_name} with the patch's mount + invoke "
++                    f"lines removed (legacy fallback overriding the "
++                    f"delivery_spec check)"
++                )
++            # Cross-patch control: mount a DIFFERENT install-script patch's
++            # directory at this patch's target. Source-aware matching must
++            # refuse it.
++            others = [
++                q for q in patches
++                if q["id"] != patch["id"]
++                and ((q.get("delivery") or {}).get("entrypoint_invoke"))
++                and (q.get("delivery_spec") or {}).get("script")
++                and pa._patch_source_tokens(q)
++            ]
++            if target:
++                other = others[0] if others else None
++                if other:
++                    other_dir = Path((other.get("delivery_spec") or {})["script"]).parent
++                    swapped = [
++                        # Swap every mount whose source is this patch's dir
++                        # to the other patch's dir, keeping the target.
++                        ln.replace(
++                            next(iter(src_tokens)),
++                            str(other_dir.name),
++                        )
++                        for ln in stripped
++                    ]
++                    swapped_path = _tdp / f"swapped-{compose_name.replace('/', '-')}.yml"
++                    swapped_path.write_text("\n".join(swapped), encoding="utf-8")
++                    if pa.reaches(root, patch, str(swapped_path)):
++                        errors.append(
++                            f"{patch['id']} cross-patch control FAILED: reaches() "
++                            f"reported True on {compose_name} with a DIFFERENT "
++                            f"patch ({other['id']}) mounted at the same target "
++                            f"{target} (must match the mount's source, not just "
++                            f"the target)"
++                        )
++
+ if known_gaps:
+     print("[patch-attribution] known delivery gaps:")
+     for gap in sorted(known_gaps):

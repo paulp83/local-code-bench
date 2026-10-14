@@ -1,0 +1,89 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 2b0d50f..745c200 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -195,8 +195,28 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# best-effort container for VRAM + cmd introspection (name heuristic)
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++# shellcheck source=lib/club-containers.sh
++source "${ROOT_DIR}/scripts/lib/club-containers.sh"
++
++# best-effort container for VRAM + cmd introspection. Find the SERVING container by
++# its port — the URL's host port first, then any engine-internal port (vLLM 8000 /
++# llama.cpp 8080 / SGLang 30000 / TabbyAPI 5000) — NOT by a model-name heuristic.
++# The old `vllm-(qwen|gemma)` grep matched no SGLang container, so the card reported
++# "spec ?", labelled every GPU on the host and measured VRAM rig-wide (#1537). A
++# caller that pins CONTAINER= wins.
++CONTAINER="${CONTAINER:-$(
++  _cp_ps="$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null || true)"
++  _cp_uport="$(printf '%s' "$URL" | command grep -oE ':[0-9]+' | head -1 | tr -d ':' || true)"
++  _cp_m=""
++  if [[ -n "$_cp_ps" ]]; then
++    if [[ -n "$_cp_uport" ]]; then
++      _cp_m="$(printf '%s\n' "$_cp_ps" | command grep -E "[:.]${_cp_uport}->" | head -1 || true)"
++    fi
++    [[ -n "$_cp_m" ]] || _cp_m="$(printf '%s\n' "$_cp_ps" | club_engine_port_lines | command grep -E "$(club_container_re_loose)" | head -1 || true)"
++    [[ -n "$_cp_m" ]] || _cp_m="$(printf '%s\n' "$_cp_ps" | club_engine_port_lines | head -1 || true)"
++  fi
++  printf '%s' "${_cp_m%%|*}"
++)}"
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ _served_seqs()   { _container_cmd | command grep -oE 'max-num-seqs [0-9]+'  | command grep -oE '[0-9]+' | head -1; }
+@@ -230,13 +250,47 @@ _gpu_fp() {
+   CONTAINER="$CONTAINER" python3 "$PROBE_PY" --gpu-label 2>/dev/null || echo "? GPU"
+ }
+ 
++# The container's command surface from `docker inspect`: the compose `command`
++# (Config.Cmd) AND the entrypoint (Config.Entrypoint). The Qwen3.8 vLLM/SGLang
++# composes build --speculative-config / --speculative-algorithm INSIDE the
++# entrypoint from SPEC_N, so Config.Cmd alone never carries the drafter flag —
++# reading both is what lets _spec_fp see a running drafter (#1537).
++_container_cfg() {
++  docker inspect "$CONTAINER" --format $'{{join .Config.Cmd " "}}\n{{join .Config.Entrypoint " "}}' 2>/dev/null || true
++}
++# The container's environment (Config.Env), one VAR=value per line.
++_container_env() {
++  docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{.}}{{println}}{{end}}' 2>/dev/null || true
++}
++# The engine's ACTUAL running command lines (docker top reads the container /proc):
++# the flags exactly as launched — present only when the drafter is really on. The
++# entrypoint `bash -c <script>` lines are dropped: they carry the compose's literal
++# --speculative-* text regardless of SPEC_N, whereas the process they `exec` into
++# (vllm serve / sglang.launch_server / llama-server) carries the flag only when on.
++_container_procs() {
++  docker top "$CONTAINER" -o pid,cmd 2>/dev/null \
++    | command grep -viE '(^|/)(bash|sh)[[:space:]]' || true
++}
+ _spec_fp() {
+-  local cmd
+-  cmd="$(_container_cmd)"
+-  if [[ -z "$cmd" ]]; then echo "spec ?"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'num-speculative|speculative-config|--speculative'; then echo "MTP"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
++  local procs cfg env hay
++  procs="$(_container_procs)"
++  cfg="$(_container_cfg)"
++  env="$(_container_env)"
++  # Prefer the launched process (ground truth for on/off); fall back to the compose
++  # config (Cmd + Entrypoint) when the process list is unavailable.
++  if [[ -n "$procs" ]]; then
++    hay="$procs"
++  elif [[ -n "$cfg" ]]; then
++    # An explicit off in the container env (SPEC_N=0 / SPEC=off) disables the drafter
++    # even though the entrypoint wires it — the config text alone would read "MTP".
++    if printf '%s' "$env" | command grep -qiE '^(SPEC_N=0|SPEC=(off|OFF|Off|false|no|0))$'; then echo "spec off"; return; fi
++    hay="$cfg"
++  else
++    echo "spec ?"; return
++  fi
++  if printf '%s' "$hay" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
++  if printf '%s' "$hay" | command grep -qiE 'num-speculative|speculative-config|--speculative|speculative-algorithm'; then echo "MTP"; return; fi
++  if printf '%s' "$hay" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
+   echo "spec off"
+ }
+ 

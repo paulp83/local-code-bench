@@ -1,0 +1,200 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..974547e 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -396,6 +396,24 @@ def service_body(text: str) -> str:
+     return "\n".join(body_lines)
+ 
+ 
++# --------------------------------------------------------------------------
++# Generic-artifact basenames (non-identifying wiring markers).
++# --------------------------------------------------------------------------
++# Basenames that carry no identity of their own — any install-script
++# patch calls its installer one of these, so matching them in a compose
++# body matches EVERY mounted/invoked install script, not this patch's.
++# The fallback matches the patch's own directory name instead.
++GENERIC_ARTIFACT_BASENAMES = {
++    "install.sh",
++    "apply.sh",
++    "apply.py",
++    "run.sh",
++    "run.py",
++    "patch.py",
++    "patch.sh",
++}
++
++
+ # --------------------------------------------------------------------------
+ # delivery_spec wiring validation — confirm the patch's *actual* mount /
+ # invoke artifacts (as declared in patches.yml / Phase-A-prime
+@@ -460,6 +478,13 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+             inv.append("--chat-template")
+             inv.append(mounted_at)
+ 
++    # Generic installer basenames (`install.sh`, `apply.py`, ...) are NOT
++    # identifying: every install-script patch runs one, so a compose body
++    # containing ANY other patch's installer would satisfy this marker.
++    # Drop them — a spec whose only markers are generic therefore has no
++    # sound evidence at all (see :data:`GENERIC_ARTIFACT_BASENAMES`).
++    vol = [m for m in vol if Path(m).name not in GENERIC_ARTIFACT_BASENAMES]
++    inv = [m for m in inv if Path(m).name not in GENERIC_ARTIFACT_BASENAMES]
+     return vol, inv
+ 
+ 
+@@ -499,6 +524,48 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
++def _legacy_reaches(
++    root: Path,
++    patch: dict,
++    delivery: dict,
++    body: str,
++) -> bool:
++    """The deprecated ``delivery:`` fallback, tightened.
++
++    The declared artifacts are probed only by **identifying** names: the
++    generic installer basenames above and the parent-dir marker (always
++    ``patches``, so it matches every other mount) are dropped, and the
++    patch's own directory name is used instead. An entry whose only
++    declared artifact is a generic installer with no identifying
++    directory therefore never matches on the files probe alone (the
++    ``patch["id"]`` probe below is the remaining fallback).
++    """
++    if delivery.get("entrypoint_invoke"):
++        for rel in patch.get("files") or []:
++            base = Path(rel).name
++            if base in GENERIC_ARTIFACT_BASENAMES:
++                # The bare installer name matches every compose that runs
++                # *any* install script — identify the patch by its own
++                # directory instead.
++                parent = Path(rel).parent
++                base = parent.name if parent.name not in {"patches", ""} else ""
++                if not base or base in GENERIC_ARTIFACT_BASENAMES:
++                    continue
++            if base in body:
++                return True
++        if patch["id"] in body:
++            return True
++    if (
++        delivery.get("genesis")
++        and patch.get("genesis_env")
++        and patch["genesis_env"] in body
++    ):
++        return True
++    if delivery.get("dockerfile_bake") and "ghcr.io/noonghunna/vllm-club3090" in body:
++        return True
++    return False
++
++
+ def gap_declared(patch: dict, compose_name: str) -> bool:
+     for gap in patch.get("delivery_gaps") or []:
+         if compose_name in set(gap.get("composes") or []):
+@@ -541,27 +608,13 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+         return True
+ 
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
+-    delivery = patch.get("delivery") or {}
+-    if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
+-        if patch["id"] in body:
+-            return True
+-    if (
+-        delivery.get("genesis")
+-        and patch.get("genesis_env")
+-        and patch["genesis_env"] in body
+-    ):
+-        return True
+-    if delivery.get("dockerfile_bake") and "ghcr.io/noonghunna/vllm-club3090" in body:
+-        return True
+-    return False
++    # service body, so header/comment ID mentions never match. It is also
++    # TIGHTENED: it matches only identifying names (the patch's own
++    # directory / declared mount target), never the generic installer
++    # basenames or the blanket `patches` parent-dir marker that every
++    # wired compose contains. Without that, a patch whose mount + invoke
++    # were removed from a compose still reports "reached" here.
++    return _legacy_reaches(root, patch, patch.get("delivery") or {}, body)
+ 
+ 
+ # --------------------------------------------------------------------------
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 6f4aabf..0001f8f 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -267,6 +267,68 @@ if chat_template_patches:
+                 "reported covered (the literal #377 silent-drift mode)"
+             )
+ 
++# (4b) NEGATIVE CONTROL — install_script patches: a compose whose mount +
++#     invoke lines were REMOVED must report not-reached. The legacy
++#     `delivery:` fallback used to match on generic markers (the blanket
++#     `patches` parent-dir marker, or the bare `install.sh` basename) that
++#     EVERY wired compose contains — so an unwired patch still reported
++#     reached and the drift went undetected.
++import copy as _copy  # noqa: E402
++
++_script_patches = [
++    p for p in patches
++    if (p.get("delivery_spec") or {}).get("script") and p.get("files")
++]
++if _script_patches:
++    sp = _script_patches[0]
++    spec = sp["delivery_spec"]
++    mounted = spec.get("mounted_at")
++    invoke = spec.get("invoke")
++    with tempfile.TemporaryDirectory() as _td:
++        _tdp = Path(_td)
++        wired = _tdp / "wired.yml"
++        stripped = _tdp / "stripped.yml"
++        wired.write_text(
++            "services:\n"
++            "  svc:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            f"      - ./patches/{sp['id']}/install.sh:{mounted}/install.sh:ro\n"
++            "    entrypoint:\n"
++            f"      - bash\n"
++            f"      - {invoke}\n",
++            encoding="utf-8",
++        )
++        # Same compose with the patch's mount + invoke lines removed — but
++        # ANOTHER patch's install.sh still mounted/invoked (the realistic
++        # half-unwired estate). Only the identifying markers may be gone.
++        other_mount = "./patches/other-patch/install.sh:/etc/club3090/other/install.sh:ro"
++        other_invoke = "bash /etc/club3090/other/install.sh"
++        stripped.write_text(
++            "services:\n"
++            "  svc:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            f"      - {other_mount}\n"
++            "    entrypoint:\n"
++            "      - bash\n"
++            f"      - {other_invoke}\n",
++            encoding="utf-8",
++        )
++        if not pa.reaches(root, sp, str(wired)):
++            errors.append(
++                "install_script reaches(): a compose that DOES mount + invoke "
++                "the patch's declared delivery_spec wiring was not detected "
++                "as reached (false negative on a wired compose)"
++            )
++        if pa.reaches(root, sp, str(stripped)):
++            errors.append(
++                "install_script reaches() FALSE-POSITIVE: a compose whose "
++                "mount + invoke lines were removed was still reported reached "
++                "via generic markers (patches / install.sh) that every wired "
++                "compose contains — the unwired-patch drift is undetectable"
++            )
++
+ # (5) Rig-independent leak-assertion convention (mandatory — the V2 on-rig
+ #     lesson). The chat_template effective-coverage path resolves the
+ #     merged compose via `docker compose config`, which renders the mount

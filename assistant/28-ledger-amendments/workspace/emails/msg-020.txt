@@ -1,0 +1,8 @@
+From: rina@example.net
+Date: 2026-07-17T17:40:00Z
+Subject: ledger amendment
+
+Divide T-00445 so that ACC-06 carries 25% and ACC-11 the remaining part.
+
+Thanks,
+rina

@@ -1,0 +1,220 @@
+diff --git a/docs/QUALITY_TEST.md b/docs/QUALITY_TEST.md
+index 8bb7b38..7faee09 100644
+--- a/docs/QUALITY_TEST.md
++++ b/docs/QUALITY_TEST.md
+@@ -543,13 +543,16 @@ all of them.
+ | engine | server prerequisite (boot) | what the wrapper sends | how it verifies |
+ |---|---|---|---|
+ | llama.cpp | `--reasoning-budget N` — the shipped composes read `REASONING_BUDGET=N` | nothing (server-wide) | `docker inspect` of the serving container, resolving the flag's **value** through the container env. The composes always emit `--reasoning-budget "${REASONING_BUDGET:--1}"`, so a *present* flag with the env unset boots **unbounded (-1)** — presence proves nothing, the value must be exactly N. |
+-| vLLM v0.29.0 | `--reasoning-parser <name>` | `thinking_token_budget: N` (via benchlocal's `--extra-body`) | the container command carries a parser — without one vLLM rejects the field per request, so every scenario would 400 |
++| vLLM v0.29.0 | `--reasoning-parser <name>` | `thinking_token_budget: N` (via benchlocal's `--extra-body`) | the container command carries a parser — **or its boot log does**: vLLM dumps the RESOLVED args at startup (`non-default args: {… 'reasoning_parser': 'qwen3' …}`), which is where a parser added by the image's own launcher (bucko's `qwen38-serve`) is visible, the container argv showing none. Neither source naming one is a refusal: without a parser vLLM rejects the field per request, so every scenario would 400 |
+ | SGLang v0.5.20 | `--enable-custom-logit-processor` | `custom_logit_processor` (the model-specific `ThinkingBudgetLogitProcessor` subclass, chosen from the server's reasoning parser: qwen3 / qwen3-thinking / glm45 / deepseek-r1) + `custom_params.thinking_budget` | `/server_info` readback first, container command second |
+ 
+ Refusals are loud and carry the fix — a budget that is accepted and ignored is worse than none, because
+ success is then indistinguishable from failure. Positive evidence that the budget would *not* take effect is
+ never bypassed. When there is **no** evidence at all (no container, no readback) the wrapper refuses too;
+-`THINKING_BUDGET_UNVERIFIED=1` runs anyway and labels the run unverified.
++`THINKING_BUDGET_UNVERIFIED=1` runs anyway and labels the run unverified. A source that cannot answer is never
++counted as absence: no parser in the argv *plus* a boot log with no resolved-args dump (unreadable, empty,
++rotated) is **unverifiable**, not refused — otherwise an image that configures vLLM inside its own launcher,
++with the engine log going somewhere `docker logs` cannot see, could never be used at all.
+ 
+ Two things the flag does that a bare engine flag does not:
+ 
+diff --git a/scripts/lib/thinking-budget.sh b/scripts/lib/thinking-budget.sh
+index 636d91c..d8f29e9 100755
+--- a/scripts/lib/thinking-budget.sh
++++ b/scripts/lib/thinking-budget.sh
+@@ -19,6 +19,14 @@
+ #   SGLang      --enable-custom-logit-processor   custom_logit_processor +
+ #                                                 custom_params.thinking_budget
+ #
++# WHERE THE PREREQUISITE IS READ (vLLM): the container argv FIRST, then the
++# server's own boot log. An image that starts vLLM through its OWN launcher
++# (bucko's `qwen38-serve` adds `--reasoning-parser qwen3` inside the script)
++# carries none in `docker inspect`, and a refusal counts as POSITIVE evidence —
++# the kind THINKING_BUDGET_UNVERIFIED=1 cannot override. So the log, which dumps
++# the RESOLVED args, is read before refusing; and when neither source can answer,
++# the outcome is unverifiable (rc 2), not refused (rc 1).
++#
+ # What each engine does WITHOUT its prerequisite (read from the pinned images):
+ #   llama.cpp  nothing to send — the harness cannot set a boot flag per request,
+ #              and a compose-shipped `--reasoning-budget "${REASONING_BUDGET:--1}"`
+@@ -47,6 +55,9 @@
+ #                        acceptable bypass is an explicit, loud one.
+ #       Sets THINKING_BUDGET_EVIDENCE (one line, human) and, for SGLang,
+ #       THINKING_BUDGET_REASONING_PARSER. Prints nothing on stdout.
++#       Sources: llama.cpp the container argv; vLLM the container argv then the
++#       container's boot log (its `non-default args:` dump carries the resolved
++#       parser); SGLang /server_info then the container argv.
+ #   thinking_budget_fix_hint <kind> <N>
+ #       Prints the fix instruction for a refused/unverifiable verification.
+ #   thinking_budget_extra_body <kind> <N> [sglang_processor_class]
+@@ -229,6 +240,123 @@ _thinking_budget_container_facts() {
+   python3 -c "$_THINKING_BUDGET_FACTS_PY" "$1"
+ }
+ 
++# vLLM's own account of what it booted with. `non-default args: {...}` is logged
++# once at startup and lists only what differs from vLLM's defaults, so a parser
++# set ANYWHERE — the container argv, a wrapper script inside the image, an env
++# file — shows up here, which `docker inspect` cannot see (bucko's image starts
++# vLLM through `qwen38-serve`, which adds `--reasoning-parser qwen3` itself).
++# argv 1 = this lib's directory (resolved_config.dict_after parses the dump),
++# argv 2 = the container. stdout, one line:
++#   PARSER <value>   the boot log names a reasoning parser
++#   PARSER none      the log dumps RESOLVED args and no parser is among them
++#   LOG <note>       the log cannot answer (unreadable, empty, rotated, or a dump
++#                    shape this parser does not know) — the argv's silence is
++#                    then NOT evidence of absence, so the caller must not refuse
++# `docker logs` has no --head, so the read is bounded to resolved_config's prefix.
++_THINKING_BUDGET_VLLM_BOOT_LOG_PY="$(cat <<'PY'
++import re, sys
++
++lib_dir, container = sys.argv[1], sys.argv[2]
++if lib_dir:
++    import os
++    sys.path.insert(0, lib_dir)
++
++MARKER = "non-default args:"
++
++try:
++    # one server_args / non-default-args parser for the whole repo (resolved_config)
++    from resolved_config import dict_after as _dict_after
++except Exception:  # noqa: BLE001 — standalone use (or a stripped checkout) still works
++    _dict_after = None
++
++
++def read_log():
++    """(text, note) — the container's log from the start; the dump is at boot."""
++    try:
++        from resolved_config import _boot_log_prefix
++    except Exception:
++        import subprocess
++        try:
++            p = subprocess.run(["docker", "logs", container], capture_output=True,
++                               text=True, encoding="utf-8", errors="replace", timeout=60)
++        except (OSError, subprocess.SubprocessError) as exc:
++            return "", "could not read the boot log (%s)" % exc
++        return p.stdout + p.stderr, None
++    try:
++        text, _truncated, err = _boot_log_prefix(container)
++    except Exception as exc:  # noqa: BLE001 — a fallback source is never fatal
++        return "", "could not read the boot log (%s)" % exc
++    return text, err
++
++
++def dump_dict(line, at):
++    """The resolved-args dict of one dump line, or None when it will not parse."""
++    if _dict_after is not None:
++        found = _dict_after(line[at:], MARKER)
++        return found if isinstance(found, dict) else None
++    import ast
++    m = re.search(r"\{.*\}", line[at:])
++    if not m:
++        return None
++    try:
++        lit = ast.literal_eval(m.group(0))
++    except (ValueError, SyntaxError):
++        return None
++    return lit if isinstance(lit, dict) else None
++
++
++def quoted_parser(line):
++    """The parser named by a dump this parser cannot read. A quoted value only —
++    `reasoning_parser=None` is the ABSENCE of a parser, never a match."""
++    m = re.search(r"""['"]reasoning_parser['"]\s*[:=]\s*['"]([^'"]+)['"]""", line)
++    if m:
++        return m.group(1)
++    m = re.search(r"\breasoning_parser\s*=\s*['\"]([^'\"]+)['\"]", line)
++    return m.group(1) if m else None
++
++
++def parse(text):
++    parser, seen, parsed = None, 0, 0
++    for line in text.splitlines():
++        at = line.lower().find(MARKER)
++        if at < 0:
++            continue
++        seen += 1
++        args = dump_dict(line, at)
++        if args is None:
++            continue
++        parsed += 1
++        # The LAST dump wins: `docker logs` holds every boot of the container and
++        # `non-default args:` lists only what differs from vLLM's defaults, so a
++        # key ABSENT from the newest dump means the server in service has none.
++        rp = args.get("reasoning_parser")
++        parser = rp.strip() if isinstance(rp, str) and rp.strip() else None
++    if parser:
++        return "PARSER %s" % parser
++    if parsed:
++        return "PARSER none"
++    for line in text.splitlines():
++        hit = quoted_parser(line)
++        if hit:
++            return "PARSER %s" % hit
++    if seen:
++        return "LOG the boot log's resolved-args dump could not be read"
++    return "LOG no resolved-args dump in the boot log"
++
++
++text, note = read_log()
++if note:
++    print("LOG %s" % note)
++elif not text.strip():
++    print("LOG boot log is empty (log driver not `json-file`, or the log was rotated)")
++else:
++    print(parse(text))
++PY
++)"
++_thinking_budget_vllm_boot_log_facts() {
++  python3 -c "$_THINKING_BUDGET_VLLM_BOOT_LOG_PY" "$_TB_LIB_DIR" "$1" 2>/dev/null
++}
++
+ # SGLang's own readback: /server_info (v0.5.20) dumps the resolved ServerArgs;
+ # /get_server_info is the deprecated alias. Walks the whole document so a
+ # regrouping of the args (v0.5.20 moved them under sub-groups) cannot hide the
+@@ -329,10 +457,32 @@ thinking_budget_verify() {
+         return 2
+       fi
+       facts="$(docker inspect "$c" 2>/dev/null | _thinking_budget_container_facts vllm)"
++      # NB: "PARSER none" must be matched BEFORE "PARSER *" — the glob matches it too.
+       case "$facts" in
+         "PARSER none")
+-          THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
+-          return 1 ;;
++          # Nothing in the argv — but that is NOT yet evidence of absence. An
++          # image that starts vLLM through its OWN launcher (bucko's official
++          # image: `qwen38-serve` adds `--reasoning-parser qwen3` inside the
++          # script) carries none in `docker inspect`, while the server runs with
++          # one. A refusal here is POSITIVE evidence and cannot be overridden by
++          # THINKING_BUDGET_UNVERIFIED=1, so read vLLM's own account of the
++          # resolved args — its boot log's `non-default args:` dump — first.
++          local logfacts
++          logfacts="$(_thinking_budget_vllm_boot_log_facts "$c")"
++          logfacts="${logfacts:-LOG no output from the boot-log reader}"
++          case "$logfacts" in
++            "PARSER none")
++              THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — neither its argv nor its boot log's resolved args name one; vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
++              return 1 ;;
++            "PARSER "*)
++              THINKING_BUDGET_EVIDENCE="container ${c}'s boot log reports reasoning_parser=${logfacts#PARSER } (--reasoning-parser set by the image's own launcher, so the container argv carries none)"
++              return 0 ;;
++            *)
++              # argv silent, log silent: unverifiable, NOT refused — a launcher
++              # inside the image can set the parser where neither source shows it.
++              THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser in its argv, and its boot log cannot confirm or deny one (${logfacts#LOG }); a launcher inside the image can set the parser where neither source sees it — vLLM v0.29.0 rejects thinking_token_budget per request without a parser (VLLMValidationError)"
++              return 2 ;;
++          esac ;;
+         "PARSER "*)
+           THINKING_BUDGET_EVIDENCE="container ${c} boots vLLM with --reasoning-parser ${facts#PARSER }"
+           return 0 ;;
+@@ -390,6 +540,8 @@ EOF
+       cat <<EOF
+   Fix: start vLLM with a reasoning parser (every shipped thinking compose does):
+        --reasoning-parser <name>      e.g. qwen3 / gemma4 — see the compose's command block
++       An image that serves through its own launcher sets it there instead — when
++       its boot log shows no resolved parser either, that server has none.
+ EOF
+       ;;
+     sglang)

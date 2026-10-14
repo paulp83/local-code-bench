@@ -1,0 +1,93 @@
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..fb00aa9 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1224,7 +1224,15 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
++validate_launch() {
++  # Runs every launch check that can REFUSE a launch and does NOT depend on the
++  # running container's state. Called BEFORE down_running() (see the launch flow
++  # below) so a refused launch never tears the current slug down: the checks used
++  # to run inside up_variant() AFTER down_running, so a refusal (an experimental
++  # slug without --force, a missing MODEL_DIR, a mistyped slug) left the rig
++  # serving nothing. The free-VRAM gates that DO need the torn-down container's
++  # VRAM (preflight_compose_gpu_fit / gpu_preflight) stay in up_variant(), after
++  # down_running. Exits the script on any hard refusal.
+   local v="$1"
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+@@ -1239,11 +1247,12 @@ up_variant() {
+     exit 1
+   fi
+ 
+-  # Pre-up sanity:
++  # Pre-launch sanity (state-independent — safe to run before the running slug is
++  # torn down):
+   #  - repo_drift: warn if local HEAD is behind origin/master
+-  #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist on host
+-  #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case;
+-  #     see club-3090#37 — this is the canonical fix raphael / snoby asked for)
++  #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist
++  #    on host (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried
++  #    dual-dflash-noviz" case; see club-3090#37)
+   #  - kv_format_hint: soft warn if VRAM class needs --kv-cache-dtype override (#47)
+   if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+     # shellcheck source=preflight.sh
+@@ -1252,15 +1261,10 @@ up_variant() {
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+-      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+-    # No-op for composes without an LMCache-l1-gb metadata header.
++    # No-op for composes without the LMCache-l1-gb metadata header.
+     preflight_lmcache_ram "${full_dir}/${file}" || exit 1
+     # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
+     # the guards must see the RESOLVED config, not the compose defaults.
+@@ -1282,6 +1286,29 @@ up_variant() {
+     # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+     preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
++}
++
++up_variant() {
++  # Runs AFTER validate_launch() passed AND down_running() tore the old slug down.
++  # Only the state-DEPENDENT checks remain here — the free-VRAM gates measure the
++  # GPUs with the torn-down container's VRAM released, so they MUST run after
++  # down_running (run earlier they would see the old scene's VRAM still pinned and
++  # falsely refuse). Then it brings the new variant up.
++  local v="$1"
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${dir}"
++
++  # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
++  # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
++  # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
++  # so its settle-retry also covers the just-torn-down container's VRAM lag.
++  if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    # shellcheck source=preflight.sh
++    source "${ROOT_DIR}/scripts/preflight.sh"
++    if [[ "$eng" == "vllm" ]]; then
++      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
++    fi
++  fi
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+   # container stop leaves them resident — 65 GB on the reference rig 2026-09-25, incl. two 32 GiB
+@@ -1617,6 +1644,7 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++validate_launch "${VARIANT}"   # refuse BEFORE tearing down: a refused launch must leave the running slug serving
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready

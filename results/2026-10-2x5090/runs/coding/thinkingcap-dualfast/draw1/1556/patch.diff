@@ -1,0 +1,150 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 03a2274..7308c57 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -410,9 +410,14 @@ warmup_gate() {
+ if [[ "$MATRIX" == "1" ]]; then
+   if [[ "$SWEEP_DRY" != "1" ]]; then warmup_gate || exit 1; fi
+   slots="$(_detect_slots || true)"
++  # slots_src must follow the SAME paths and order as _detect_slots, or the count
++  # is right but the label reads "undetected" (#1537: the two SGLang paths were
++  # missing, so an sgl/ card said "slots=4 (undetected)").
+   slots_src="undetected"
+   if [[ -n "$(_served_seqs || true)" ]]; then slots_src="container max-num-seqs"
+   elif [[ -n "$(_served_np || true)" ]]; then slots_src="container -np"
++  elif [[ -n "$(_served_max_running || true)" ]]; then slots_src="container max-running-requests"
++  elif [[ -n "$(_sgl_max_running || true)" ]]; then slots_src="server /get_server_info max_running_requests"
+   elif [[ -n "$(_props_slots || true)" ]]; then slots_src="server /props total_slots"
+   fi
+   max_len="$(_served_ctx || true)"
+@@ -567,10 +572,12 @@ PY
+   done < <(python3 "$PROBE_PY" --plan-tsv)
+ 
+   rec_json="$(mktemp /tmp/cprobe-rec.XXXXXX)"
+-  if [[ "$slots_src" == "container -np" ]]; then engine="llamacpp"
+-  elif [[ "$slots_src" == "container max-num-seqs" ]]; then engine="vllm"
+-  else engine=""
+-  fi
++  case "$slots_src" in
++    "container -np") engine="llamacpp" ;;
++    "container max-num-seqs") engine="vllm" ;;
++    "container max-running-requests"|"server /get_server_info max_running_requests") engine="sglang" ;;
++    *) engine="" ;;
++  esac
+   MODEL="$MODEL" SLUG="${SLUG:-}" SPEC="$(_spec_fp)" GPUS="$(_gpu_fp)" \
+   KV_TOKENS="${KV_TOKENS:-}" SLOTS="${slots:-}" GEN_TOKENS="$GEN_TOKENS" \
+   CACHE_LABEL="$cache_label" ENGINE="$engine" SERVED_MAX_LEN="${max_len:-}" \
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 4bcd814..c85a85a 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -96,33 +96,34 @@ def fmt_ttft(seconds):
+ 
+ 
+ def parse_kv_tokens_text(txt):
+-    """vLLM boot: 'GPU KV cache size: 210,000 tokens' (optional leading ~)."""
++    """Engine boot log -> the KV pool in tokens.
++
++    vLLM: 'GPU KV cache size: 210,000 tokens' (optional leading ~).
++    SGLang: the 'Memory pool end' line, 'max_total_num_tokens=451633 ...'.
++    A container is one engine, so the first shape that matches wins.
++    """
+     if not txt:
+         return None
+-    matches = list(
+-        re.finditer(r"GPU KV cache size:\s*~?([\d,]+)\s*tokens", txt, re.I)
+-    )
+-    if not matches:
+-        return None
+-    return int(matches[-1].group(1).replace(",", ""))
++    for pat in (
++        r"GPU KV cache size:\s*~?([\d,]+)\s*tokens",
++        r"max_total_num_tokens\s*=\s*([\d,]+)",
++    ):
++        matches = list(re.finditer(pat, txt, re.I))
++        if matches:
++            return int(matches[-1].group(1).replace(",", ""))
++    return None
+ 
+ 
+ def detect_kv_tokens(container):
++    """KV pool in tokens from the container's boot log, or None.
++
++    Reads the HEAD of the log, not a --tail window: the pool is fixed at boot
++    and the line sits with the other boot config, so a container that has been
++    serving for a while has long scrolled past a --tail read (the #1537 'KV ?').
++    """
+     if not container:
+         return None
+-    try:
+-        out = subprocess.run(
+-            ["docker", "logs", "--tail", "2500", container],
+-            capture_output=True,
+-            text=True,
+-            timeout=20,
+-            encoding="utf-8",
+-            errors="replace",
+-        )
+-        txt = (out.stdout or "") + (out.stderr or "")
+-    except Exception:
+-        return None
+-    return parse_kv_tokens_text(txt)
++    return parse_kv_tokens_text(_docker_logs_head(container))
+ 
+ 
+ def plan_matrix(
+@@ -1204,6 +1205,17 @@ def recommend_compose(record):
+     }
+ 
+ 
++def _engine_knobs(engine):
++    """(seqs_knob, len_knob): the compose env-var names for the two knobs we
++    recommend. SGLang composes name them MAX_RUNNING_REQUESTS / CONTEXT_LENGTH
++    and ignore MAX_NUM_SEQS / MAX_MODEL_LEN, so an sgl/ card must not point the
++    reader at knobs the server drops.
++    """
++    if "sgl" in (engine or "").lower():
++        return "MAX_RUNNING_REQUESTS", "CONTEXT_LENGTH"
++    return "MAX_NUM_SEQS", "MAX_MODEL_LEN"
++
++
+ def format_recommend(rec):
+     """Human block to print after the card. Empty if no clean cells."""
+     if not rec or not rec.get("max_agg"):
+@@ -1216,21 +1228,22 @@ def format_recommend(rec):
+     served = rec.get("served_max_len")
+     slug = rec.get("slug") or "<slug>"
+     engine = (rec.get("engine") or "").lower()
++    seqs_knob, len_knob = _engine_knobs(engine)
+     lines = ["=== recommend ==="]
+ 
+     def knobs(n, ctx_keep, ctx_set=None):
+-        launch = [f"MAX_NUM_SEQS={n}"]
++        launch = [f"{seqs_knob}={n}"]
+         if ctx_set is not None:
+-            launch.append(f"MAX_MODEL_LEN={ctx_set}")
++            launch.append(f"{len_knob}={ctx_set}")
+         launch.append(f"bash scripts/switch.sh {slug}")
+         out = [
+-            f"    MAX_NUM_SEQS={n}",
++            f"    {seqs_knob}={n}",
+         ]
+         if ctx_set is not None:
+-            out.append(f"    MAX_MODEL_LEN={ctx_set}")
++            out.append(f"    {len_knob}={ctx_set}")
+         else:
+             keep = fmt_ctx(ctx_keep) if ctx_keep else "compose default"
+-            out.append(f"    MAX_MODEL_LEN=<keep {keep}>")
++            out.append(f"    {len_knob}=<keep {keep}>")
+         out.append(f"    {' '.join(launch)}")
+         if engine in ("llamacpp", "llama.cpp", "ik_llama", "ik-llama"):
+             c = ctx_set if ctx_set is not None else ctx_keep
+@@ -1265,7 +1278,7 @@ def format_recommend(rec):
+             lines.extend(knobs(peak["n"], served, ctx_set=peak["ctx"]))
+             if served and peak["ctx"] < served:
+                 lines.append(
+-                    f"    do not drop MAX_MODEL_LEN unless traffic stays near {fmt_ctx(peak['ctx'])} — "
++                    f"    do not drop {len_knob} unless traffic stays near {fmt_ctx(peak['ctx'])} — "
+                     f"raising slots to {peak['n']} at {served_s} will not reproduce {peak['agg']:.0f} tok/s"
+                 )
+         elif engine.startswith("vllm") or engine == "":

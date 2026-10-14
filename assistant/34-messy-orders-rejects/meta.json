@@ -1,0 +1,22 @@
+{
+  "id": "34-messy-orders-rejects",
+  "set": "hard-v1",
+  "axis": "D",
+  "source": "novel",
+  "category": "error-recovery",
+  "difficulty": "hard",
+  "est_minutes": 25,
+  "needs_web": false,
+  "notes": "BOM, mixed line endings, a quoted multi-line customer, three date forms, quoted thousands separators, six deliberate rejects. A script that skips bad rows silently fails the rejects checks.",
+  "spec_map": {
+    "clean-header": "`/workspace/clean.csv` with header `order_id,customer,date,amount,currency`",
+    "rejects-header": "`/workspace/rejects.csv` with header `record,reason`",
+    "clean-row-count": "do not reject records the rules can fix",
+    "clean-sorted": "every record that is not a reject, sorted by `order_id`",
+    "clean-exact": "Output ISO `YYYY-MM-DD`.",
+    "clean-multiline-customer-flattened": "replace any run of whitespace (including line breaks) with one space and trim",
+    "clean-dates-iso": "Output ISO `YYYY-MM-DD`.",
+    "rejects-exact": "the record number and reason of every reject, in record order",
+    "rejects-none-silently-dropped": "Do not drop or repair rejects silently"
+  }
+}

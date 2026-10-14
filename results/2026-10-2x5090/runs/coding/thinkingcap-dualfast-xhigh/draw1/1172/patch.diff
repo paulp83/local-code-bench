@@ -1,0 +1,68 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..d81a89f 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -13,6 +13,16 @@ Two traps this encodes, both paid for on 2026-08-31:
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
+ 
++And one drafter rule: on a slug that pins a drafter to a GPU the drafter emits
++the SAME line shapes as the target -- a second load_tensors model buffer, a
++second KV buffer, a second (smaller) sched_reserve. model, kv and state
++therefore SUM per device; last match wins let a 656 MiB drafter silently
++overwrite the 3,313 MiB target (glm53-flash-dual). compute deliberately stays
++LAST-WINS instead: the target RE-RESERVES after the drafter loads, so summing
++would count the same buffer twice. The drafter's interleaved reservation is
++still dropped into `unaccounted` -- the log does not label which context a
++sched_reserve belongs to, so that one is tracked separately, not guessed at.
++
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+ number, so the two sections can never disagree.
+@@ -23,10 +33,18 @@ import sys
+ 
+ 
+ def _per_dev(text, pat, agg=False):
++    """Collect MiB values per CUDA device from boot-log lines.
++
++    ``pat`` is one pattern or a list of them; each must capture (device, value)
++    as groups 1 and 2. With agg=False the last match per device wins; with
++    agg=True every match sums -- a pinned drafter emits the same line shapes as
++    the target, and on the same device both buffers are real.
++    """
+     out = {}
+-    for m in re.finditer(pat, text):
+-        dev, val = m.group(1), float(m.group(2))
+-        out[dev] = out.get(dev, 0.0) + val if agg else val
++    for p in (pat if isinstance(pat, (list, tuple)) else (pat,)):
++        for m in re.finditer(p, text):
++            dev, val = m.group(1), float(m.group(2))
++            out[dev] = out.get(dev, 0.0) + val if agg else val
+     return out
+ 
+ 
+@@ -38,10 +56,22 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    # Pinned drafter: target + drafter model buffers both live on the device,
++    # so SUM (agg=True) -- last match wins made the drafter's overwrite the
++    # target's.
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
++    # LAST-WINS on purpose: the target RE-RESERVES after the drafter loads, so
++    # summing would count the same buffer twice. The drafter's interleaved
++    # reservation is dropped into `unaccounted` (the log does not label which
++    # context a reservation belongs to -- tracked separately, not guessed).
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # Recurrent state logs in two shapes: DeepSeek's `_comp_state:` and GLM's
++    # `llama_memory_recurrent: <dev> RS buffer size`. SUM per device.
++    state = _per_dev(text, (
++        r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB",
++        r"llama_memory_recurrent:\s+(CUDA\d) RS buffer size =\s+([\d.]+) MiB",
++    ), agg=True)
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

@@ -1,0 +1,22 @@
+{
+ "n": 1610,
+ "config": "strata-q4kxl",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 1056.1,
+ "steps": 48,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 0,
+ "localization": 0.5,
+ "files_touched": [
+  "scripts/lib/profiles/patch_attribution.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-patch-attribution.sh": 0
+ }
+}

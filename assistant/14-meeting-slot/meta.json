@@ -1,0 +1,9 @@
+{
+  "id": "14-meeting-slot",
+  "source": "novel",
+  "category": "scheduling",
+  "difficulty": "hard",
+  "est_minutes": 20,
+  "needs_web": false,
+  "notes": "Novel: calendar intersection with local working hours, lunch, and buffers."
+}

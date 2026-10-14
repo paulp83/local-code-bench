@@ -1,0 +1,59 @@
+diff --git a/scripts/lib/p2p-state.sh b/scripts/lib/p2p-state.sh
+index 6b53fb8..4ab3fb6 100644
+--- a/scripts/lib/p2p-state.sh
++++ b/scripts/lib/p2p-state.sh
+@@ -101,7 +101,10 @@ p2p_driver_flavor() {
+ # understood by the classifier. Keeping this here makes bench.sh and report.sh
+ # consume identical evidence. In particular, SGLang does not run our
+ # detect_nvlink.sh entrypoint, but it emits definitive runtime lines for NCCL
+-# and CustomAllReduceV2 initialization.
++# and custom all-reduce initialization. CustomAllReduceV2 logs "All Reduce config:" after init,
++# while the V1 CustomAllreduce (the only kernel a PCIe rig runs — V2 needs full NVLink)
++# logs nothing at init; its only success signal is the "Registering N cuda graph addresses" line it
++# prints on rank 0 after CUDA-graph capture.
+ p2p_engine_log_evidence() {
+   awk '
+     index($0, "server_args=") && index($0, "disable_custom_all_reduce") {
+@@ -118,7 +121,8 @@ p2p_engine_log_evidence() {
+     index($0, "disable_custom_all_reduce=True") ||
+     index($0, "Setup Custom allreduce failed") ||
+     index($0, "sglang is using nccl==") ||
+-    index($0, "All Reduce config:") { print }
++    index($0, "All Reduce config:") ||
++    (index($0, "Registering") && index($0, "cuda graph address")) { print }
+   '
+ }
+ # Engagement classifier — PURE (takes the boot-trail/env text on stdin so the
+@@ -126,7 +130,9 @@ p2p_engine_log_evidence() {
+ # report.sh and bench.sh gather exactly this normalized text: the container's
+ # `[nvlink]` boot lines, resolved NCCL_P2P*/NVLINK_MODE env, and the engine's
+ # own all-reduce runtime lines. vLLM reports vetoes; SGLang additionally reports
+-# `sglang is using nccl==...` and `All Reduce config: ...` after initialization.
++# `sglang is using nccl==...`, `All Reduce config: ...` (CustomAllReduceV2), and
++# `Registering N cuda graph addresses` (CustomAllreduce V1 — the kernel that runs
++# on PCIe rigs) after initialization. Any of the three success lines means ON.
+ # Prints: "on" | "nccl_only_operator" | "nccl_only_gated" | "nccl_only_degraded"
+ #         | "nccl_only_nolib" | "nccl_only_failed" | "off" | "unknown" | "requested".
+ # Reads detect_nvlink.sh's machine-readable STATE line for OUR configuration and
+@@ -267,7 +273,7 @@ p2p_classify_engagement() {
+       echo nccl_only_operator; return 0 ;;
+   esac
+   case "$text" in
+-    *"All Reduce config:"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
++    *"All Reduce config:"*|*"Registering "*"cuda graph address"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
+   esac
+   case "$text" in
+     *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*) echo off; return 0 ;;
+diff --git a/scripts/report.sh b/scripts/report.sh
+index db97e00..fe7b13a 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -1198,7 +1198,7 @@ else
+     _p2p_class_stream="$(docker logs "$CONTAINER" 2>&1 | p2p_engine_log_evidence || true)"
+     nvlink_boot="$(printf '%s\n' "$_p2p_class_stream" | command grep -F '[nvlink]' | tail -8)"
+     p2p_env="$(docker exec "$CONTAINER" env 2>/dev/null | command grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort)"
+-    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:' || true)"
++    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:|Registering [0-9]+ cuda graph address' || true)"
+     echo "**Interconnect / P2P engagement:**"
+     if [[ -n "$nvlink_boot" || -n "$p2p_env" || -n "$engine_ar_runtime" ]]; then
+       echo '```'

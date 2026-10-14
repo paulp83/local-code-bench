@@ -1,0 +1,327 @@
+diff --git a/scripts/launch.sh b/scripts/launch.sh
+index 7538ad3..066cf83 100755
+--- a/scripts/launch.sh
++++ b/scripts/launch.sh
+@@ -1448,8 +1448,9 @@ _note_brief() {
+ }
+ 
+ # Surface the lifecycle health flag (PR-A) before handing off. The actual gate
+-# (caveats notice / (NA) → require --force) lives in switch.sh up_variant, which
+-# this script delegates to; this is just a heads-up so the user isn't surprised.
++# (caveats notice / (NA) → require --force) lives in switch.sh preflight_variant,
++# which runs BEFORE switch.sh tears down the running slug; this script delegates
++# to it, so the heads-up here is just that — never a surprise.
+ _launch_status="${LAUNCH_VARIANT_STATUS[$VARIANT]:-production}"
+ _launch_status_note="${LAUNCH_VARIANT_STATUS_NOTE[$VARIANT]:-}"
+ case "$_launch_status" in
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..bd67038 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -2,8 +2,11 @@
+ #
+ # Switch between club-3090 compose variants.
+ #
+-# Brings down whatever's currently running, brings up the new variant,
+-# and (optionally) waits for the server to report ready on /v1/models.
++# Preflights the requested variant, THEN brings down whatever's currently
++# running, brings up the new variant, and (optionally) waits for the server to
++# report ready on /v1/models. Gating before the teardown is deliberate: a launch
++# this script refuses (typo'd slug, (NA) status without --force, weights that
++# aren't on this host) leaves the running model serving, not an idle GPU.
+ # Stateless — re-run any time you want a different config.
+ #
+ # Usage:
+@@ -1224,13 +1227,37 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
+-  local v="$1"
++# --- pre-flight: everything that can REFUSE a launch, run BEFORE teardown ----
++#
++# Order matters: switch.sh used to bring the running slug down FIRST and only
++# then run the checks that can refuse a launch, so a refusal left the rig
++# serving NOTHING. Hit twice on the reference rig in one day — an experimental
++# slug without --force (status_gate) and a worktree whose weights were not on
++# the host (preflight_compose_deps) — plus every mistyped slug. A refusal must
++# therefore cost the user nothing: gate first, tear down second.
++#
++# Everything in here is read-only and depends on nothing the teardown changes.
++# Checks whose verdict DEPENDS on the post-teardown state deliberately stay in
++# up_variant() (after down_running()): the free-VRAM gates (gpu_preflight,
++# preflight_compose_gpu_fit) and the CPU-offload residency sizing, which has to
++# price the memory the running container is about to release.
++#
++# Idempotent per slug: the main flow gates before down_running() and
++# up_variant() calls this again as a safety net for direct callers. A slug is
++# gated once — re-running it would double every notice and re-ask the
++# interactive weight-fetch prompt.
++_VARIANT_PREFLIGHTED=""
++
++preflight_variant() {
++  local v="$1" eng dir file
++  [[ "${_VARIANT_PREFLIGHTED}" == "$v" ]] && return 0
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+     echo "Run: bash scripts/switch.sh --list" >&2
+     exit 1
+   fi
++  # Lifecycle gate: an (NA) slug without --force is refused HERE, i.e. while
++  # whatever is serving is still serving.
+   status_gate "$v"
+   IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
+   local full_dir="${ROOT_DIR}/${dir}"
+@@ -1242,8 +1269,9 @@ up_variant() {
+   # Pre-up sanity:
+   #  - repo_drift: warn if local HEAD is behind origin/master
+   #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist on host
+-  #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case;
+-  #     see club-3090#37 — this is the canonical fix raphael / snoby asked for)
++  #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case,
++  #     and the worktree-without-MODEL_DIR case; see club-3090#37 — this is the
++  #     canonical fix raphael / snoby asked for)
+   #  - kv_format_hint: soft warn if VRAM class needs --kv-cache-dtype override (#47)
+   if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+     # shellcheck source=preflight.sh
+@@ -1251,19 +1279,51 @@ up_variant() {
+     preflight_repo_drift "${ROOT_DIR}" || true
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
++      # Card class / SM / GPU-count gate. Reads memory.TOTAL, so it is valid
++      # before the teardown (unlike the free-VRAM gate below it in up_variant).
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+-      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+     # No-op for composes without an LMCache-l1-gb metadata header.
+     preflight_lmcache_ram "${full_dir}/${file}" || exit 1
+-    # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
+-    # the guards must see the RESOLVED config, not the compose defaults.
++    # CPU-offload split-mode refusal: static compose/user-config check, safe to
++    # pay for before tearing anything down. The RAM guard that PRICES the
++    # residency grant stays in up_variant() (it needs post-teardown free VRAM).
++    preflight_offload_split_mode "${full_dir}/${file}" || exit 1
++    preflight_kv_format_hint "${full_dir}/${file}" || true
++    # WARN-only first-token-latency hint; never blocks a boot.
++    preflight_offload_thp "${full_dir}/${file}" || true
++    # Single-card util-override guard — runs even under --force (the nvfp4 slug
++    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
++    preflight_single_card_util "${full_dir}/${file}" "$v" || true
++  fi
++  # Only a PASSED gate is remembered (a refusal re-checks on the next attempt).
++  _VARIANT_PREFLIGHTED="$v"
++}
++
++up_variant() {
++  local v="$1" eng dir file
++  # Safety net for direct callers: the main flow has already gated this slug
++  # BEFORE down_running(), and the guard at the top of preflight_variant() makes
++  # the second call a no-op.
++  preflight_variant "$v"
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${dir}"
++
++  # Post-teardown checks — these MUST see the memory the old container released:
++  #  - Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't
++  #    have room for this config's gpu_memory_utilization — e.g. a desktop/other
++  #    scene still holding VRAM after a switch (club-3090 #535). Runs AFTER
++  #    down_running(), so its settle-retry also covers the just-torn-down
++  #    container's VRAM lag.
++  if [[ "$eng" == "vllm" && -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
++  fi
++  # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
++  # the guards must see the RESOLVED config, not the compose defaults, and the
++  # residency must be sized from the POST-teardown free VRAM.
++  if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+     resolve_offload_residency "${full_dir}/${file}"
+     resolve_offload_threads   "${full_dir}/${file}"
+     # exl3 CPU-MoE split, sized from DETECTED VRAM (#1366). Ordered with the two
+@@ -1272,15 +1332,9 @@ up_variant() {
+     # LOWERS host RAM (the CPU worker holds the tail), so the two never fight.
+     # No-op on every compose without the CPU-MoE-* headers.
+     resolve_cpu_moe_split     "${full_dir}/${file}"
+-    # CPU-offload guards: marker-scoped, no-ops on non-offload composes (#deepseek-flash)
++    # CPU-offload RAM guard: marker-scoped, no-ops on non-offload composes
++    # (#deepseek-flash). Depends on the grant resolved just above.
+     preflight_cpu_offload_ram "${full_dir}/${file}" || exit 1
+-    preflight_offload_split_mode "${full_dir}/${file}" || exit 1
+-    preflight_kv_format_hint "${full_dir}/${file}" || true
+-    # WARN-only first-token-latency hint; never blocks a boot.
+-    preflight_offload_thp "${full_dir}/${file}" || true
+-    # Single-card util-override guard — runs even under --force (the nvfp4 slug
+-    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+-    preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+@@ -1617,6 +1671,13 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++# Gate FIRST, tear down SECOND: a launch this script is going to refuse (typo'd
++# slug, (NA) status without --force, weights not on this host, …) must not cost
++# whatever is currently serving. Everything that can say "no" for reasons
++# unrelated to the teardown lives in preflight_variant(); what is left after it
++# — free-VRAM gates and offload residency sizing — only makes sense once the
++# old container is down, and those refuse far less often.
++preflight_variant "${VARIANT}"
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready
+diff --git a/scripts/tests/test-switch-preflight-before-teardown.sh b/scripts/tests/test-switch-preflight-before-teardown.sh
+new file mode 100755
+index 0000000..f6fdbd5
+--- /dev/null
++++ b/scripts/tests/test-switch-preflight-before-teardown.sh
+@@ -0,0 +1,144 @@
++#!/usr/bin/env bash
++# Test: switch.sh gates a launch BEFORE it tears down the running slug.
++#
++# Contract: switch.sh used to bring the running slug down FIRST and only then
++# run the checks that can refuse a launch (unknown slug, (NA) status without
++# --force, model files missing on the host). A refused launch therefore left
++# the rig serving NOTHING. The refusing checks now run first, so a refusal must
++# not touch docker at all — the running container stays up.
++#
++# Validates (with a mock `docker` on PATH that records every invocation):
++#   1. A mistyped slug is refused without any docker call.
++#   2. An (NA: experimental) slug without --force is refused without any docker
++#      call, and the --force hint is still printed.
++#   3. A compose whose weights are not on the host is refused without any docker
++#      call (the worktree-without-MODEL_DIR case).
++#   4. An ACCEPTED launch still tears down and then brings the new variant up —
++#      in that order (the fix must not skip the teardown).
++set -uo pipefail
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++
++PASS=0; FAIL=0
++ok()   { PASS=$((PASS + 1)); echo "  ok   $1"; }
++bad()  { FAIL=$((FAIL + 1)); echo "  FAIL $1" >&2; }
++assert_contains() {
++  local hay="$1" needle="$2" label="$3"
++  if [[ "$hay" == *"$needle"* ]]; then ok "$label"; else
++    bad "$label: expected output to CONTAIN: $needle" >&2
++    printf '%s\n' "$hay" >&2
++  fi
++}
++
++T="$(mktemp -d)"
++trap 'rm -rf "$T"' EXIT
++mkdir -p "$T/bin"
++
++# --- mock docker / nvidia-smi / compose --------------------------------------
++cat > "$T/bin/docker" <<'D'
++#!/usr/bin/env bash
++printf 'docker %s\n' "$*" >> "$MOCK_LOG"
++[[ "${1:-}" == "ps" ]] && printf 'vllm-some-running-model\n'
++exit 0
++D
++cat > "$T/bin/nvidia-smi" <<'N'
++#!/usr/bin/env bash
++case "$*" in
++  *compute-apps*) exit 0 ;;
++  *memory.free*) printf '0, 23000, 24576\n' ;;
++  *compute_cap*) printf '0, NVIDIA GeForce RTX 3090, 24576, 8.6\n' ;;
++  *memory.total*) printf '24576\n' ;;
++  *index*) printf '0\n' ;;
++  *) printf 'NVIDIA GeForce RTX 3090\n' ;;
++esac
++exit 0
++N
++cat > "$T/bin/compose" <<'C'
++#!/usr/bin/env bash
++printf 'compose %s\n' "$*" >> "$MOCK_LOG"
++C
++chmod +x "$T/bin/docker" "$T/bin/nvidia-smi" "$T/bin/compose"
++
++export MOCK_LOG="$T/mock.log"
++export PATH="$T/bin:$PATH"
++export COMPOSE_BIN="$T/bin/compose"
++# Keep the hardware/RAM gates out of the picture — this test is about ORDER.
++export PREFLIGHT_NO_HARDWARE=1
++
++run() {   # run() <cmd…> → sets OUT / RC / LOG / DOCKER_CALLS / COMPOSE_CALLS
++  : > "$MOCK_LOG"
++  OUT="$("$@" 2>&1)"; RC=$?
++  LOG="$(cat "$MOCK_LOG")"
++  DOCKER_CALLS="$(printf '%s\n' "$LOG" | grep -c '^docker ' || true)"
++  COMPOSE_CALLS="$(printf '%s\n' "$LOG" | grep -c '^compose ' || true)"
++}
++
++# --- 1. mistyped slug --------------------------------------------------------
++run env PATH="$T/bin:$PATH" bash scripts/switch.sh --no-wait vllm/typo-not-a-slug
++assert_contains "$OUT" "unknown variant" "typo is refused"
++[[ "$RC" -ne 0 ]] && ok "typo exits non-zero" || bad "typo must exit non-zero"
++[[ "$DOCKER_CALLS" -eq 0 && "$COMPOSE_CALLS" -eq 0 ]] \
++  && ok "typo refused WITHOUT touching docker (running slug survives)" \
++  || bad "typo refused AFTER touching docker: $DOCKER_CALLS docker / $COMPOSE_CALLS compose call(s)"
++
++# --- 2. (NA) status without --force ------------------------------------------
++NA_SLUG="$(python3 - "$ROOT_DIR" <<'PY'
++import sys; sys.path.insert(0, sys.argv[1])
++from scripts.lib.profiles.compose_registry import get_registry
++for k, v in get_registry().items():
++    if (v.get("status") or "") == "experimental":
++        print(k); break
++PY
++)"
++if [[ -n "$NA_SLUG" ]]; then
++  run env PATH="$T/bin:$PATH" bash scripts/switch.sh --no-wait "$NA_SLUG"
++  assert_contains "$OUT" "(NA: experimental)" "NA slug is refused without --force"
++  assert_contains "$OUT" "--force"            "NA refusal still prints the --force hint"
++  [[ "$DOCKER_CALLS" -eq 0 && "$COMPOSE_CALLS" -eq 0 ]] \
++    && ok "NA slug refused WITHOUT touching docker" \
++    || bad "NA slug refused AFTER touching docker: $DOCKER_CALLS docker / $COMPOSE_CALLS compose call(s)"
++else
++  bad "no experimental slug in the registry to gate the NA path with"
++fi
++
++# --- 3. weights not on the host (the worktree / no-MODEL_DIR case) -----------
++GOOD_SLUG="$(python3 - "$ROOT_DIR" <<'PY'
++import sys; sys.path.insert(0, sys.argv[1])
++from scripts.lib.profiles.compose_registry import get_registry
++for k, v in get_registry().items():
++    if (v.get("status") or "production") == "production":
++        print(k); break
++PY
++)"
++if [[ -n "$GOOD_SLUG" ]]; then
++  run env PATH="$T/bin:$PATH" MODEL_DIR="$T/no-weights-here" bash scripts/switch.sh --no-wait "$GOOD_SLUG"
++  assert_contains "$OUT" "aren't on host" "missing weights refused"
++  [[ "$DOCKER_CALLS" -eq 0 && "$COMPOSE_CALLS" -eq 0 ]] \
++    && ok "missing weights refused WITHOUT touching docker" \
++    || bad "missing weights refused AFTER touching docker: $DOCKER_CALLS docker / $COMPOSE_CALLS compose call(s)"
++
++  # --- 4. an accepted launch DOES tear down, then bring up -------------------
++  run env PATH="$T/bin:$PATH" PREFLIGHT_NO_COMPOSE_DEPS=1 FORCE=1 bash scripts/switch.sh --no-wait "$GOOD_SLUG"
++  [[ "$RC" -eq 0 ]] && ok "accepted launch succeeds ($GOOD_SLUG)" \
++    || { bad "accepted launch failed (rc=$RC)"; printf '%s\n' "$OUT" >&2; }
++  assert_contains "$OUT" "bringing up: ${GOOD_SLUG}" "accepted launch brings the variant up"
++  [[ "$COMPOSE_CALLS" -ge 1 ]] && ok "compose up ran" || bad "compose up never ran"
++  [[ "$DOCKER_CALLS" -ge 1 ]] && ok "teardown still runs on an accepted launch" \
++    || bad "accepted launch never touched docker — teardown was skipped"
++  # Teardown (docker ps) must precede the bring-up, not follow it.
++  first_docker="$(printf '%s\n' "$LOG" | grep -n '^docker ' | head -1 | cut -d: -f1)"
++  last_compose="$(printf '%s\n' "$LOG" | grep -n '^compose .*up ' | tail -1 | cut -d: -f1)"
++  if [[ -n "$first_docker" && -n "$last_compose" && "$first_docker" -lt "$last_compose" ]]; then
++    ok "teardown happens BEFORE bring-up on the accepted path"
++  else
++    bad "teardown did not precede bring-up (docker line ${first_docker:-∅}, compose-up line ${last_compose:-∅})"
++  fi
++else
++  bad "no production slug found for the accepted-launch case"
++fi
++
++echo "----------------------------------------"
++echo "PASS: $PASS   FAIL: $FAIL"
++[[ "$FAIL" -eq 0 ]] || exit 1
++echo "OK: switch.sh gates before it tears down"

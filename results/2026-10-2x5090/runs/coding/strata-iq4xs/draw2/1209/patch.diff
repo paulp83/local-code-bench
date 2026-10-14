@@ -1,0 +1,401 @@
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 9ac68eb..74e9f64 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -12,6 +12,8 @@
+ #                         [--engine-type T] [--min-sm N] [--dry-run] [-y]
+ #   catalog.sh register   --spec-file <path> [--dry-run] [-y]
+ #   catalog.sh unregister --slug <engine>/<name> [--dry-run] [-y]
++#   catalog.sh rename     --slug <old> --to <engine>/<name> [--dry-run]
++#   catalog.sh update     --slug <engine>/<name> --set KEY=VALUE [--dry-run]
+ #
+ #   --root <dir>  operate on a throwaway tree instead of this checkout (tests).
+ #
+@@ -27,7 +29,7 @@ ROOT="$PWD"
+ die() { printf '[catalog] %s\n' "$*" >&2; exit 2; }
+ 
+ usage() {
+-  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
++  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+   exit "${1:-0}"
+ }
+ 
+@@ -35,6 +37,8 @@ usage() {
+ SUB="$1"; shift
+ 
+ COMPOSE="" SPEC_FILE="" ENGINE="" MODEL="" WORKLOAD="" PORT="" SLUG="" DRY="" YES="" RROOT="" WEIGHTS="" ETYPE="" MINSM=""
++TO=""
++SET_ARGS=()  # accumulated --set KEY=VALUE (update)
+ while [[ $# -gt 0 ]]; do
+   case "$1" in
+     --compose)   COMPOSE="${2:-}"; shift 2 ;;
+@@ -47,6 +51,8 @@ while [[ $# -gt 0 ]]; do
+     --engine-type) ETYPE="${2:-}"; shift 2 ;;
+     --min-sm)    MINSM="${2:-}"; shift 2 ;;
+     --slug)      SLUG="${2:-}"; shift 2 ;;
++    --to)        TO="${2:-}"; shift 2 ;;
++    --set)       SET_ARGS+=("${2:-}"); shift 2 ;;
+     --root)      RROOT="${2:-}"; shift 2 ;;
+     --dry-run)   DRY="--dry-run"; shift ;;
+     -y|--yes)    YES="--yes"; shift ;;
+@@ -305,6 +311,23 @@ PY
+          --layer local ${RROOT:+--root "$RROOT"} ${DRY:+--dry-run} ${YES:+--yes}
+     ;;
+ 
++  rename)
++    [[ -n "$SLUG" ]] || die "rename needs --slug <old-slug>"
++    [[ -n "$TO"   ]] || die "rename needs --to <engine>/<name>"
++    python3 scripts/lib/profiles/amend.py rename --slug "$SLUG" --to "$TO" \
++         ${RROOT:+--root "$RROOT"} ${DRY:+--dry-run} || exit $?
++    exit 0
++    ;;
++
++  update)
++    [[ -n "$SLUG" ]] || die "update needs --slug <engine>/<name>"
++    [[ ${#SET_ARGS[@]} -gt 0 ]] || die "update needs at least one --set KEY=VALUE"
++    SET_FLAGS=(); for kv in "${SET_ARGS[@]}"; do SET_FLAGS+=(--set "$kv"); done
++    python3 scripts/lib/profiles/amend.py update --slug "$SLUG" "${SET_FLAGS[@]}" \
++         ${RROOT:+--root "$RROOT"} ${DRY:+--dry-run} || exit $?
++    exit 0
++    ;;
++
+   -h|--help) usage 0 ;;
+-  *) die "unknown subcommand: $SUB (expected register | unregister)" ;;
++  *) die "unknown subcommand: $SUB (expected register | unregister | rename | update)" ;;
+ esac
+diff --git a/scripts/lib/profiles/amend.py b/scripts/lib/profiles/amend.py
+new file mode 100644
+index 0000000..4729d39
+--- /dev/null
++++ b/scripts/lib/profiles/amend.py
+@@ -0,0 +1,330 @@
++#!/usr/bin/env python3
++"""Local-layer AMENDMENT — rename / update a model ``promote.py`` already wrote.
++
++The local layer was create-and-delete only: ``promote.py`` refuses every
++"already exists" case and ``demote.py`` only removes.  Changing one field meant
++demoting and re-promoting.  That mattered more than ergonomics: #1204 decided a
++local slug colliding with a newly-shipped curated one is SHADOWED — kept and
++*marked* "so the user can rename it" — and no rename existed.  We advertised a
++remedy that could not be reached.
++
++Two operations, LOCAL layer only (``scripts/lib/profiles-local/registry.local.json``):
++
++    python3 scripts/lib/profiles/amend.py rename --slug OLD --to NEW [--root DIR] [--dry-run]
++    python3 scripts/lib/profiles/amend.py update --slug SLUG --set KEY=VALUE [--root DIR] [--dry-run]
++
++Both change the registry entry only — the compose tree / model profile live
++under the model id (unchanged by an amend), and only ``registry.local.json`` is
++ever written.  ``engine`` is always kept equal to the slug's namespace: ``rename``
++re-stamps it from the new name, ``update`` refuses to let ``--set engine=`` drift
++from the namespace (use ``rename`` to change the engine).
++
++CORE IS NEVER TOUCHED.  There is no ``--layer core``: a curated entry lives in
++git-tracked files.  Asking to amend / rename ONTO a curated slug is refused
++before anything is read; only ``origin`` (loader-stamped) is non-editable.
++
++Exit codes match promote.py / demote.py: 0 success, 3 refusal (nothing written),
++2 internal failure after a write started.
++
++Success markers (parser hooks)::
++
++    RENAME_OK <old> <new>
++    UPDATE_OK <slug>
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from pathlib import Path
++from typing import Optional
++
++_HERE = Path(__file__).resolve()
++_DEFAULT_ROOT = _HERE.parents[3]
++
++_LOCAL_DIR_REL = "scripts/lib/profiles-local"
++_LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
++# Engine profile dirs — the namespaces a local slug's engine may name. Core
++# first, then the local layer's own engines (#1202: a user's own build).
++_ENGINE_DIRS_REL = (
++    "scripts/lib/profiles/engines",
++    f"{_LOCAL_DIR_REL}/engines.d",
++)
++# The `origin` field is stamped by load_local_registry, never self-declared.
++_NON_EDITABLE = ("origin",)
++
++EXIT_COLLISION = 3
++EXIT_INTERNAL = 2
++
++
++class Refusal(Exception):
++    """Nothing has been written; the caller can fix the input and retry."""
++
++
++class InternalError(Exception):
++    """A write had started — state may be partial."""
++
++
++def _info(msg: str) -> None:
++    print(f"[amend] {msg}", file=sys.stderr)
++
++
++def _load_local_raw(root: Path) -> dict:
++    """The RAW registry.local.json dict ({} when absent)."""
++    path = root / _LOCAL_REGISTRY_REL
++    if not path.is_file():
++        return {}
++    try:
++        data = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, ValueError) as exc:
++        raise Refusal(f"{path} is unreadable — fix or remove it first: {exc}")
++    if not isinstance(data, dict):
++        raise Refusal(f"{path} is not a JSON object")
++    return data
++
++
++def _write_registry(root: Path, raw: dict) -> None:
++    reg = root / _LOCAL_REGISTRY_REL
++    try:
++        reg.parent.mkdir(parents=True, exist_ok=True)
++        reg.write_text(
++            json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
++        )
++    except OSError as exc:
++        raise InternalError(f"could not rewrite {reg}: {exc}")
++
++
++def _core_slugs(root: Path) -> set:
++    """The curated slugs (the merged view's CORE rows). Import failure → empty
++    set (the local-registry membership check still fails closed: an entry that
++    is not ours is not ours)."""
++    try:
++        if str(root) not in sys.path:
++            sys.path.insert(0, str(root))
++        from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
++
++        return set(COMPOSE_REGISTRY)
++    except Exception:
++        return set()
++
++
++def _known_engines(root: Path) -> set:
++    """Every engine id the catalog knows (core + local profiles). Read straight
++    from the engine YAML ``id:`` fields — no cross-reference validation, so it
++    works against a throwaway ``--root`` where ``load_profiles`` would be too
++    strict. Absent dirs contribute nothing."""
++    ids: set = set()
++    for rel in _ENGINE_DIRS_REL:
++        d = root / rel
++        if not d.is_dir():
++            continue
++        for yml in sorted(d.glob("*.yml")):
++            try:
++                for line in yml.read_text(encoding="utf-8").splitlines():
++                    s = line.strip()
++                    if s.startswith("id:"):
++                        ids.add(s.split(":", 1)[1].strip().strip("'\""))
++                        break
++            except OSError:
++                continue
++    return ids
++
++
++def _check_local_slug_present(raw: dict, slug: str, root: Path) -> None:
++    """Refuse unless `slug` is OURS (a local entry). Fails closed: a curated
++    slug or an unknown one is refused before anything is read or written."""
++    if slug in raw:
++        return
++    if slug in _core_slugs(root):
++        raise Refusal(
++            f"{slug!r} is a CURATED catalog entry, not a local one. This tool "
++            f"only amends the local layer; a curated entry is git-tracked and "
++            f"git is its editing tool."
++        )
++    known = ", ".join(sorted(raw)) or "(none registered)"
++    raise Refusal(f"{slug} is not in {_LOCAL_REGISTRY_REL}. Registered: {known}")
++
++
++def _validate(entry: dict, slug: str, root: Path) -> None:
++    """Dry-wrap the entry EXACTLY as the loader will, so a bad field / status /
++    shape refuses BEFORE anything is written, and re-assert the engine==namespace
++    invariant the layer must keep."""
++    ns = slug.split("/", 1)[0]
++    if entry.get("engine") != ns:
++        raise Refusal(
++            f"entry {slug!r} would have engine={entry.get('engine')!r} != slug "
++            f"namespace {ns!r} — the local layer keeps engine equal to the "
++            f"slug's namespace (use rename to move a slug between engines)."
++        )
++    if str(root) not in sys.path:
++        sys.path.insert(0, str(root))
++    try:
++        from scripts.lib.profiles.compose_registry import _entry
++    except Exception as exc:
++        raise Refusal(f"compose_registry does not import: {exc}")
++    kwargs = {k: v for k, v in entry.items() if k != "origin"}
++    try:
++        _entry(origin="local", **kwargs)
++    except TypeError as exc:
++        raise Refusal(f"entry {slug!r} has bad _entry kwargs: {exc}")
++    except ValueError as exc:
++        raise Refusal(f"entry {slug!r}: {exc}")
++
++
++def plan_rename(raw: dict, old: str, new: str, root: Path) -> dict:
++    _check_local_slug_present(raw, old, root)
++    if not new or new.count("/") != 1 or new.startswith("/") or new.endswith("/"):
++        raise Refusal(f"new slug {new!r} must be '<engine>/<name>'")
++    if old == new:
++        raise Refusal("old and new slug are identical — nothing to rename")
++    if new in _core_slugs(root):
++        raise Refusal(
++            f"{new!r} is a CURATED catalog slug — cannot rename onto it. A "
++            f"curated slug owns the lookup; pick a different local name."
++        )
++    ns = new.split("/", 1)[0]
++    if ns not in _known_engines(root):
++        known = ", ".join(sorted(_known_engines(root))) or "(none)"
++        raise Refusal(
++            f"new slug namespace {ns!r} is not a known engine. Known engines: "
++            f"{known}. Register the engine first (catalog.sh register writes a "
++            f"local engine profile for your own build)."
++        )
++    if new in raw:
++        raise Refusal(f"local slug already exists: {new}")
++    entry = dict(raw[old])
++    entry["engine"] = ns  # the engine field ALWAYS equals the namespace.
++    _validate(entry, new, root)
++    return {"op": "rename", "old": old, "new": new, "entry": entry}
++
++
++def plan_update(raw: dict, slug: str, sets: dict, root: Path) -> dict:
++    _check_local_slug_present(raw, slug, root)
++    for key in sets:
++        if key in _NON_EDITABLE:
++            raise Refusal(
++                f"--set {key}=... is refused: {key!r} is stamped by the loader, "
++                f"not editable in the local layer."
++            )
++    ns = slug.split("/", 1)[0]
++    if "engine" in sets and str(sets["engine"]) != ns:
++        raise Refusal(
++            f"--set engine=... cannot move an entry to another engine "
++            f"(that would break the engine==namespace invariant). Use rename "
++            f"--slug {slug} --to {sets['engine']}/<name> instead."
++        )
++    entry = dict(raw[slug])
++    entry.update(sets)
++    entry["engine"] = ns
++    _validate(entry, slug, root)
++    return {"op": "update", "slug": slug, "entry": entry, "sets": sets}
++
++
++def _describe(plan: dict) -> str:
++    if plan["op"] == "rename":
++        lines = [
++            f"operation   rename {plan['old']}  →  {plan['new']}",
++            f"engine      {plan['entry'].get('engine')}",
++            f"registry    rewrite entry in {_LOCAL_REGISTRY_REL}",
++        ]
++    else:
++        lines = [f"operation   update {plan['slug']}"]
++        for k, v in plan["sets"].items():
++            lines.append(f"set         {k} = {v!r}")
++        lines.append(f"registry    rewrite entry in {_LOCAL_REGISTRY_REL}")
++    return "\n".join(f"[amend]   {ln}" for ln in lines)
++
++
++def amend_local(root: Path, plan: dict, *, dry_run: bool = False) -> None:
++    print(_describe(plan), file=sys.stderr)
++    if dry_run:
++        _info("--dry-run — nothing written")
++        return
++    raw = _load_local_raw(root)
++    if plan["op"] == "rename":
++        old, new = plan["old"], plan["new"]
++        if old not in raw:
++            raise Refusal(f"{old} is no longer in {_LOCAL_REGISTRY_REL}")
++        # Preserve the entry's original position: rebuild the dict, swapping the
++        # key in place rather than appending (a `git diff` of the layer stays a
++        # one-line rename instead of a whole-file shuffle).
++        out: dict = {}
++        for slug, entry in raw.items():
++            if slug == old:
++                out[new] = plan["entry"]
++            else:
++                out[slug] = entry
++        raw = out
++    else:
++        if plan["slug"] not in raw:
++            raise Refusal(f"{plan['slug']} is no longer in {_LOCAL_REGISTRY_REL}")
++        raw[plan["slug"]] = plan["entry"]
++    _write_registry(root, raw)
++    _info("amended " + _LOCAL_REGISTRY_REL)
++
++
++def _coerce(value: str):
++    """A --set value arrives as text. Parse JSON scalars so numbers/booleans
++    stay their type; otherwise keep the raw string."""
++    try:
++        return json.loads(value)
++    except Exception:
++        return value
++
++
++def main(argv: Optional[list[str]] = None) -> int:
++    ap = argparse.ArgumentParser(
++        prog="amend.py",
++        description="Rename / update a LOCAL-layer catalog entry (never the curated catalog).",
++    )
++    sub = ap.add_subparsers(dest="op", required=True)
++
++    r = sub.add_parser("rename", help="rename a local slug")
++    r.add_argument("--slug", required=True, help="the current local slug")
++    r.add_argument("--to", required=True, help="the new <engine>/<name> slug")
++
++    u = sub.add_parser("update", help="edit a field on a local entry")
++    u.add_argument("--slug", required=True, help="the local slug to amend")
++    u.add_argument("--set", dest="sets", action="append", default=[],
++                   metavar="KEY=VALUE", help="field to set (repeatable)")
++
++    for sp in (r, u):
++        sp.add_argument("--root", default=str(_DEFAULT_ROOT), help="repo root")
++        sp.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
++
++    args = ap.parse_args(argv)
++    root = Path(args.root).resolve()
++
++    try:
++        raw = _load_local_raw(root)
++        if args.op == "rename":
++            plan = plan_rename(raw, args.slug, args.to, root)
++        else:
++            sets: dict = {}
++            for item in args.sets:
++                if "=" not in item:
++                    raise Refusal(f"--set {item!r} is not KEY=VALUE")
++                k, v = item.split("=", 1)
++                sets[k.strip()] = _coerce(v)
++            if not sets:
++                raise Refusal("update needs at least one --set KEY=VALUE")
++            plan = plan_update(raw, args.slug, sets, root)
++        amend_local(root, plan, dry_run=args.dry_run)
++    except Refusal as exc:
++        print(f"[amend] refused: {exc}", file=sys.stderr)
++        return EXIT_COLLISION
++    except InternalError as exc:
++        print(f"[amend] FAILED: {exc}", file=sys.stderr)
++        return EXIT_INTERNAL
++
++    if not args.dry_run:
++        if args.op == "rename":
++            print(f"RENAME_OK {args.slug} {args.to}")
++        else:
++            print(f"UPDATE_OK {args.slug}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

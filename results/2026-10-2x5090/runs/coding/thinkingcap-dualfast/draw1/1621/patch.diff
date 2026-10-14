@@ -1,0 +1,96 @@
+diff --git a/scripts/quality-test.sh b/scripts/quality-test.sh
+index b055e42..c5c23e8 100755
+--- a/scripts/quality-test.sh
++++ b/scripts/quality-test.sh
+@@ -1231,7 +1231,14 @@ if [[ -z "$RESUME" && "$NO_THINKING" != "1" && -n "${CONTAINER:-}" && "${CONTAIN
+     if [[ -n "$_sb_effort" ]]; then _sb_args+=(--effort "$_sb_effort"); fi
+     _sb_rc=0
+     _sb_out="$(printf '%s\n' "$_sb_lines" | python3 "${ROOT_DIR}/scripts/lib/effort_budget.py" "${_sb_args[@]}" 2>&1)" || _sb_rc=$?
++    # The numeric budget (from either engine) plus its message; the shared block
++    # below sizes the client cap and records it ONCE, so the two read paths stay in
++    # lockstep (a vLLM/SGLang [effort-budget] line, or a llama.cpp --reasoning-budget).
++    _sb_found=0        # 1 when a numeric budget was read
++    _sb_what=""        # the message prefix for a found budget
++    _sb_tb_suffix=""   # the --thinking-budget-override message
+     if [[ "$_sb_rc" == "0" && "$_sb_out" =~ ^[0-9]+$ ]]; then
++      # vLLM / SGLang: the [effort-budget] v1 boot line — a budget chosen by effort.
+       SERVER_THINKING_BUDGET="$_sb_out"
+       SERVER_THINKING_EFFORT="$_sb_effort"
+       if [[ -z "$SERVER_THINKING_EFFORT" ]]; then
+@@ -1251,8 +1258,60 @@ print(info.get("default_effort") or "")' "${ROOT_DIR}/scripts/lib/effort_budget.
+         _sb_eff_note=" (the server's default effort, ${SERVER_THINKING_EFFORT})"
+       fi
+       _sb_what="server budget ${SERVER_THINKING_BUDGET} reasoning tokens${_sb_eff_note}, read from ${CONTAINER}'s boot log"
++      _sb_tb_suffix="--thinking-budget ${THINKING_BUDGET} is sent per request and wins over it; cap from --thinking-budget"
++      _sb_found=1
++    elif [[ "$_sb_rc" == "0" && "$_sb_out" == "off" ]]; then
++      SERVER_THINKING_BUDGET="off"
++      echo "[quality-test] server budget: off (${CONTAINER} booted with THINKING_BUDGETS=off) — thinking cap unchanged"
++    else
++      # No [effort-budget] v1 line (rc 2 = absent, rc 0 = the grep found nothing).
++      # A llama.cpp slug never prints one: its budget is the --reasoning-budget BOOT
++      # flag — one value for every effort, which a request cannot change — so read
++      # the container's boot command instead, expanding ${REASONING_BUDGET:-N} the
++      # way the shell would (through Config.Env; the shipped qwen3.8 composes emit
++      # --reasoning-budget "${REASONING_BUDGET:-32768}"). thinking-budget.sh's facts
++      # reader does exactly that, and the LAST occurrence wins (its parser).
++      _sb_kind=""
++      if [[ "$_sb_rc" == "0" || "$_sb_rc" == "2" ]]; then
++        # The same engine detection the --thinking-budget verification uses
++        # (container name, then image, then /v1/models owned_by): thinking-budget.sh's.
++        # shellcheck source=lib/thinking-budget.sh
++        source "${ROOT_DIR}/scripts/lib/thinking-budget.sh"
++        _sb_kind="$(thinking_budget_engine_kind)"
++      fi
++      if [[ "$_sb_kind" == "llamacpp" ]]; then
++        _sb_facts="$(docker inspect "$CONTAINER" 2>/dev/null | _thinking_budget_container_facts llamacpp)"
++        case "$_sb_facts" in
++          "BUDGET -1"|"BUDGET none")
++            SERVER_THINKING_BUDGET="off"
++            echo "[quality-test] server budget: off (${CONTAINER} boots llama.cpp with --reasoning-budget -1 or none: unrestricted)"
++            ;;
++          "BUDGET unresolvable"*)
++            echo "[quality-test] server budget: unknown (llama.cpp --reasoning-budget unresolvable: ${_sb_facts#BUDGET unresolvable } — cannot tell the effective value) — thinking cap unchanged"
++            ;;
++          "BUDGET "*)
++            SERVER_THINKING_BUDGET="${_sb_facts#BUDGET }"
++            SERVER_THINKING_EFFORT=""
++            _sb_what="server budget ${SERVER_THINKING_BUDGET} reasoning tokens (llama.cpp --reasoning-budget, the same for every effort), read from ${CONTAINER}'s boot command"
++            _sb_tb_suffix="the --thinking-budget ${THINKING_BUDGET} this run verified; cap from --thinking-budget"
++            _sb_found=1
++            ;;
++          *)
++            echo "[quality-test] server budget: unknown (llama.cpp --reasoning-budget unresolvable from ${CONTAINER}'s boot command) — thinking cap unchanged"
++            ;;
++        esac
++      elif [[ "$_sb_rc" == "0" || "$_sb_rc" == "2" ]]; then
++        echo "[quality-test] server budget: unknown (no [effort-budget] v1 line in ${CONTAINER}'s boot log) — thinking cap unchanged"
++      else
++        echo "[quality-test] WARN: could not read the server budget from ${CONTAINER}'s boot log — thinking cap unchanged:" >&2
++        printf '%s\n' "$_sb_out" | sed 's/^/[quality-test]   /' >&2
++      fi
++    fi
++    # A numeric budget was read (either engine): size the client cap so the answer
++    # after the server's forced close is not cut off, and record the budget.
++    if [[ "$_sb_found" == "1" ]]; then
+       if [[ -n "$THINKING_BUDGET" ]]; then
+-        echo "[quality-test] ${_sb_what} — --thinking-budget ${THINKING_BUDGET} is sent per request and wins over it; cap from --thinking-budget"
++        echo "[quality-test] ${_sb_what} — ${_sb_tb_suffix}"
+         SERVER_THINKING_BUDGET=""; SERVER_THINKING_EFFORT=""
+       elif [[ "$THINKING_MAX_TOKENS_EXPLICIT" == "1" ]]; then
+         echo "[quality-test] ${_sb_what} — your thinking cap ${THINKING_MAX_TOKENS} is kept"
+@@ -1276,14 +1335,6 @@ print(info.get("default_effort") or "")' "${ROOT_DIR}/scripts/lib/effort_budget.
+           echo "[quality-test] ${_sb_what} — the default thinking cap ${DEFAULT_THINKING_MAX_TOKENS} already leaves ≥ ${_sb_headroom} tokens for the answer"
+         fi
+       fi
+-    elif [[ "$_sb_rc" == "0" && "$_sb_out" == "off" ]]; then
+-      SERVER_THINKING_BUDGET="off"
+-      echo "[quality-test] server budget: off (${CONTAINER} booted with THINKING_BUDGETS=off) — thinking cap unchanged"
+-    elif [[ "$_sb_rc" == "0" || "$_sb_rc" == "2" ]]; then
+-      echo "[quality-test] server budget: unknown (no [effort-budget] v1 line in ${CONTAINER}'s boot log) — thinking cap unchanged"
+-    else
+-      echo "[quality-test] WARN: could not read the server budget from ${CONTAINER}'s boot log — thinking cap unchanged:" >&2
+-      printf '%s\n' "$_sb_out" | sed 's/^/[quality-test]   /' >&2
+     fi
+   fi
+ fi

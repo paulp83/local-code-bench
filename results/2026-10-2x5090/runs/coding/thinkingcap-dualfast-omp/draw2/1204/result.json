@@ -1,0 +1,27 @@
+{
+ "n": 1204,
+ "config": "thinkingcap-dualfast-omp",
+ "draw": 2,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 1799.8,
+ "steps": 140,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.333,
+ "checks_passed": 1,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/profiles-local/README.md",
+  "scripts/lib/profiles/compose_registry.py",
+  "scripts/lib/profiles/export_pr.py",
+  "scripts/lib/profiles/promote.py",
+  "tools/serve-cockpit/club3090_cockpit/data.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-registry-origin-field.sh": 1
+ }
+}

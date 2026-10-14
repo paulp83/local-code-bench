@@ -1,0 +1,112 @@
+diff --git a/scripts/lib/p2p-state.sh b/scripts/lib/p2p-state.sh
+index 6b53fb8..387be53 100644
+--- a/scripts/lib/p2p-state.sh
++++ b/scripts/lib/p2p-state.sh
+@@ -101,7 +101,10 @@ p2p_driver_flavor() {
+ # understood by the classifier. Keeping this here makes bench.sh and report.sh
+ # consume identical evidence. In particular, SGLang does not run our
+ # detect_nvlink.sh entrypoint, but it emits definitive runtime lines for NCCL
+-# and CustomAllReduceV2 initialization.
++# and for custom-all-reduce init: CustomAllReduceV2 logs `All Reduce config:`
++# at setup, and the V1 CustomAllreduce — the only build a PCIe rig gets, since
++# can_use_custom_all_reduce_v2 admits V2 only on a FULL NVLink — logs nothing
++# at init but `Registering N cuda graph addresses` once CUDA-graph capture ends.
+ p2p_engine_log_evidence() {
+   awk '
+     index($0, "server_args=") && index($0, "disable_custom_all_reduce") {
+@@ -118,6 +121,7 @@ p2p_engine_log_evidence() {
+     index($0, "disable_custom_all_reduce=True") ||
+     index($0, "Setup Custom allreduce failed") ||
+     index($0, "sglang is using nccl==") ||
++    index($0, "cuda graph addresses") ||
+     index($0, "All Reduce config:") { print }
+   '
+ }
+@@ -126,7 +130,9 @@ p2p_engine_log_evidence() {
+ # report.sh and bench.sh gather exactly this normalized text: the container's
+ # `[nvlink]` boot lines, resolved NCCL_P2P*/NVLINK_MODE env, and the engine's
+ # own all-reduce runtime lines. vLLM reports vetoes; SGLang additionally reports
+-# `sglang is using nccl==...` and `All Reduce config: ...` after initialization.
++# `sglang is using nccl==...` and, once its custom all-reduce is live, the
++# success wording of whichever version ran: `All Reduce config: ...` (V2, NVLink)
++# or `Registering N cuda graph addresses` (V1 — what every PCIe rig runs).
+ # Prints: "on" | "nccl_only_operator" | "nccl_only_gated" | "nccl_only_degraded"
+ #         | "nccl_only_nolib" | "nccl_only_failed" | "off" | "unknown" | "requested".
+ # Reads detect_nvlink.sh's machine-readable STATE line for OUR configuration and
+@@ -266,8 +272,16 @@ p2p_classify_engagement() {
+       case "$text" in *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*|*NCCL_P2P_DISABLE=1*) echo off; return 0 ;; esac
+       echo nccl_only_operator; return 0 ;;
+   esac
++  # Custom-AR success wordings. `All Reduce config:` is CustomAllReduceV2's
++  # init line, but SGLang admits V2 only on a FULL NVLink
++  # (can_use_custom_all_reduce_v2 → full_nvlink), so every PCIe rig runs the V1
++  # CustomAllreduce — which logs NOTHING at init. Its only success proof is
++  # `Registering N cuda graph addresses` (rank 0, after CUDA-graph capture;
++  # register_graph_buffers early-returns when the kernel is disabled, so the
++  # line implies the kernel is live). Without it a healthy PCIe SGLang boot
++  # could never score on — it was the whole "no P2P engagement signal" report.
+   case "$text" in
+-    *"All Reduce config:"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
++    *"All Reduce config:"*|*"cuda graph addresses"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
+   esac
+   case "$text" in
+     *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*) echo off; return 0 ;;
+diff --git a/scripts/report.sh b/scripts/report.sh
+index db97e00..67b476c 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -1198,7 +1198,7 @@ else
+     _p2p_class_stream="$(docker logs "$CONTAINER" 2>&1 | p2p_engine_log_evidence || true)"
+     nvlink_boot="$(printf '%s\n' "$_p2p_class_stream" | command grep -F '[nvlink]' | tail -8)"
+     p2p_env="$(docker exec "$CONTAINER" env 2>/dev/null | command grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort)"
+-    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:' || true)"
++    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:|cuda graph addresses' || true)"
+     echo "**Interconnect / P2P engagement:**"
+     if [[ -n "$nvlink_boot" || -n "$p2p_env" || -n "$engine_ar_runtime" ]]; then
+       echo '```'
+diff --git a/scripts/tests/test-p2p-state.sh b/scripts/tests/test-p2p-state.sh
+index a34bdc1..9149555 100755
+--- a/scripts/tests/test-p2p-state.sh
++++ b/scripts/tests/test-p2p-state.sh
+@@ -129,6 +129,41 @@ assert_contains "$out" "#1462"
+ unset _sgl_fail _ev _ok_boot
+ echo "  ✓ SGLang custom-AR setup failure classified as a fallback, not an opt-out or unknown (#1462)"
+ 
++# ⭐ #1462 follow-up, PCIe rigs: SGLang admits CustomAllReduceV2 only on a FULL
++# NVLink (can_use_custom_all_reduce_v2 → full_nvlink), so every PCIe rig runs the
++# V1 CustomAllreduce — which logs NOTHING at init. Its only success signal is the
++# rank-0 line after CUDA-graph capture (register_graph_buffers early-returns when
++# the kernel is disabled, so the line implies it is live). Before this fix such a
++# healthy boot scored "unknown" — report.sh and the bench card said "no P2P
++# engagement signal" and it could never score on.
++# Real wording: sglang/srt/distributed/device_communicators/custom_all_reduce.py.
++_sgl_v1=$(cat <<'EOF'
++[2026-10-11 03:14:07] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
++[2026-10-11 03:14:12 TP0] sglang is using nccl==2.30.7
++[2026-10-11 03:15:03 TP0] Registering 4352 cuda graph addresses
++EOF
++)
++_ev1="$(printf '%s\n' "$_sgl_v1" | p2p_engine_log_evidence)"
++assert_contains "$_ev1" "Registering 4352 cuda graph addresses"
++r="$(printf '%s\n' "$_ev1" | p2p_classify_engagement)"
++[[ "$r" == "on" ]] || fail "SGLang V1 graph-buffer registration -> custom AR on (got $r)"
++r="$(printf '%s\n' "$_sgl_v1" | p2p_classify_engagement)"   # unfiltered stream too
++[[ "$r" == "on" ]] || fail "unfiltered SGLang V1 PCIe boot -> on (got $r)"
++# The restart-epoch rules apply to a V1 success as well: a later operator-disabled
++# restart must not inherit the earlier boot's registration line…
++r="$(printf '%s\n%s' "$_ev1" "[sglang] BOOT disable_custom_all_reduce=True" | p2p_classify_engagement)"
++[[ "$r" == "nccl_only_operator" ]] || fail "operator-disabled restart must beat an earlier V1 registration (got $r)"
++# …and a stale registration must not mask a latest boot with no AR evidence.
++r="$(printf '%s\n%s' "$_ev1" "[sglang] BOOT disable_custom_all_reduce=False" | p2p_classify_engagement)"
++[[ "$r" == "unknown" ]] || fail "later boot with no AR evidence stays unknown, not a stale on (got $r)"
++# An engine veto outranks success wording inside the current boot slice: the two
++# cannot co-occur (registration implies live), so if one ever did, the safe read
++# is nccl_only — never on.
++r="$(printf '%s\n%s\n%s' '[sglang] BOOT disable_custom_all_reduce=False' "CustomAllreduce is disabled because it's not supported on more than two PCIe-only GPUs." 'Registering 4352 cuda graph addresses' | p2p_classify_engagement)"
++[[ "$r" == "nccl_only_gated" ]] || fail "same-slice veto must outrank a registration line (got $r)"
++unset _sgl_v1 _ev1
++echo "  ✓ SGLang V1 (PCIe): graph-buffer registration scores custom-AR on; epoch + veto precedence preserved"
++
+ # ── 3. capability probes via faked nvidia-smi ────────────────────────────────
+ mk_smi() { cat > "$TMP/nvidia-smi" <<EOF
+ #!/usr/bin/env bash

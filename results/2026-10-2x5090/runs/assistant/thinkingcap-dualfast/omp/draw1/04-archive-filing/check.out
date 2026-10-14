@@ -1,0 +1,8 @@
+PASS file-named-correctly
+PASS draft-removed-from-inbox
+PASS no-stray-files-in-results
+PASS index-matches-expected
+PASS index-row-present
+PASS old-rows-kept
+PASS section-order
+PASS: 7 FAIL: 0

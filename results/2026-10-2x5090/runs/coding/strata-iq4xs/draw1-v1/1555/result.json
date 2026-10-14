@@ -1,0 +1,26 @@
+{
+ "n": 1555,
+ "config": "strata-iq4xs",
+ "draw": 1,
+ "exit_status": "LimitsExceeded",
+ "agent_s": 2303.4,
+ "steps": 100,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 1,
+ "localization": 0.667,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [
+  "scripts/tests/test-concurrency-probe-verdict.sh",
+  "scripts/tests/test-default-url-gateway.sh"
+ ],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 1
+ }
+}

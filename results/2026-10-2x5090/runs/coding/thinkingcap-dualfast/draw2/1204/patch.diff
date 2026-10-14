@@ -1,0 +1,1004 @@
+diff --git a/scripts/lib/profiles/compose_registry.py b/scripts/lib/profiles/compose_registry.py
+index 31b69e8..b50127f 100644
+--- a/scripts/lib/profiles/compose_registry.py
++++ b/scripts/lib/profiles/compose_registry.py
+@@ -190,13 +190,24 @@ def _entry(
+     spec_method=None,
+     category=None,
+     weights_companions=None,
++    # Catalog PROVENANCE — a first-class field, not encoded in the slug
++    # (#1202 P2). "core" = a curated-catalog row (registry.yaml); "local" =
++    # the gitignored local layer. The local loader FORCES "local" on its rows;
++    # a core row defaults to "core". Publishing flips THIS value and leaves
++    # the slug alone (see export_pr.py).
++    origin="core",
+ ):
+     if status not in STATUS_VALUES:
+         raise ValueError(
+             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
+         )
++    if origin not in ("core", "local"):
++        raise ValueError(
++            f"{compose_path}: origin={origin!r} must be 'core' or 'local'"
++        )
+     entry = {
+         "model": model,
++        "origin": origin,
+         "weights_variant": weights_variant,
+         "workload": workload,
+         "engine": engine,
+@@ -814,9 +825,11 @@ def load_local_registry(root=None):
+     Plain-dict entries (the JSON form of _entry kwargs) are wrapped through
+     _entry(**kwargs) so a local row carries EXACTLY the same shape + defaults
+     as a core row. ANY problem — unreadable JSON, a non-object, an unknown
+-    kwarg, a bad status, a slug outside the `local/` namespace, or a slug /
+-    model-id colliding with a core row (or another local row) — raises
+-    LocalRegistryError. Loud, never a silent partial catalog."""
++    kwarg, a bad status, a slug outside the `local/` namespace, a model-id
++    colliding with a core row, or a duplicate local slug — raises
++    LocalRegistryError. A local row that shadows a CORE slug is NOT an error:
++    provenance is a field now (#1202 P2) and get_registry() resolves the
++    shadow with the core entry winning. Loud, never a silent partial catalog."""
+     root = Path(root) if root is not None else local_layer_root()
+     path = root / LOCAL_REGISTRY_REL
+     if not path.exists():
+@@ -831,7 +844,6 @@ def load_local_registry(root=None):
+         raise LocalRegistryError(
+             f"{path}: expected a JSON object of {{slug: {{_entry kwargs}}}}"
+         )
+-    core_slugs = set(COMPOSE_REGISTRY)
+     core_models = {e.get("model") for e in COMPOSE_REGISTRY.values()}
+     local: dict = {}
+     local_models: set = set()
+@@ -841,8 +853,11 @@ def load_local_registry(root=None):
+                 f"{path}: local slug {slug!r} must live under the "
+                 f"{LOCAL_SLUG_PREFIX!r} namespace"
+             )
+-        if slug in core_slugs or slug in local:
+-            raise LocalRegistryError(f"{path}: local slug collides: {slug!r}")
++        if slug in local:
++            # A shadow of a CORE slug is NOT an error now that provenance is a
++            # field (#1202 P2): get_registry() resolves the collision with the
++            # CORE entry winning. Only a duplicate among LOCAL rows is fatal.
++            raise LocalRegistryError(f"{path}: duplicate local slug: {slug!r}")
+         model = kwargs.get("model")
+         if model in core_models:
+             raise LocalRegistryError(
+@@ -850,8 +865,14 @@ def load_local_registry(root=None):
+             )
+         if model in local_models:
+             raise LocalRegistryError(f"{path}: duplicate local model id {model!r}")
++        # Provenance is AUTHORITATIVE by layer, not by user input (#1202 P2):
++        # a local row is "local" regardless of what its JSON claims, so a
++        # spoofed "origin: core" in the gitignored layer can never masquerade
++        # as a curated entry.
++        local_kwargs = dict(kwargs)
++        local_kwargs["origin"] = "local"
+         try:
+-            entry = _entry(**kwargs)
++            entry = _entry(**local_kwargs)
+         except TypeError as exc:
+             raise LocalRegistryError(
+                 f"{path}: local entry {slug!r} has bad _entry kwargs: {exc}"
+@@ -874,8 +895,11 @@ def get_registry(root=None):
+     local = load_local_registry(root)
+     if not local:
+         return COMPOSE_REGISTRY
+-    merged = dict(COMPOSE_REGISTRY)
+-    merged.update(local)
++    # CORE WINS on a slug shadow (#1202 P2): provenance is a field now, so a
++    # local row that collides with a curated slug never shadows the curated
++    # one — every runtime consumer sees the core entry's data.
++    merged = dict(local)
++    merged.update(COMPOSE_REGISTRY)
+     return merged
+ 
+ 
+diff --git a/scripts/lib/profiles/export_pr.py b/scripts/lib/profiles/export_pr.py
+index 4369d89..0f8d763 100755
+--- a/scripts/lib/profiles/export_pr.py
++++ b/scripts/lib/profiles/export_pr.py
+@@ -280,6 +280,11 @@ def translated_entry(state: dict, entry: dict) -> dict:
+     if not kw.get("kvcalc_key"):
+         kw["kvcalc_key"] = "SKIP"  # llama.cpp family default; vLLM was gated above
+     core_slug = f"{ns}/{str(entry['slug'])[len(_LOCAL_SLUG_PREFIX):]}"
++    # Provenance is a first-class field now (#1202 P2): publishing flips the
++    # entry's `origin` from the local layer to "core". It does NOT re-encode
++    # provenance into the slug — after the P3 hard-cut the rename above
++    # collapses to the identity and THIS line is the whole of publishing.
++    kw["origin"] = "core"
+     return {"slug": core_slug, "kwargs": kw}
+ 
+ 
+diff --git a/scripts/lib/profiles/registry.yaml b/scripts/lib/profiles/registry.yaml
+index 5ed92b9..ed09add 100644
+--- a/scripts/lib/profiles/registry.yaml
++++ b/scripts/lib/profiles/registry.yaml
+@@ -22,6 +22,7 @@ schema: 1
+ entries:
+   vllm/minimal:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -51,6 +52,7 @@ entries:
+     serve_aliases: []
+   vllm/dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -80,6 +82,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-fast:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -109,6 +112,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-max:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -138,6 +142,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-lmcache:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-lmcache
+@@ -167,6 +172,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-dual-balanced:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: awq-bf16-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -196,6 +202,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-multi-fast:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -225,6 +232,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-multi-max:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -254,6 +262,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-27b-single-nvfp4:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -285,6 +294,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-27b-dual-nvfp4:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -316,6 +326,7 @@ entries:
+     fallback_sm: 7.5
+   llamacpp/default:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -345,6 +356,7 @@ entries:
+     serve_aliases: []
+   llamacpp/mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -374,6 +386,7 @@ entries:
+     serve_aliases: []
+   llamacpp/bounded-thinking:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: tool-heavy
+     engine: llama-cpp-local
+@@ -403,6 +416,7 @@ entries:
+     serve_aliases: []
+   llamacpp/mtp-vision:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: unsloth-q4km
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -433,6 +447,7 @@ entries:
+     serve_aliases: []
+   ik-llama/iq4ks-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ubergarm-iq4ks
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -462,6 +477,7 @@ entries:
+     serve_aliases: []
+   ik-llama/iq4ks-mtp-vision:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ubergarm-iq4ks
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -492,6 +508,7 @@ entries:
+     serve_aliases: []
+   ik-llama/iq4ks-two-stage:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ubergarm-iq4ks
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -521,6 +538,7 @@ entries:
+     serve_aliases: []
+   beellama/dflash:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: beellama-q5ks-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -553,6 +571,7 @@ entries:
+       - "8.6"
+   beellama/qwopus-coder:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: qwopus-coder-mtp-q5km
+     workload: fast-chat
+     engine: beellama-local
+@@ -582,6 +601,7 @@ entries:
+     serve_aliases: []
+   beellama/carnice-v2-single-q5km-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: carnice-v2-q5km
+     workload: fast-chat
+     engine: beellama-local
+@@ -611,6 +631,7 @@ entries:
+     serve_aliases: []
+   beellama/carnice-v2-dual-q8-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: carnice-v2-q8
+     workload: fast-chat
+     engine: beellama-local
+@@ -640,6 +661,7 @@ entries:
+     serve_aliases: []
+   llamacpp/qwen27b-pi-reasoning-single:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: pi-reasoning-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -669,6 +691,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-mtp:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -698,6 +721,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-long:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -727,6 +751,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-two-stage:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: tool-heavy
+     engine: llama-cpp-local
+@@ -756,6 +781,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: tool-heavy
+     engine: llama-cpp-local
+@@ -785,6 +811,7 @@ entries:
+     serve_aliases: []
+   ik-llama/prism-pro-dq-dual-vision:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: ex0bit-prism-pro-dq
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -815,6 +842,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-mtp-compact:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-compact
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -844,6 +872,7 @@ entries:
+     serve_aliases: []
+   ik-llama/byteshape-iq4xs-mtp:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: byteshape-iq4xs
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -873,6 +902,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-mtp-compact-long:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-compact
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -902,6 +932,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-fit-q8q5:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-compact
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -931,6 +962,7 @@ entries:
+     serve_aliases: []
+   ik-llama/apex-mtp-quality-dual:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: mudler-apex-quality
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -960,6 +992,7 @@ entries:
+     serve_aliases: []
+   llamacpp/hauhaucs-35ba3b-dual:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: morikomorizz-q6kp
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -989,6 +1022,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-mtp-tp1:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-gemma-stable
+@@ -1019,6 +1053,7 @@ entries:
+     required_sm: 9.0
+   vllm/gemma-bf16-mtp:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-gemma-stable
+@@ -1048,6 +1083,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-int8-mtp:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: autoround-int4
+     workload: multi-stream-tenant
+     engine: vllm-gemma-stable
+@@ -1078,6 +1114,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-31b-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: qat-awq-int4
+     workload: multi-stream-tenant
+     engine: vllm-stable
+@@ -1108,6 +1145,7 @@ entries:
+       - gemma-4-31b-autoround
+   vllm/gemma-31b-multi-google-qat-w4a16:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: google-qat-w4a16
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -1137,6 +1175,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-31b-qat-w4a16-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: qat-w4a16
+     workload: multi-stream-tenant
+     engine: vllm-gemma-stable
+@@ -1167,6 +1206,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-12b-dual-bf16-mtp:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: bf16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1196,6 +1236,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-12b-single-int8-mtp:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: autoround-int8
+     workload: fast-chat
+     engine: vllm-gemma4-unified
+@@ -1225,6 +1266,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-12b-qat-w4a16-single:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: qat-w4a16
+     workload: fast-chat
+     engine: vllm-gemma4-unified
+@@ -1254,6 +1296,7 @@ entries:
+     serve_aliases: []
+   beellama/gemma-12b-single-q8kxl:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: beellama-q8kxl
+     workload: fast-chat
+     engine: beellama-local
+@@ -1283,6 +1326,7 @@ entries:
+     serve_aliases: []
+   llamacpp/gemma-12b-single-q8kxl:
+     model: gemma-4-12b
++    origin: core
+     weights_variant: unsloth-q8kxl
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -1312,6 +1356,7 @@ entries:
+     serve_aliases: []
+   beellama/gemma-dflash:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: beellama-q4ks-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1344,6 +1389,7 @@ entries:
+       - "8.6"
+   beellama/gemma-dflash-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: beellama-q4ks-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1374,6 +1420,7 @@ entries:
+     serve_aliases: []
+   beellama/qwen-mtp-dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: beellama-q8kxl-mtp
+     workload: fast-chat
+     engine: beellama-local
+@@ -1403,6 +1450,7 @@ entries:
+     serve_aliases: []
+   beellama/qwen-dflash-dual:
+     model: qwen3.6-27b
++    origin: core
+     weights_variant: beellama-q8kxl-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1433,6 +1481,7 @@ entries:
+     serve_aliases: []
+   beellama/gemma-q8-dflash-dual:
+     model: gemma-4-31b
++    origin: core
+     weights_variant: beellama-q8kxl-dflash
+     workload: fast-chat
+     engine: beellama-local
+@@ -1463,6 +1512,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-26ba4b-single:
+     model: gemma-4-26b-a4b
++    origin: core
+     weights_variant: awq
+     workload: fast-chat
+     engine: vllm-gemma-stable
+@@ -1492,6 +1542,7 @@ entries:
+     serve_aliases: []
+   vllm/gemma-26ba4b-dual:
+     model: gemma-4-26b-a4b
++    origin: core
+     weights_variant: awq
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1521,6 +1572,7 @@ entries:
+     serve_aliases: []
+   vllm/diffusiongemma-dual:
+     model: diffusiongemma-26b-a4b
++    origin: core
+     weights_variant: fp8
+     workload: fast-chat
+     engine: vllm-diffusion-gemma
+@@ -1550,6 +1602,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-a3b-preview-single:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1579,6 +1632,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-35b-a3b-dual:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: autoround-int4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1608,6 +1662,7 @@ entries:
+     serve_aliases: []
+   vllm/qwen-35b-a3b-single-nvfp4:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1639,6 +1694,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-35b-a3b-dual-nvfp4:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1670,6 +1726,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-35b-a3b-dual-nvfp4-fast:
+     model: qwen3.6-35b-a3b
++    origin: core
+     weights_variant: nvfp4-fast
+     workload: fast-chat
+     engine: vllm-stable
+@@ -1701,6 +1758,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/qwen-agentworld-35b-a3b-dual-awq-int4:
+     model: qwen-agentworld-35b-a3b
++    origin: core
+     weights_variant: cyankiwi-awq-int4
+     workload: multi-stream-tenant
+     engine: vllm-stable
+@@ -1730,6 +1788,7 @@ entries:
+     serve_aliases: []
+   vllm/agents-a1-dual:
+     model: agents-a1
++    origin: core
+     weights_variant: fp8-dynamic
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -1759,6 +1818,7 @@ entries:
+     serve_aliases: []
+   llamacpp/deckard40B-dual-mtp:
+     model: qwen3.6-40b-deckard
++    origin: core
+     weights_variant: piehsoft-q6k
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -1789,6 +1849,7 @@ entries:
+     category: uncensored
+   llamacpp-club3090/inkling-small-dual-iq4xs-moecache:
+     model: inkling-small
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -1820,6 +1881,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/inkling-small-dual-iq4xs-residency:
+     model: inkling-small
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -1851,6 +1913,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/inkling-small-multi4-iq4xs-moecache:
+     model: inkling-small
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -1882,6 +1945,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-dual-iq4xs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -1915,6 +1979,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi4-iq4xs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -1948,6 +2013,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi8-iq4xs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq4xs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -1981,6 +2047,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-dual-iq3xxs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq3xxs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2014,6 +2081,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi4-iq3xxs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq3xxs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2047,6 +2115,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi8-iq3xxs-moecache:
+     model: glm-5.3-flash
++    origin: core
+     weights_variant: unsloth-ud-iq3xxs
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2080,6 +2149,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/qwen38-flash-next-dual-q4kxl-moecache:
+     model: qwen3.8-flash-next
++    origin: core
+     weights_variant: unsloth-ud-q4kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2128,6 +2198,7 @@ entries:
+     sampler_default_mode: instruct
+   llamacpp-club3090/qwen38-flash-next-multi4-q4kxl-moecache:
+     model: qwen3.8-flash-next
++    origin: core
+     weights_variant: unsloth-ud-q4kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2176,6 +2247,7 @@ entries:
+     sampler_default_mode: instruct
+   llamacpp-club3090/qwen38-flash-next-multi8-q4kxl-moecache:
+     model: qwen3.8-flash-next
++    origin: core
+     weights_variant: unsloth-ud-q4kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2224,6 +2296,7 @@ entries:
+     sampler_default_mode: instruct
+   llamacpp-club3090/deepseek-flash-multi4-q8-moecache:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -2256,6 +2329,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/deepseek-flash-vision-dual-q8-moecache:
+     model: deepseek-v4-flash-vision-exp
++    origin: core
+     weights_variant: unsloth-ud-q8kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2287,6 +2361,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/deepseek-flash-vision-multi4-q8-moecache:
+     model: deepseek-v4-flash-vision-exp
++    origin: core
+     weights_variant: unsloth-ud-q8kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.6
+@@ -2318,6 +2393,7 @@ entries:
+     category: frontier
+   llamacpp-club3090/deepseek-flash-dual-q8-moecache:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llamacpp-club3090-v1.5
+@@ -2350,6 +2426,7 @@ entries:
+     category: frontier
+   llamacpp/deepseek-flash-dual-q8:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2382,6 +2459,7 @@ entries:
+     category: frontier
+   llamacpp/deepseek-flash-dual-iq2:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-iq2-xxs
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2414,6 +2492,7 @@ entries:
+     category: frontier
+   llamacpp/deepseek-flash-multi4-q8:
+     model: deepseek-v4-flash-0731
++    origin: core
+     weights_variant: unsloth-q8-kxl
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2446,6 +2525,7 @@ entries:
+     category: frontier
+   llamacpp/tess-dual-mtp:
+     model: tess-4-27b
++    origin: core
+     weights_variant: migtissera-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -2475,6 +2555,7 @@ entries:
+     serve_aliases: []
+   vllm/tess-dual-nvfp4:
+     model: tess-4-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2506,6 +2587,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/tess-dual-w4a16:
+     model: tess-4-27b
++    origin: core
+     weights_variant: leaderboard-w4a16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2536,6 +2618,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/thinkingcap-dual-w4a8:
+     model: thinkingcap-27b
++    origin: core
+     weights_variant: w4a16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2566,6 +2649,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/nemotron-75b-multi-mtp:
+     model: nemotron-3-puzzle-75b
++    origin: core
+     weights_variant: nvfp4
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2597,6 +2681,7 @@ entries:
+     fallback_sm: 7.5
+   vllm/nemotron-75b-dual-w4a16:
+     model: nemotron-3-puzzle-75b
++    origin: core
+     weights_variant: w4a16
+     workload: fast-chat
+     engine: vllm-stable
+@@ -2628,6 +2713,7 @@ entries:
+     fallback_sm: 7.5
+   ik-llama/ornith9b-single:
+     model: ornith-1.0-9b
++    origin: core
+     weights_variant: deepreinforce-q4km
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -2657,6 +2743,7 @@ entries:
+     serve_aliases: []
+   ik-llama/ornith35b-dual:
+     model: ornith-1.0-35b
++    origin: core
+     weights_variant: deepreinforce-q8
+     workload: fast-chat
+     engine: llama-cpp-local
+@@ -2686,6 +2773,7 @@ entries:
+     serve_aliases: []
+   vllm/vibethinker-3b-single:
+     model: vibethinker-3b
++    origin: core
+     weights_variant: bf16
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2715,6 +2803,7 @@ entries:
+     serve_aliases: []
+   llamacpp/vibethinker-3b-single:
+     model: vibethinker-3b
++    origin: core
+     weights_variant: prithivmlmods-q8
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2744,6 +2833,7 @@ entries:
+     serve_aliases: []
+   llamacpp/qwen38-27b-single-iq4xs:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: unsloth-iq4xs
+     workload: vision-coding
+     engine: llama-cpp-local
+@@ -2790,6 +2880,7 @@ entries:
+     sampler_default_mode: thinking
+   llamacpp/qwen38-27b-dual-q8kxl:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: unsloth-q8kxl
+     workload: long-ctx-single
+     engine: llama-cpp-local
+@@ -2835,6 +2926,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-max:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2880,6 +2972,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-max:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2925,6 +3018,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-max:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -2970,6 +3064,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-supermax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3015,6 +3110,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-supermax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3060,6 +3156,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-supermax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3105,6 +3202,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-ultramax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3150,6 +3248,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-ultramax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3195,6 +3294,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-ultramax:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: fp8
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3240,6 +3340,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-fast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3285,6 +3386,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-fast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3330,6 +3432,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-fast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3375,6 +3478,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-superfast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3420,6 +3524,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-superfast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3465,6 +3570,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-superfast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3510,6 +3616,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-ultrafast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3555,6 +3662,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi4-ultrafast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3600,6 +3708,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-multi8-ultrafast:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: autoround-int4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3645,6 +3754,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-single-nvfp4:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable
+@@ -3690,6 +3800,7 @@ entries:
+     sampler_default_mode: thinking
+   vllm/qwen38-27b-dual-nvfp4:
+     model: qwen3.8-27b
++    origin: core
+     weights_variant: nvfp4
+     workload: long-ctx-single
+     engine: vllm-stable

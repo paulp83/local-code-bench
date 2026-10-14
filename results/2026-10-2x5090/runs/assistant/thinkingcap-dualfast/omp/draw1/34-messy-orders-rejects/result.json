@@ -1,0 +1,14 @@
+{
+ "task": "34-messy-orders-rejects",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 43.1,
+ "tool_calls": 5,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 9,
+ "checks_total": 9,
+ "partial": 1.0
+}

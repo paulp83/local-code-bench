@@ -1,0 +1,14 @@
+{
+  "full_name": "Jordan Ellis",
+  "email": "jordan.ellis@example.com",
+  "country": "US",
+  "years_experience": 7,
+  "skills": [
+    "Python",
+    "SQL",
+    "Linux",
+    "incident response"
+  ],
+  "highest_degree": "BSc",
+  "available": true
+}

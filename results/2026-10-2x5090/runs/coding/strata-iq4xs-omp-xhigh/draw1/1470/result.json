@@ -1,0 +1,25 @@
+{
+ "n": 1470,
+ "config": "strata-iq4xs-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 390.7,
+ "steps": 20,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 13,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/p2p-state.sh",
+  "scripts/report.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-p2p-state.sh": 0
+ },
+ "effort_note": "ran as \"low\" but omp sent no reasoning_effort; Qwen3.8 template default xhigh (relabelled 2026-10-12)"
+}

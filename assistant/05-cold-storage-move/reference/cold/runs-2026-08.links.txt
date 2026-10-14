@@ -1,0 +1,3 @@
+latest.log -> logs/a.log
+notes/toplevel -> ../logs
+weights/current -> c.bin

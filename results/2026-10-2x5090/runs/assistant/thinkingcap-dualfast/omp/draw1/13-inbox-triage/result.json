@@ -1,0 +1,14 @@
+{
+ "task": "13-inbox-triage",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 21.4,
+ "tool_calls": 6,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 9,
+ "checks_total": 9,
+ "partial": 1.0
+}

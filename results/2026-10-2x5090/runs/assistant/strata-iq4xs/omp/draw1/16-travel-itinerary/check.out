@@ -1,0 +1,8 @@
+PASS header-exact
+PASS four-rows
+PASS row-1
+PASS row-2
+PASS row-3
+PASS row-4
+PASS total-line
+PASS: 7 FAIL: 0

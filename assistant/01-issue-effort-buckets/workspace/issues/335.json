@@ -1,0 +1,10 @@
+{
+  "number": 335,
+  "title": "TUI log pane stalls",
+  "labels": [
+    "question"
+  ],
+  "files_touched": 7,
+  "has_repro": false,
+  "needs_gpu": true
+}

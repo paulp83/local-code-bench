@@ -1,0 +1,112 @@
+diff --git a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+index 81a4f45..2332582 100644
+--- a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
++++ b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+@@ -275,6 +275,10 @@ services:
+         _gmu="$${GPU_MEMORY_UTILIZATION:-$$_gmu_tier}"; _seqs="$${MAX_NUM_SEQS:-$$_seqs_tier}"
+         _mnbt="$${MAX_NUM_BATCHED_TOKENS:-$$_mnbt_tier}"; _lptt="$${LONG_PREFILL_TOKEN_THRESHOLD:-$$_lptt_tier}"
+         _mml="$${MAX_MODEL_LEN:-$$_mml_tier}"
++        # The case below assigns LM_ONLY_ARGS in every arm and its default arm
++        # exits, so the array is always set when the exec is reached; the
++        # initialiser makes that explicit for readers and for the array-scope gate.
++        LM_ONLY_ARGS=()
+         case "$$VISION" in
+           on) LM_ONLY_ARGS=() ;;
+           off) LM_ONLY_ARGS=(--language-model-only) ;;
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..815dbe4 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -16,6 +16,14 @@
+ # ⚠️ Indentation is NOT a sufficient proxy: in these composes the branch execs sit
+ # at the same column as a block nudged inside the branch. Depth is tracked from the
+ # shell keywords instead.
++#
++# Case arms get the same treatment, twice over. (1) An arm header puts the pattern
++# IN FRONT of the assignment on the same line -- `on) LM_ONLY_ARGS=() ;;` -- so a
++# leading-`^\s*NAME=` match reads "never assigned" even though every path assigns.
++# (2) `case`/`esac` is one nested scope in the depth model, so an arm assignment
++# would still not dominate an exec in another arm. An EXHAUSTIVE case -- every arm
++# assigns NAME or exits -- is equivalent to a straight-line assignment: no path
++# gets past it without NAME set, so it dominates anything inside it or after it.
+ set -uo pipefail
+ export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
+ # #779: this gate parses compose YAML through python3; without PYTHONUTF8 a
+@@ -67,6 +75,48 @@ def scope_paths(lines):
+         if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+     return paths
+ 
++def assigns(lines, i, arr):
++    r"""Does line i assign `arr=(...)`?  Matches the plain form AND a case-arm
++    header form -- `on) NAME=(...) ;;` puts the pattern in front of the
++    assignment on the same line, so a leading `^\s*NAME=` match misses it entirely and
++    the case reads as "never assigned".  The lookbehind is a non-word char so
++    `NAME=` cannot match inside `OTHER_NAME=`."""
++    return re.search(r'(?:^|[^\w])' + re.escape(arr) + r'=\(', lines[i]) is not None
++
++ARM_END = re.compile(r'(;;|;&|;;&)\s*$')
++
++def case_blocks(lines):
++    """Every multi-line `case` -> (open line index, arms, `esac` line index), where
++    each arm is the list of line indices it spans.  A case whose EVERY arm either
++    assigns NAME or exits is equivalent to a straight-line assignment: no path
++    reaches past it without NAME being set (its default arm is the escape hatch).
++    """
++    blocks, stack = {}, []
++    for i, ln in enumerate(lines):
++        if re.match(r'^\s*case\b', ln) and not ONELINE.search(ln):
++            stack.append([i, [], []]); continue
++        if not stack: continue
++        if re.match(r'^\s*esac\b', ln):
++            start, done, cur = stack.pop()
++            if cur: done.append(cur)
++            blocks[start] = (done, i); continue
++        start, done, cur = stack[-1]
++        cur = cur + [i]
++        if ARM_END.search(ln):
++            done, cur = done + [cur], []
++        stack[-1] = [start, done, cur]
++    return blocks
++
++def case_is_exhaustive(lines, arms, arr):
++    """True iff every arm of a `case` either assigns `arr` or exits.  An `exit`
++    found inside a further nested block still counts, matching the gate's overall
++    line-level coarseness: the arms under review here are flat `pattern) ...;;`."""
++    return all(
++        any(assigns(lines, j, arr) for j in arm)
++        or any(re.search(r'\bexit\b', lines[j]) for j in arm)
++        for arm in arms
++    )
++
+ checked = refs = 0
+ problems = []
+ 
+@@ -77,16 +127,27 @@ for p in sorted(pathlib.Path("models").rglob("*.yml")):
+     checked += 1
+     lines = s.splitlines()
+     paths = scope_paths(lines)
++    cases = case_blocks(lines)
+     for i, ln in enumerate(lines):
+         if not re.match(r'^\s*exec\b', ln): continue
+         for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+             refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
++            asg = [j for j, l in enumerate(lines) if assigns(lines, j, arr)]
+             if not asg:
+                 problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
+             # an assignment dominates the exec iff it comes first AND its branch
+             # path is a prefix of the exec's (same scope, or an enclosing one)
+             ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
++            # ...unless the assignment lives in a case arm and the case is
++            # EXHAUSTIVE for this array: every arm assigns or exits, so no path
++            # gets past the case (or into any of its arms) without the array set.
++            if not ok:
++                for start, (arms, esac_i) in cases.items():
++                    if not case_is_exhaustive(lines, arms, arr): continue
++                    inside = start < i and paths[i][:len(paths[start])] == paths[start]
++                    done = esac_i < i   # the whole case already ran before the exec
++                    if inside or done:
++                        ok = True; break
+             if not ok:
+                 problems.append(
+                     f"{p}: {arr} is assigned only inside a branch that the exec on line "

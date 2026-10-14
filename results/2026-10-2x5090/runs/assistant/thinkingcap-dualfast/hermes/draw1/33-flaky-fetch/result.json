@@ -1,0 +1,14 @@
+{
+ "task": "33-flaky-fetch",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 22.4,
+ "tool_calls": 4,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 26,
+ "checks_total": 26,
+ "partial": 1.0
+}

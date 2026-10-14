@@ -1,0 +1,23 @@
+{
+ "n": 1464,
+ "config": "thinkingcap-dualfast-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 313.9,
+ "steps": 41,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 4,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/switch.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-switch-refuse-before-teardown.sh": 0
+ }
+}

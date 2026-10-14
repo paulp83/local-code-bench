@@ -1,0 +1,103 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..5b07b3f 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -496,6 +496,63 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     return (bool(vol_markers) and vol_ok) or (bool(inv_markers) and inv_ok)
+ 
+ 
++# --------------------------------------------------------------------------
++# Legacy `delivery:`-only fallback markers.
++#
++# Deprecated patch entries that declare only the boolean ``delivery:`` block
++# (no concrete ``delivery_spec``) still need a text probe. The pre-fix probe
++# used the bare file basename (``install.sh``) and the mount parent
++# (``patches``) — both present in essentially every compose that runs *any*
++# install script / mounts *any* ``…/patches/…`` dir, so the probe was
++# effectively always-True and could never report an unwired patch. These sets
++# let the probe match only identifying artifacts instead.
++# --------------------------------------------------------------------------
++GENERIC_PATCH_FILENAMES = {
++    "install.sh",
++    "install.bash",
++    "install.py",
++    "apply.sh",
++    "apply.bash",
++    "apply.py",
++    "patch.sh",
++    "patch.py",
++    "run.sh",
++    "setup.sh",
++    "bootstrap.sh",
++    "entrypoint.sh",
++    "main.py",
++}
++GENERIC_PATCH_DIRNAMES = {"patches", "overlay", "overlays", "scripts", "lib"}
++
++
++def _legacy_reach_markers(root: Path, patch: dict) -> list[str]:
++    """Identifying text markers for the legacy ``delivery:``-only fallback.
++
++    For every declared ``files`` entry we use the **patch's own directory
++    name** (the deepest non-generic component) and — for a file entry — its
++    own basename *only when it is not a generic script name*. We never add a
++    generic ``patches`` grandparent nor a bare ``install.sh``: those appear in
++    unrelated composes and made the fallback always-True.
++    """
++    markers: list[str] = []
++    for rel in patch.get("files") or []:
++        target = root / rel
++        path = Path(rel)
++        if target.is_dir():
++            name = path.name
++            if name and name not in GENERIC_PATCH_DIRNAMES:
++                markers.append(name)
++        else:
++            parent = path.parent.name
++            if parent and parent not in GENERIC_PATCH_DIRNAMES:
++                markers.append(parent)
++            if path.name and path.name not in GENERIC_PATCH_FILENAMES:
++                markers.append(path.name)
++    # De-duplicate, preserve first-seen order.
++    seen: set[str] = set()
++    return [m for m in markers if not (m in seen or seen.add(m))]
++
++
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
+@@ -540,16 +597,27 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     if _spec_wiring_present(patch, body):
+         return True
+ 
++    # When the patch declares a concrete delivery_spec *mount target*, that
++    # spec is authoritative: the sound check above already said "not wired",
++    # and the legacy fallback (whose markers for install-script patches were
++    # the generic `install.sh` / `patches` strings — present in every such
++    # compose) must NOT resurrect wiring that has been removed from the
++    # compose. (Bug: the fallback used to override `_spec_wiring_present`'s
++    # correct False, so an unwired install-script patch still reported
++    # reached.) Entries whose spec lacks a concrete mount target — e.g.
++    # deprecated dirs that mount the patch *directory* and run its
++    # `install.sh`, declared with no `mounted_at` — keep falling through to
++    # the now-sound legacy probe below.
++    if _spec_wiring_markers(patch)[0]:
++        return False
++
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
++    # service body, so header/comment ID mentions never match. Only reached
++    # for entries with no concrete delivery_spec mount target.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
++        for marker in _legacy_reach_markers(root, patch):
++            if marker in body:
+                 return True
+         if patch["id"] in body:
+             return True

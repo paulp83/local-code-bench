@@ -1,0 +1,14 @@
+{
+ "task": "13-inbox-triage",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 66.3,
+ "tool_calls": 34,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 9,
+ "checks_total": 9,
+ "partial": 1.0
+}

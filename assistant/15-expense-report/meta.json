@@ -1,0 +1,9 @@
+{
+  "id": "15-expense-report",
+  "source": "novel",
+  "category": "finance",
+  "difficulty": "hard",
+  "est_minutes": 20,
+  "needs_web": false,
+  "notes": "Novel: duplicate removal, weekend FX fallback, per-receipt rounding, cap rule."
+}

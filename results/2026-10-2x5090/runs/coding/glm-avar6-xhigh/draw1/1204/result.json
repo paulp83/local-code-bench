@@ -1,0 +1,27 @@
+{
+ "n": 1204,
+ "config": "glm-avar6-xhigh",
+ "draw": 1,
+ "exit_status": "LimitsExceeded",
+ "agent_s": 2495.5,
+ "steps": 100,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 3,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/profiles/compose_registry.py",
+  "scripts/lib/profiles/demote.py",
+  "scripts/lib/profiles/export_pr.py",
+  "scripts/lib/profiles/promote.py",
+  "scripts/lib/profiles/registry.yaml",
+  "tools/serve-cockpit/club3090_cockpit/data.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-registry-origin-field.sh": 0
+ }
+}

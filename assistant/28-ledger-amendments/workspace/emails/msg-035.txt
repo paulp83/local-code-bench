@@ -1,0 +1,8 @@
+From: sol@example.net
+Date: 2026-07-04T02:20:00Z
+Subject: ledger amendment
+
+T-00160 should not be on the books; take it out entirely.
+
+Thanks,
+sol

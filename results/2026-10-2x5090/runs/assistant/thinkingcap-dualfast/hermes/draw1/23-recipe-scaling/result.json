@@ -1,0 +1,14 @@
+{
+ "task": "23-recipe-scaling",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 9.1,
+ "tool_calls": 2,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 10,
+ "checks_total": 10,
+ "partial": 1.0
+}

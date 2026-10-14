@@ -1,0 +1,23 @@
+{
+ "n": 1621,
+ "config": "glm-iq4xs",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 2628.9,
+ "steps": 76,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 1,
+ "localization": 0.333,
+ "files_touched": [
+  "scripts/lib/thinking-budget.sh",
+  "scripts/quality-test.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-quality-server-budget.sh": 0
+ }
+}

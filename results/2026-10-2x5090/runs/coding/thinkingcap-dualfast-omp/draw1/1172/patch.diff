@@ -1,0 +1,113 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..7238cc3 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,12 +6,25 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
++Traps this encodes, each paid for in a field measurement:
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+-    double-counts (measured 13,947 against a live 6,820 -- 2.05x).
++    double-counts (measured 13,947 against a live 6,820 -- 2.05x, 2026-08-31).
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
++  * model weights: SUM per device. A drafter pinned to a card (-devd CUDA<n>)
++    emits the same `load_tensors` line shape as the target and the two weight
++    buffers coexist. Last-wins silently replaced GLM's 3,313 MiB target on CUDA1
++    with the drafter's 656 MiB, pushing ~2.7 GiB into `unaccounted`.
++  * recurrent state: two naming families. DeepSeek-family SSM state is logged as
++    `_comp_state: <dev> <a> <b> state buffer size`; GLM-5.x's indexer state as
++    `llama_memory_recurrent: <dev> <name> buffer size`. Both count into `state`
++    (SUM per device, like kv).
++  * compute: with a drafter on the same card, the target RE-RESERVES its compute
++    buffer after the drafter loads, so one card can log e.g. 5208 -> 1606 -> 5240
++    MiB. The first and third are the SAME buffer re-reserved (replace, never
++    sum); the strictly-smaller interleaved value is the drafter's own
++    reservation (additive). A last-wins parser drops the drafter's 1.6 GiB.
+ 
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+@@ -22,14 +35,22 @@ import subprocess
+ import sys
+ 
+ 
+-def _per_dev(text, pat, agg=False):
++def _per_dev_seq(text, pat):
++    """Ordered (log-order) values per device for a `(CUDA\\d) ... (float) MiB` pattern."""
+     out = {}
+     for m in re.finditer(pat, text):
+-        dev, val = m.group(1), float(m.group(2))
+-        out[dev] = out.get(dev, 0.0) + val if agg else val
++        out.setdefault(m.group(1), []).append(float(m.group(2)))
+     return out
+ 
+ 
++def _per_dev(text, pat, agg=False):
++    """Per-device value: SUM of every match (agg=True) or LAST match wins."""
++    seq = _per_dev_seq(text, pat)
++    if agg:
++        return {dev: sum(vals) for dev, vals in seq.items()}
++    return {dev: vals[-1] for dev, vals in seq.items()}
++
++
+ def main() -> int:
+     if len(sys.argv) < 2:
+         return 1
+@@ -38,10 +59,28 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+-    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # model: SUM per device -- a drafter pinned to a card (-devd CUDA<n>) emits the
++    # same line shape as the target and both weight buffers coexist (last-wins
++    # silently replaced the target with the drafter).
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size\s+=\s+([\d.]+) MiB", agg=True)
++    # compute: a re-reservation REPLACES (same buffer logged twice after a drafter
++    # loads on the card); a strictly-smaller interleaved value is a distinct
++    # context (the drafter) and ADDS.
++    compute_seq = _per_dev_seq(text, r"sched_reserve:\s+(CUDA\d) compute buffer size\s+=\s+([\d.]+) MiB")
++    compute = {}
++    for dev, seq in compute_seq.items():
++        primary, extra = 0.0, 0.0
++        for v in seq:
++            if v < primary:
++                extra += v
++            else:
++                primary = v
++        compute[dev] = primary + extra
++    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size\s+=\s+([\d.]+) MiB", agg=True)
++    # state: SUM; two naming families (DeepSeek `_comp_state` / GLM `llama_memory_recurrent`)
++    state = _per_dev(text,
++        r"(?:_comp_state|llama_memory_recurrent):\s+(CUDA\d) \S+(?: \S+ state)? buffer size\s+=\s+([\d.]+) MiB",
++        agg=True)
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}
+@@ -70,7 +109,7 @@ def main() -> int:
+     except Exception:
+         pass
+ 
+-    devs = sorted(set(model) | set(smi) | set(pool))
++    devs = sorted(set(model) | set(smi) | set(pool) | set(kv) | set(state) | set(compute))
+     if not devs:
+         return 1
+ 
+@@ -94,6 +133,12 @@ def main() -> int:
+     if n > 1:
+         print("  WARNING: %d moe-cache allocations logged per pool — figures above take the "
+               "LAST (summing them double-counts)" % n)
++
++    nres = max((len(v) for v in compute_seq.values()), default=0)
++    if nres > 1:
++        print("  WARNING: %d compute-buffer reservations logged on one card — a "
++              "strictly-smaller interleaved value was counted as a separate (drafter) "
++              "context; re-reservations replace, they never sum" % nres)
+     if pool:
+         print("  pool slots + hit rate: see CAPTURE: EXPERT CACHE below (this line is the "
+               "BYTE split only)")

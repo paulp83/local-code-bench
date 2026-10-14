@@ -1,0 +1,66 @@
+diff --git a/scripts/lib/thinking-budget.sh b/scripts/lib/thinking-budget.sh
+index 636d91c..8097516 100755
+--- a/scripts/lib/thinking-budget.sh
++++ b/scripts/lib/thinking-budget.sh
+@@ -16,6 +16,8 @@
+ #   engine      server prerequisite               request shape
+ #   llama.cpp   --reasoning-budget N (boot flag)  none — server-wide
+ #   vLLM        --reasoning-parser <name>         thinking_token_budget: N
++#                 (read from the container argv, then the boot log: a launcher
++#                  image injects it in its own script, off docker inspect's radar)
+ #   SGLang      --enable-custom-logit-processor   custom_logit_processor +
+ #                                                 custom_params.thinking_budget
+ #
+@@ -229,6 +231,26 @@ _thinking_budget_container_facts() {
+   python3 -c "$_THINKING_BUDGET_FACTS_PY" "$1"
+ }
+ 
++# vLLM's own boot log: it dumps the RESOLVED arguments as a Python dict on the
++# `non-default args:` line, so reasoning_parser maps to '<name>' even
++# when the server was started through a launcher that injects --reasoning-parser
++# into its own script (bucko's `qwen38-serve` does exactly this — docker inspect's
++# argv then shows none). The log is the resolved truth, so when the argv is silent
++# it settles the question docker inspect cannot. stdin: `docker logs <container>`
++# (stdout+stderr — vLLM logs to stderr). stdout, one line:
++#   PARSER <value> | PARSER none
++# `none` also covers an unreachable or already-purged log (empty input): the
++# caller keeps its prior verdict rather than inventing evidence either way.
++_thinking_budget_vllm_log_facts() {
++  docker logs "$1" 2>&1 | python3 -c '
++import re, sys
++txt = sys.stdin.read()
++vals = re.findall(r"[\x27\"]reasoning_parser[\x27\"]\s*:\s*[\x27\"]([^\x27\"]+)[\x27\"]", txt)
++vals = [v for v in vals if v and v.lower() not in ("none", "null")]
++print("PARSER %s" % (vals[-1] if vals else "none"))
++' 2>/dev/null
++}
++
+ # SGLang's own readback: /server_info (v0.5.20) dumps the resolved ServerArgs;
+ # /get_server_info is the deprecated alias. Walks the whole document so a
+ # regrouping of the args (v0.5.20 moved them under sub-groups) cannot hide the
+@@ -331,8 +353,23 @@ thinking_budget_verify() {
+       facts="$(docker inspect "$c" 2>/dev/null | _thinking_budget_container_facts vllm)"
+       case "$facts" in
+         "PARSER none")
+-          THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
+-          return 1 ;;
++          # The argv is silent, but an image that starts vLLM through its own
++          # launcher adds --reasoning-parser inside that script, so docker
++          # inspect never sees it. Read the boot log — its `non-default args`
++          # line carries the RESOLVED reasoning_parser, the truth the argv can
++          # hide. Only if that too is empty is there genuinely no parser.
++          logfacts="$(_thinking_budget_vllm_log_facts "$c")"
++          case "$logfacts" in
++            "PARSER none"|""|"ERROR "*)
++              THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
++              return 1 ;;
++            "PARSER "*)
++              THINKING_BUDGET_EVIDENCE="container ${c}'s boot log reports reasoning_parser=${logfacts#PARSER } (added by the launcher, not visible in the container argv)"
++              return 0 ;;
++            *)
++              THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
++              return 1 ;;
++          esac ;;
+         "PARSER "*)
+           THINKING_BUDGET_EVIDENCE="container ${c} boots vLLM with --reasoning-parser ${facts#PARSER }"
+           return 0 ;;

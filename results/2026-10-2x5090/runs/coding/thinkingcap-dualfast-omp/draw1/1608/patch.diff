@@ -1,0 +1,304 @@
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..cc32f57 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -13,6 +13,24 @@
+ # no-NVLink path -- most rigs, including this one -- so the knob would have shipped
+ # dead exactly where it was most likely to be used.
+ #
++# case arms are ALTERNATIVES like if/else: an assignment in ONE arm does not dominate
++# code in another arm or after the `esac`. One exception -- an EXHAUSTIVE case does
++# dominate, like a plain assignment at its own depth: it has a `*` catch-all arm,
++# and every arm either assigns the array or terminates (exit / exec). A `*` arm is
++# mandatory -- a case whose named arms all assign but has no catch-all still lets an
++# unmatched value through with the array unset.
++#
++# Blocks are balanced per line (openers minus closers, comments and quoted strings
++# stripped first), because these entrypoints put one-line `if ...; fi` inside case
++# arms (the AUTO-SIZE tier cases): keyword-at-line-start parsing left the `if` frame
++# open, the `esac` popped the `if` instead of the `case`, and everything after the
++# case -- including top-level array assignments AND the exec -- shared one bogus
++# scope id and passed vacuously.
++#
++# Caught for real (2026-10-12): the qwen3.8-27b single-fast AUTO-SIZE VISION case
++# assigns LM_ONLY_ARGS in each arm and exit-1s the third; the old line-start-only
++# assignment scan read that as "never assigned" (false failure, #1540).
++#
+ # ⚠️ Indentation is NOT a sufficient proxy: in these composes the branch execs sit
+ # at the same column as a block nudged inside the branch. Depth is tracked from the
+ # shell keywords instead.
+@@ -26,6 +44,137 @@ cd "$(dirname "$0")/../.." || exit 1
+ python3 - <<'PY' || exit 1
+ import re, sys, yaml, pathlib
+ 
++OPEN_KW  = re.compile(r'\b(if|for|while|until|case)\b')
++CLOSE_KW = re.compile(r'\b(fi|done|esac)\b')
++# A case-arm line: a pattern (no `# ; | & (`, none of which appears in the
++# patterns used in these entrypoints) then `)`. Only checked when the top open
++# frame is a case, so a `word)` line outside a case is left alone.
++ARM    = re.compile(r'^\s*[^#;|&()]*\)\s*')
++TERMIN = re.compile(r'\b(exit|exec)\b')
++
++def strip_noise(ln):
++    """The line with comments cut and quoted strings blanked -- for keyword
++    counting only. `fi` inside `echo "if done"` and `# if something` must not
++    balance the stack; a real `fi` must."""
++    out, i, n, in_sq, in_dq = [], 0, len(ln), False, False
++    while i < n:
++        c = ln[i]
++        if in_sq:
++            if c == "'": in_sq = False
++            i += 1
++        elif in_dq:
++            if c == "\\" and i + 1 < n: i += 2; continue
++            if c == '"': in_dq = False
++            i += 1
++        else:
++            if c == "'": in_sq = True; i += 1
++            elif c == '"': in_dq = True; i += 1
++            elif c == "#": break
++            else: out.append(c); i += 1
++    return "".join(out)
++
++def analyze(name, lines):
++    """Return (problems, refs) for one entrypoint script.
++    An exec's "${A[@]}" is OK iff some line BEFORE it assigns A and that line's
++    branch path is a prefix of the exec's (same scope or an enclosing one) -- or
++    an exhaustive case (see header) closed before it."""
++    exec_idx = [i for i, l in enumerate(lines) if re.match(r'^\s*exec\b', l)]
++    all_arrs = set()
++    for i in exec_idx:
++        all_arrs |= set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', lines[i]))
++    # an assignment at line start, or right after a case-arm pattern (`on) X=(`)
++    assign = {a: re.compile(rf'^\s*(?:[^#;|&()]*\)\s*)?{a}\+?=\(') for a in all_arrs}
++
++    paths, frames, nxt = [], [], [0]
++    def fresh():
++        nxt[0] += 1
++        return nxt[0]
++    sites = {a: [] for a in all_arrs}   # (line, path) of every assignment
++    cases = []                          # closed case blocks (for exhaustiveness)
++
++    for i, ln in enumerate(lines):
++        code = strip_noise(ln)
++        top = frames[-1] if frames else None
++        # a case arm starts: a new alternative at the case's depth (like else)
++        if top and top["kind"] == "case" and ARM.match(ln):
++            top["id"] = fresh()
++            pat = ln[:ln.index(")")].strip()
++            top["arms"].append({"assigns": set(), "terminates": False,
++                                "catchall": "*" in pat.split("|")})
++        elif re.match(r'\s*(else|elif)\b', code) and not CLOSE_KW.search(code) \
++                and frames:
++            # a bare else/elif line (any opener on it is INSIDE the new branch,
++            # pushed after the swap): a new alternative branch of the open block
++            frames[-1]["id"] = fresh()
++        paths.append(tuple(f["id"] for f in frames))
++        # balance the line's block keywords, in order: a closer cancels the
++        # line's own opener before it may pop an earlier frame (one-line
++        # `if ...; fi`, `case ... esac`, the `elif ...; fi ;;` in the AUTO-SIZE
++        # tier cases).
++        events = sorted([(m.start(), 0, m.group(1)) for m in OPEN_KW.finditer(code)]
++                        + [(m.start(), 1, None) for m in CLOSE_KW.finditer(code)])
++        tmp = []
++        for _, t, kind in events:
++            if t == 0:
++                tmp.append(kind)
++            elif tmp:
++                tmp.pop()
++            else:
++                f = frames.pop() if frames else None
++                if f and f["kind"] == "case":
++                    cases.append({"close": i,
++                                  "path": tuple(x["id"] for x in frames),
++                                  "arms": f["arms"]})
++        for kind in tmp:
++            fr = {"kind": kind, "id": fresh(), "arms": []}
++            if kind == "case":
++                # first arm on the `case ... in pattern)` line itself
++                m2 = re.search(r'\bin\b(.*)$', code)
++                if m2 and ")" in m2.group(1):
++                    fr["id"] = fresh()
++                    pat = m2.group(1).split(")")[0].strip()
++                    fr["arms"].append({"assigns": set(), "terminates": False,
++                                       "catchall": "*" in pat.split("|")})
++            frames.append(fr)
++        # record this line's assignments / terminations against the current arm
++        for a in all_arrs:
++            if assign[a].match(ln):
++                sites[a].append((i, paths[i]))
++                if top and top["kind"] == "case" and top["arms"]:
++                    top["arms"][-1]["assigns"].add(a)
++        if top and top["kind"] == "case" and top["arms"] and TERMIN.search(code):
++            top["arms"][-1]["terminates"] = True
++
++    for c in cases:
++        # exhaustive for A: has a `*` arm and every arm assigns A or terminates
++        dom = set()
++        if c["arms"] and any(a["catchall"] for a in c["arms"]):
++            for a in all_arrs:
++                if all(a in arm["assigns"] or arm["terminates"] for arm in c["arms"]):
++                    dom.add(a)
++        c["dominates"] = dom
++
++    problems = []
++    refs = 0
++    for i in exec_idx:
++        ln = lines[i]
++        sp = paths[i]
++        for a in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
++            refs += 1
++            ok = any(j < i and sp[:len(paths[j])] == paths[j] for j, _ in sites[a])
++            if not ok:
++                ok = any(c["close"] < i and a in c["dominates"]
++                         and sp[:len(c["path"])] == c["path"] for c in cases)
++            if not ok:
++                if sites[a]:
++                    problems.append(
++                        f"{name}: {a} is assigned only inside a branch that the exec on line "
++                        f"{i+1} does not share -- that path expands an unset array, silently "
++                        f"dropping the feature")
++                else:
++                    problems.append(f"{name}: exec uses ${{{a}[@]}} but it is never assigned")
++    return problems, refs
++
+ def script_of(path):
+     try: d = yaml.safe_load(open(path))
+     except Exception: return None
+@@ -47,51 +196,99 @@ def script_of(path):
+         if cand: return max(cand, key=len)
+     return None
+ 
+-OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
+-CLOSE = re.compile(r'^\s*(fi|done|esac)\b')
+-ALT   = re.compile(r'^\s*(else|elif)\b')
+-ONELINE = re.compile(r'\b(fi|done|esac)\s*;?\s*$')
+-
+-def scope_paths(lines):
+-    """Path of enclosing BRANCH ids per line.  `else`/`elif` starts a NEW id at the
+-    same depth, so an assignment in the then-branch does not dominate the
+-    else-branch -- which plain depth counting cannot express."""
+-    paths, stack, nxt = [], [], [0]
+-    def fresh():
+-        nxt[0] += 1
+-        return nxt[0]
+-    for ln in lines:
+-        if CLOSE.match(ln) and stack: stack.pop()
+-        elif ALT.match(ln) and stack: stack[-1] = fresh()
+-        paths.append(tuple(stack))
+-        if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+-    return paths
++# -- fixtures: the shapes the parser must get right -------------------------
++# Each is (label, script, expect_problem). A parser regression here (e.g. the
++# one-line `elif ...; fi` no longer balancing) changes which cases close, and
++# these catch it even when the tree's composes all pass by coincidence.
++FIXTURES = [
++    ("exhaustive case: every arm assigns or exits", """
++case "$$V" in
++  on) A_ARGS=() ;;
++  off) A_ARGS=(--off) ;;
++  *) echo "bad VISION" >&2; exit 1 ;;
++esac
++exec run "$${A_ARGS[@]}"
++""", False),
++    ("one-line if inside a case arm still closes the case", """
++case "$$t" in
++  a) A_ARGS=()
++    if [ "$$x" = 1 ]; then :
++    elif [ "$$x" = 2 ]; then :; else :; fi ;;
++  b) A_ARGS=(--b) ;;
++  *) A_ARGS=() ;;
++esac
++exec run "$${A_ARGS[@]}"
++""", False),
++    # The old parser leaked the case here (the one-line `elif ...; fi` left the
++    # `if` frame open, the `esac` popped the `if`), so the assignment in arm `a`
++    # and the exec shared one bogus scope id and PASSED vacuously even though no
++    # `*` arm exists: a value matching no pattern skips every assignment.
++    ("one-line-if trap in a non-exhaustive case still flags", """
++case "$$t" in
++  a)
++    A_ARGS=()
++    if [ "$$x" = 1 ]; then :
++    elif [ "$$x" = 2 ]; then :; else :; fi ;;
++  b) A_ARGS=(--b) ;;
++esac
++exec run "$${A_ARGS[@]}"
++""", True),
++    ("non-exhaustive case: one arm assigns, no catch-all", """
++case "$$V" in
++  on) A_ARGS=(--on) ;;
++esac
++exec run "$${A_ARGS[@]}"
++""", True),
++    ("catch-all present but one arm neither assigns nor exits", """
++case "$$V" in
++  on) A_ARGS=(--on) ;;
++  *) : ;;
++esac
++exec run "$${A_ARGS[@]}"
++""", True),
++    ("one-branch if assignment (the original #MAMBA catch)", """
++if [ "$$X" = 1 ]; then
++  A_ARGS=(--x)
++else
++  :
++fi
++exec run "$${A_ARGS[@]}"
++""", True),
++    ("top-level assignment before a one-arm case rescues it", """
++A_ARGS=()
++case "$$V" in
++  on) A_ARGS=(--on) ;;
++esac
++exec run "$${A_ARGS[@]}"
++""", False),
++    ("assignment in the same arm, exec inside that arm", """
++case "$$V" in
++  on)
++    A_ARGS=(--on)
++    exec run "$${A_ARGS[@]}"
++    ;;
++  *) exec run2 ;;
++esac
++""", False),
++]
++for label, script, expect in FIXTURES:
++    prob, _ = analyze("fixture: " + label, script.splitlines())
++    if bool(prob) != expect:
++        got = "; ".join(prob) if prob else "clean"
++        print(f"FAIL: fixture '{label}' expected "
++              f"{'a problem' if expect else 'clean'}, got: {got}", file=sys.stderr)
++        sys.exit(1)
+ 
+ checked = refs = 0
+ problems = []
+-
+ for p in sorted(pathlib.Path("models").rglob("*.yml")):
+     if "compose" not in str(p): continue
+     s = script_of(p)
+     if not s: continue
+     checked += 1
+-    lines = s.splitlines()
+-    paths = scope_paths(lines)
+-    for i, ln in enumerate(lines):
+-        if not re.match(r'^\s*exec\b', ln): continue
+-        for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+-            refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
+-            if not asg:
+-                problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
+-            # an assignment dominates the exec iff it comes first AND its branch
+-            # path is a prefix of the exec's (same scope, or an enclosing one)
+-            ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
+-            if not ok:
+-                problems.append(
+-                    f"{p}: {arr} is assigned only inside a branch that the exec on line "
+-                    f"{i+1} does not share -- that path expands an unset array, silently "
+-                    f"dropping the feature")
++    prob, r = analyze(str(p), s.splitlines())
++    refs += r
++    problems += prob
+ 
+ if checked == 0 or refs == 0:
+     print(f"FAIL: vacuous run (checked={checked}, refs={refs}) -- extraction is broken", file=sys.stderr); sys.exit(1)

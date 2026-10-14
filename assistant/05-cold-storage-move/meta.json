@@ -1,0 +1,9 @@
+{
+  "id": "05-cold-storage-move",
+  "source": "session-derived",
+  "category": "files",
+  "difficulty": "medium",
+  "est_minutes": 10,
+  "needs_web": false,
+  "notes": "Shape from sessions moving run trees to cold storage with a verified sha256 list and symlinks preserved."
+}

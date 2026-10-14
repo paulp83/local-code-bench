@@ -1,0 +1,9 @@
+{
+  "id": "08-models-slug-index",
+  "source": "session-derived",
+  "category": "filing",
+  "difficulty": "medium",
+  "est_minutes": 12,
+  "needs_web": false,
+  "notes": "Shape from a session that indexed model storage folders against club-3090 slugs in a spreadsheet."
+}

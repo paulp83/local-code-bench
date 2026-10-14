@@ -1,0 +1,105 @@
+diff --git a/scripts/lib/profiles/compose_registry.py b/scripts/lib/profiles/compose_registry.py
+index 31b69e8..51a36b9 100644
+--- a/scripts/lib/profiles/compose_registry.py
++++ b/scripts/lib/profiles/compose_registry.py
+@@ -39,6 +39,21 @@ STATUS_VALUES = (
+ # Statuses that launch without --force. Everything else is "(NA)".
+ FUNCTIONAL_STATUSES = frozenset({"production", "caveats"})
+ 
++# First-class catalog PROVENANCE — which layer an entry's data lives in. This
++# replaces the old implicit convention where provenance was read off the SLUG
++# (a `local/` prefix). The loader is the single authority: a CORE row (loaded
++# from registry.yaml) is ALWAYS origin="core"; a LOCAL row (loaded from
++# registry.local.json) is ALWAYS origin="local". Because provenance is derived
++# from WHERE the data lives, publishing a model out of the local layer into the
++# curated catalog is a FLIP of this value — not a slug rename — so a user's
++# scripts, notes and compose pins survive promotion. "core wins": a local entry
++# can never claim a core origin (and never shadows a core slug — see
++# get_registry). It is an ASSIGNED field (like pp / gpu_assignment_mode), never
++# authorable in the DATA files.
++ORIGIN_VALUES = ("core", "local")
++CORE_ORIGIN = "core"
++LOCAL_ORIGIN = "local"
++
+ # Compose `Status:` header emoji → registry status word. The header may carry
+ # trailing prose after the canonical token (e.g. "✅ Production (NEW — ...)");
+ # matching is by the leading emoji, so prose is tolerated.
+@@ -190,13 +205,23 @@ def _entry(
+     spec_method=None,
+     category=None,
+     weights_companions=None,
++    origin=CORE_ORIGIN,
+ ):
+     if status not in STATUS_VALUES:
+         raise ValueError(
+             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
+         )
++    if origin not in ORIGIN_VALUES:
++        raise ValueError(
++            f"{compose_path}: origin={origin!r} not in {ORIGIN_VALUES}"
++        )
+     entry = {
+         "model": model,
++        # Catalog provenance (#1202 P2): assigned by the loader from WHERE the
++        # entry's data lives (core registry.yaml vs profiles-local JSON) —
++        # NOT a DATA field authors set. Publish = moving the data = flipping
++        # this value, never renaming the slug.
++        "origin": origin,
+         "weights_variant": weights_variant,
+         "workload": workload,
+         "engine": engine,
+@@ -340,7 +365,12 @@ _REGISTRY_YAML_SCHEMA = 1
+ 
+ # Built-entry keys that _entry() DERIVES (never kwargs): stripped before entry
+ # kwargs are written back to YAML — the migrator and promote.py share this.
+-_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode"})
++# `origin` is here because catalog PROVENANCE is loader-assigned (#1202 P2):
++# the layer the data lives in decides it (core registry.yaml -> "core",
++# profiles-local JSON -> "local"), never an authorable field — so it must
++# never appear in the DATA files (the load-time derived-key check enforces
++# that, and the loaders stamp the authoritative value after _entry()).
++_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode", "origin"})
+ 
+ # Top-level keys the schema allows — anything else is a loud error, not a
+ # silently ignored section.
+@@ -733,13 +763,16 @@ def _build_core_catalog(data, source):
+     entries = {}
+     for slug, kwargs in data["entries"].items():
+         try:
+-            entries[slug] = _entry(**kwargs)
++            entry = _entry(**kwargs)
+         except TypeError as exc:
+             raise RegistryDataError(
+                 f"{source}: entry {slug!r}: bad _entry kwargs: {exc}"
+             ) from exc
+         except ValueError as exc:
+             raise RegistryDataError(f"{source}: entry {slug!r}: {exc}") from exc
++        # CORE WINS: curated catalog data is always origin=CORE_ORIGIN.
++        entry["origin"] = CORE_ORIGIN
++        entries[slug] = entry
+     defaults = {}
+     for model, engines in data["defaults"].items():
+         for engine, topology_rows in engines.items():
+@@ -858,6 +891,10 @@ def load_local_registry(root=None):
+             ) from exc
+         except ValueError as exc:
+             raise LocalRegistryError(f"{path}: local entry {slug!r}: {exc}") from exc
++        # The loader is the provenance authority: an entry whose data lives
++        # in the LOCAL layer is origin=LOCAL_ORIGIN, no matter what the JSON
++        # claimed (a local row can never impersonate a curated core row).
++        entry["origin"] = LOCAL_ORIGIN
+         local[slug] = entry
+         local_models.add(model)
+     return local
+@@ -875,7 +912,10 @@ def get_registry(root=None):
+     if not local:
+         return COMPOSE_REGISTRY
+     merged = dict(COMPOSE_REGISTRY)
+-    merged.update(local)
++    # CORE WINS: a curated row is never shadowed by a same-slug local row
++    # — provenance (entry["origin"]) stays "core" for it.
++    for slug, entry in local.items():
++        merged.setdefault(slug, entry)
+     return merged
+ 
+ 

@@ -1,0 +1,14 @@
+{
+ "task": "10-pair-rig-quality",
+ "config": "strata-iq4xs",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "qwen3.8-flash-next-unsloth-ud-iq4_xs",
+ "agent_s": 42.1,
+ "tool_calls": 2,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 6,
+ "checks_total": 6,
+ "partial": 1.0
+}

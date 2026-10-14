@@ -1,0 +1,192 @@
+diff --git a/0 b/0
+new file mode 100644
+index 0000000..b4c5dc1
+--- /dev/null
++++ b/0
+@@ -0,0 +1,44 @@
++model_list:
++  # === Current serving primaries (one GPU service runs at a time per gpu-mode;
++  #     routes to the inactive backends fail until that mode is brought up) ===
++  #
++  # LOCAL block policy (#1078): routes between the GENERATED markers below are
++  # derived from the registry by scripts/lib/litellm-emit.sh — never hand-edit
++  # them; flip compose_registry._entry(gateway=True) and regenerate instead.
++  # `litellm-emit.sh --check` gates the region against drift. Routes BELOW the
++  # END marker are hand-maintained: local models not yet gateway-flagged in
++  # compose_registry (today only agents-a1) plus the cloud block at the bottom.
++  # Non-functional scenes still emit a route, annotated `# status: <status>`.
++  #
++  # Qwen 3.6 27B — MTP n=3 + fp8/int8-PTH KV + 262K + vision.
++  # Started by `gpu-mode 27b` → vllm-qwen36-27b-dual at :8010. Stack default.
++  # NOTE: EVERY 27b scene (autoround / fp8 / awq / lmcache) serves the neutral shared
++  # primary `qwen3.6-27b` (+ its own quant-specific name as an alias), so this route
++  # matches whichever scene is on :8010 regardless of quant (#482/#490). The quant
++  # differs by compose path/port + the scene's alias, NOT by the primary name.
++  #
++  # Local qwen3.8-27b (#1062) — the dual-max scene on :8091 serves BOTH served-names.
++  # ⚠️ Scene-dependent port: :8091 is the dual-max slug; other qwen3.8 slugs serve on their
++  # own registry default_port (dual-fast 8113, iq4xs 8090, …). The gateway lists one canonical
++  # port per model, same as every other local backend here.
++  # === BEGIN GENERATED LOCAL BLOCK — RUNTIME VIEW, rendered by scripts/lib/litellm-sync.sh ===
++  # Routes for endpoints that answered /v1/models at render time. Names come
++  # from each server's own model list, so a slug with no registry served_name
++  # still gets a route. Regenerated on every switch.sh launch and teardown.
++  # DO NOT EDIT — edit services/litellm/config.yaml (the catalog view) instead.
++  # (nothing serving right now — no local routes)
++  # === END GENERATED LOCAL BLOCK ===
++
++
++  # Agents-A1 — InternScience 35B agentic MoE (⚠️ caveats; the agentic thinking-ON
++  # specialist). Launched via `switch.sh vllm/agents-a1-dual` → vllm-agents-a1-dual
++  # at :8072 (own port — never share a sibling's; see the slug-masquerade note).
++  # Still hand-maintained: agents-a1 is not yet gateway-flagged in compose_registry.
++litellm_settings:
++  # A coding agent's turn can be a long cold prefill plus a 32K-token reply at
++  # ~70 tok/s — well past a short default. The client (omp, claude) owns the real
++  # timeout; the gateway must not cut the request first.
++  request_timeout: 1800
++  # Never re-send a failed request: on a local GPU a retry repeats the whole
++  # prefill, doubling the wait, and it lands on a server that just failed.
++  num_retries: 0
+diff --git a/scripts/launch.sh b/scripts/launch.sh
+index 7538ad3..a3868ef 100755
+--- a/scripts/launch.sh
++++ b/scripts/launch.sh
+@@ -1448,8 +1448,9 @@ _note_brief() {
+ }
+ 
+ # Surface the lifecycle health flag (PR-A) before handing off. The actual gate
+-# (caveats notice / (NA) → require --force) lives in switch.sh up_variant, which
+-# this script delegates to; this is just a heads-up so the user isn't surprised.
++# (caveats notice / (NA) → require --force) lives in switch.sh preflight_launch(),
++# which runs BEFORE the running slug is torn down; this script delegates to it, so
++# this is just a heads-up so the user isn't surprised.
+ _launch_status="${LAUNCH_VARIANT_STATUS[$VARIANT]:-production}"
+ _launch_status_note="${LAUNCH_VARIANT_STATUS_NOTE[$VARIANT]:-}"
+ case "$_launch_status" in
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..1d1311e 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -2,8 +2,10 @@
+ #
+ # Switch between club-3090 compose variants.
+ #
+-# Brings down whatever's currently running, brings up the new variant,
+-# and (optionally) waits for the server to report ready on /v1/models.
++# Validates the requested variant FIRST (status gate, host weights, mistyped
++# slug) and only THEN brings down whatever's currently running — so a launch that
++# gets refused never leaves the rig serving nothing. Then brings up the new
++# variant and (optionally) waits for the server to report ready on /v1/models.
+ # Stateless — re-run any time you want a different config.
+ #
+ # Usage:
+@@ -1224,13 +1226,30 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
++# --- pre-launch refusals (run BEFORE the running slug is torn down) ------------
++#
++# down_running() used to run FIRST, and only then did the checks that can refuse
++# a launch get their turn — so a refused launch left the rig serving NOTHING. We
++# hit it twice on the reference rig in one day: an experimental slug run without
++# --force, and a worktree whose model files were not on the host (no MODEL_DIR);
++# a mistyped slug did the same.
++#
++# These refusals are all config/host-only — they read the registry, the compose
++# file and the filesystem, never the GPU — so they can and must run against the
++# CURRENT state, before anything is brought down. The GPU-freeing gates
++# (preflight_compose_gpu_fit, gpu_preflight) and the free-VRAM residency sizing
++# stay in up_variant, where they correctly run AFTER down_running() and still
++# see the just-freed VRAM settle.
++preflight_launch() {
+   local v="$1"
++  # Mistyped slug → refuse now, not after the running container is gone.
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+     echo "Run: bash scripts/switch.sh --list" >&2
+     exit 1
+   fi
++  # Lifecycle gate (PR-A health flag) — an (NA: experimental) slug without
++  # --force is refused here, BEFORE the running slug comes down.
+   status_gate "$v"
+   IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
+   local full_dir="${ROOT_DIR}/${dir}"
+@@ -1238,24 +1257,52 @@ up_variant() {
+     echo "ERROR: compose file missing at ${full_dir}/${file}" >&2
+     exit 1
+   fi
+-
+-  # Pre-up sanity:
+-  #  - repo_drift: warn if local HEAD is behind origin/master
+-  #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist on host
+-  #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case;
+-  #     see club-3090#37 — this is the canonical fix raphael / snoby asked for)
+-  #  - kv_format_hint: soft warn if VRAM class needs --kv-cache-dtype override (#47)
++  # Host-filesystem gate: refuse when the compose mounts a model dir that isn't
++  # on the host (the "worktree without MODEL_DIR" case; club-3090#37). Config/
++  # host-only, so it runs BEFORE teardown — a missing-weights error never takes
++  # the running rig down any more.
+   if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+     # shellcheck source=preflight.sh
+     source "${ROOT_DIR}/scripts/preflight.sh"
+     preflight_repo_drift "${ROOT_DIR}" || true
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
++  fi
++}
++
++up_variant() {
++  local v="$1"
++  if [[ -z "${VARIANTS[$v]:-}" ]]; then
++    echo "ERROR: unknown variant '${v}'." >&2
++    echo "Run: bash scripts/switch.sh --list" >&2
++    exit 1
++  fi
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${dir}"
++  if [[ ! -f "${full_dir}/${file}" ]]; then
++    echo "ERROR: compose file missing at ${full_dir}/${file}" >&2
++    exit 1
++  fi
++
++  # Post-teardown sanity. Everything that can refuse a launch on a purely
++  # config/host basis (mistyped slug, the status gate, weights missing on the
++  # host) already ran in preflight_launch() BEFORE down_running(), so a refused
++  # launch never leaves the rig serving nothing. What remains here either DEPENDS
++  # on the GPU being free or merely warns:
++  #  - compose_hardware: SM/arch gate for vLLM (#246 hardware envelope).
++  #  - compose_gpu_fit:  free-VRAM gate — fail fast (not a 600s restart-loop)
++  #                      when the GPUs lack room for this config's
++  #                      gpu_memory_utilization (club-3090 #535). Runs AFTER
++  #                      down_running(), so its settle-retry also covers the
++  #                      just-torn-down container's VRAM lag.
++  #  - lmcache_ram / offload residency: sized from DETECTED (free) VRAM, so they
++  #                      must run once the old scene is gone. Order matters — the
++  #                      guards must see the RESOLVED config, not the defaults.
++  #  - the offload / kv-format / single-card hints: warn-only or host-RAM gates.
++  if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    # shellcheck source=preflight.sh
++    source "${ROOT_DIR}/scripts/preflight.sh"
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+       preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+@@ -1617,6 +1664,12 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++# Refuse a launch BEFORE tearing the running slug down: every check that can
++# reject the requested config on a config/host basis (mistyped slug, the (NA)
++# status gate without --force, weights missing on the host) runs in
++# preflight_launch() first, so a refused launch never leaves the rig serving
++# nothing. The GPU-freeing gates stay in up_variant, AFTER the teardown.
++preflight_launch "${VARIANT}"
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready

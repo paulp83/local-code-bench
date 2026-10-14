@@ -1,0 +1,88 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..3cc1ee0 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -1328,9 +1328,15 @@ preflight_compose_deps() {
+     # `/root/.cache/huggingface/${MODEL_SUBDIR:-default}` (vLLM) and excluding
+     # those truncated the token to `${MODEL_SUBDIR` before _preflight_compose_path_default
+     # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+-    # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+-    # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). It must ALSO exclude `\` — the
++    # gemma external-drafter composes write the drafter path inside escaped
++    # JSON (`--speculative-config "{\"model\":\"/root/.cache/huggingface/<sub>\""`),
++    # and without it the match runs past the dir name, swallows the trailing
++    # `\`, and the existence check targets a path that cannot exist (every
++    # gemma drafter slug refused at preflight, #1305). Stop only at real
++    # delimiters (quote / backslash / whitespace / comma); the
++    # `${VAR:-default}` resolver runs downstream.
++    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+diff --git a/scripts/tests/test-preflight-compose-deps.sh b/scripts/tests/test-preflight-compose-deps.sh
+index 1a44e11..429bbcc 100755
+--- a/scripts/tests/test-preflight-compose-deps.sh
++++ b/scripts/tests/test-preflight-compose-deps.sh
+@@ -193,4 +193,60 @@ touch "${TMP_DIR}/bl-models/qwen3.6-27b-gguf/anbeeld-dflash-iq4xs/Qwen3.6-27B-DF
+ out="$(run_deps "$beellama_compose" "${TMP_DIR}/bl-models")"
+ [[ -z "$out" ]]
+ 
++# #1305: the drafter path can be written inside ESCAPED JSON
++# (`--speculative-config "{\"model\":\"/root/.cache/huggingface/<sub>\"..."`).
++# The extractor's char-class once swallowed the trailing `\`, so the captured
++# subdir was `<sub>\` and preflight demanded a path that cannot exist — every
++# gemma external-drafter slug refused to boot. Missing report must name the
++# clean subdir; present dirs must pass.
++esc_json_compose="${TMP_DIR}/esc-json.yml"
++cat > "$esc_json_compose" <<'YAML'
++services:
++  vllm:
++    image: vllm/vllm-openai:v0.21.0
++    command:
++      - bash
++      - -c
++      - |
++        SPEC_ARGS=(--speculative-config "{\"model\":\"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\",\"num_speculative_tokens\":$$_spec_n}")
++        exec vllm serve /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit "${SPEC_ARGS[@]}"
++YAML
++out="$(expect_missing "$esc_json_compose" "${TMP_DIR}/empty-models")"
++assert_contains "$out" "gemma-4-26b-a4b-it-assistant/config.json"
++assert_contains "$out" "gemma-4-26b-a4b-awq-4bit/config.json"
++assert_not_contains "$out" "assistant\\"
++mkdir -p "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant" "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit"
++touch "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant/config.json" "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit/config.json"
++out="$(run_deps "$esc_json_compose" "${TMP_DIR}/models")"
++[[ -z "$out" ]]
++
++# #1305 general guard: run preflight's HF-path extractor against EVERY compose
++# in the repo and assert no captured subdir carries a character that cannot
++# appear in a directory name (backslash / quote / brace / whitespace). This is
++# the general form of the bug — it would also have caught the `${MODEL_SUBDIR`
++# truncation class the extractor's comment describes.
++guard_out="$(
++  (
++    export ROOT_DIR MODEL_DIR="${TMP_DIR}/guard-models"
++    source "${ROOT_DIR}/scripts/preflight.sh"
++    while IFS= read -r compose; do
++      out="$(preflight_compose_deps "$compose" 2>&1)" || true
++      while IFS= read -r m; do
++        [[ -n "$m" ]] || continue
++        sub="${m#missing: ${TMP_DIR}/guard-models/}"
++        sub="${sub%%/*}"
++        if printf '%s' "$sub" | command grep -qE '[\\'\''"{}[:space:]]'; then
++          echo "BAD-SUBDIR ${compose}: ${sub}"
++        fi
++      done < <(printf '%s\n' "$out" | command grep -oE 'missing: [^ ]+/config\.json \(HF model\)' || true)
++    done < <(command find "${ROOT_DIR}/models" -path '*/vllm/compose/*' -name '*.yml' | command sort)
++  )
++)"
++if [[ -n "$guard_out" ]]; then
++  printf '%s\n' "$guard_out" >&2
++  echo "test-preflight-compose-deps: FAIL — captured HF subdir contains an invalid directory character" >&2
++  exit 1
++fi
++
++
+ echo "test-preflight-compose-deps: ok"

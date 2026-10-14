@@ -1,0 +1,12 @@
+PASS merged-header
+PASS merged-skus-exact
+PASS merged-sorted
+PASS merged-prices-and-vendors
+PASS merged-descriptions
+PASS conflicts-parses
+PASS conflicts-skus-exact
+PASS conflicts-no-false-positives
+PASS conflicts-no-misses
+PASS conflicts-detail
+PASS conflict-rows-blank-price
+PASS: 11 FAIL: 0

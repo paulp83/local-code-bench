@@ -1,0 +1,14 @@
+{
+ "task": "31-vendor-price-merge",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 37.4,
+ "tool_calls": 7,
+ "exit_status": "done",
+ "passed": false,
+ "checks_passed": 9,
+ "checks_total": 11,
+ "partial": 0.818
+}

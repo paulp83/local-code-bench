@@ -1,0 +1,222 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..8f412e9 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -499,6 +499,100 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
++# Generic artifact names that carry NO identifying signal: every compose
++# that mounts *any* install script contains `install.sh`, and every patch
++# lives under a `…/patches/…` directory, so `patches` (or a `local` /
++# `genesis` grouping dir) appears wherever any overlay is mounted. They must
++# never be used as legacy-fallback markers on their own.
++_GENERIC_ARTIFACT_NAMES = frozenset(
++    {
++        # generic file basenames
++        "install.sh",
++        "install",
++        "apply.sh",
++        "apply.py",
++        "apply",
++        "patch.sh",
++        "run.sh",
++        "setup.sh",
++        "main.py",
++        "entrypoint.sh",
++        # generic grouping directory names (under …/patches/)
++        "patches",
++        "local",
++        "genesis",
++        "vllm",
++        "sglang",
++    }
++)
++
++
++def _legacy_invoke_markers(patch: dict, root: Path) -> list[str]:
++    """Identifying markers for the deprecated ``delivery.entrypoint_invoke``
++    fallback (entries that carry only the ``delivery:`` block, no
++    ``delivery_spec``).
++
++    For each declared file we keep only *identifying* tokens:
++
++    * a non-generic file basename (e.g. ``patch_flashinfer_decode_pin.py``,
++      ``qwen3coder_tool_parser_deferred_commit.py``);
++    * the patch directory's OWN name (the ``…/patches/<name>`` directory that
++      holds the artifact) — never its ``patches`` / ``local`` parent.
++
++    Generic names (``install.sh``, ``patches``, …) are dropped: they appear
++    in any mount-bearing compose and would make the fallback always-True,
++    silently overriding a correct not-reached verdict.
++    """
++    markers: list[str] = []
++    for rel in patch.get("files") or []:
++        path = Path(rel)
++        name = path.name
++        is_dir = (root / rel).is_dir()
++        if name not in _GENERIC_ARTIFACT_NAMES:
++            markers.append(name)
++        # The patch directory's own name: the dir entry itself, or the
++        # holding directory for a file entry.
++        patch_dir = path if is_dir else path.parent
++        if patch_dir.name and patch_dir.name not in _GENERIC_ARTIFACT_NAMES:
++            markers.append(patch_dir.name)
++    # de-dup, preserve order
++    seen: set[str] = set()
++    out: list[str] = []
++    for m in markers:
++        if m not in seen:
++            seen.add(m)
++            out.append(m)
++    return out
++
++
++def _spec_is_decidable(patch: dict) -> bool:
++    """True iff ``delivery_spec`` carries a marker for EVERY insertion
++    point it claims in ``wired_at``.
++
++    When it does, :func:`_spec_wiring_present` can give a sound verdict and
++    that verdict is authoritative (a not-wired spec must not be rescued by
++    the legacy fallback). When the spec declares an insertion point it gives
++    no marker for, it cannot decide that point, so it is not authoritative
++    and the legacy fallback stays in play.
++    """
++    spec = patch.get("delivery_spec")
++    if not spec:
++        return False
++    wired_at = spec.get("wired_at")
++    if isinstance(wired_at, str):
++        wired_at = [wired_at]
++    wired_at = set(wired_at or [])
++    vol_markers, inv_markers = _spec_wiring_markers(patch)
++    if "volumes" in wired_at and not vol_markers:
++        return False
++    if "entrypoint" in wired_at and not inv_markers:
++        return False
++    if not wired_at:
++        # Unknown / empty wired_at: decidable only if some marker exists.
++        return bool(vol_markers or inv_markers)
++    return True
++
++
+ def gap_declared(patch: dict, compose_name: str) -> bool:
+     for gap in patch.get("delivery_gaps") or []:
+         if compose_name in set(gap.get("composes") or []):
+@@ -540,18 +634,31 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     if _spec_wiring_present(patch, body):
+         return True
+ 
+-    # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
++    # CONTRACT: when the patch declares a `delivery_spec` rich enough to
++    # decide (it carries markers for every insertion point it claims), the
++    # sound path above is AUTHORITATIVE. A False there means the patch's
++    # real mount / invoke wiring is genuinely absent from the service body —
++    # the legacy `delivery:` fallback MUST NOT override it. (Historical bug:
++    # the fallback keyed on bare `install.sh` / the `patches` parent-dir
++    # name, which every mount-bearing compose contains, so an unwired
++    # install-script patch still reported reached after its mount + invoke
++    # were removed.)
++    #
++    # A spec that declares an insertion point it gives no marker for (e.g.
++    # `wired_at: [volumes, entrypoint]` but no `mounted_at`) cannot decide
++    # volumes wiring, so it is NOT authoritative — fall through to the
++    # (now identifying) legacy fallback below.
++    if _spec_is_decidable(patch):
++        return False
++
++    # Legacy fallback (read-only `delivery:` block, no delivery_spec) —
++    # operates on the service body, so header/comment ID mentions never
++    # match.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
+-        if patch["id"] in body:
++        if any(
++            marker in body for marker in _legacy_invoke_markers(patch, root)
++        ) or patch["id"] in body:
+             return True
+     if (
+         delivery.get("genesis")
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 6f4aabf..f9a0bba 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -267,6 +267,70 @@ if chat_template_patches:
+                 "reported covered (the literal #377 silent-drift mode)"
+             )
+ 
++# (4b) Legacy-fallback regression: an install-script patch whose mount +
++#     invoke are REMOVED from a compose must report NOT reached. Historically
++#     the read-only `delivery.entrypoint_invoke` fallback keyed on the bare
++#     `install.sh` basename and the always-`patches` parent-dir name, both of
++#     which every mount-bearing compose contains, so a stripped compose (no
++#     line left mentioning the patch) still reported reached — the legacy
++#     fallback silently overrode a correct not-reached verdict from the sound
++#     delivery_spec check. Build a mount-bearing fixture and its stripped
++#     twin; the real one reaches, the stripped twin MUST NOT.
++install_script_spec_patches = [
++    p for p in patches
++    if p.get("delivery_mechanism") == "install_script"
++    and (p.get("delivery_spec") or {}).get("mounted_at")
++    # prefer a DIRECTORY files entry: the old fallback added its parent dir
++    # name (always `patches`) as a marker — the exact string every
++    # mount-bearing compose contains, which is what made the fallback
++    # always-True for install-script patches.
++    and any((root / rel).is_dir() for rel in p.get("files") or [])
++]
++if install_script_spec_patches:
++    isp = install_script_spec_patches[0]
++    spec = isp["delivery_spec"]
++    mounted = spec["mounted_at"]
++    invoke = spec.get("invoke") or ""
++    with tempfile.TemporaryDirectory() as _td:
++        _tdp = Path(_td)
++        wired = _tdp / "wired.yml"
++        stripped = _tdp / "stripped.yml"
++        body = (
++            "services:\n"
++            "  svc:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            "      - ../../patches/example:/x\n"
++            "      - ./scripts/detect_nvlink.sh:/etc/detect_nvlink.sh:ro\n"
++            "      - ./patches/%s:%s:ro\n"
++            "    entrypoint: [\"sh\", \"-c\", \"%s && vllm-serve\"]\n"
++            % (isp["id"], mounted, invoke)
++        )
++        wired.write_text(body, encoding="utf-8")
++        # Strip every line carrying a spec wiring marker (the patch's mount
++        # + invoke) — leaving a compose that mounts SOME patches dir and runs
++        # SOME install script but never this patch.
++        _vol, _inv = pa._spec_wiring_markers(isp)
++        _lines = [
++            ln for ln in body.splitlines()
++            if not any(m and m in ln for m in (_vol + _inv))
++        ]
++        stripped.write_text("\n".join(_lines) + "\n", encoding="utf-8")
++        if not pa.reaches(root, isp, str(wired)):
++            errors.append(
++                "install-script legacy-fallback control: a genuinely "
++                "mount+wired install_script patch (%s) was NOT reported "
++                "reached on a compose carrying its mount + invoke" % isp["id"]
++            )
++        if pa.reaches(root, isp, str(stripped)):
++            errors.append(
++                "install-script legacy-fallback FALSE-POSITIVE: install_script "
++                "patch %s still reported reached after its mount + invoke "
++                "lines were stripped from the compose (the generic "
++                "`install.sh`/`patches` legacy fallback overriding the sound "
++                "delivery_spec verdict)" % isp["id"]
++            )
++
+ # (5) Rig-independent leak-assertion convention (mandatory — the V2 on-rig
+ #     lesson). The chat_template effective-coverage path resolves the
+ #     merged compose via `docker compose config`, which renders the mount

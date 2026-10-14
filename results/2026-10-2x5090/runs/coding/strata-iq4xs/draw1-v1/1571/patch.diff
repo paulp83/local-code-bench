@@ -1,0 +1,671 @@
+diff --git a/scripts/report.sh b/scripts/report.sh
+index 133e585..482967e 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -203,6 +203,420 @@ gpu_power_caps() {
+       done
+ }
+ 
++# ---------------------------------------------------------------------------
++# Per-GPU VRAM attribution (#1537)
++# ---------------------------------------------------------------------------
++#
++# "GPU 0 idle VRAM: 23000 MiB (held by running `sglang-cmp170hx`)" — printed on
++# a rig where that container could only see GPU 1, while another user's vLLM
++# (`VLLM::Worker_TP0/1`) held GPUs 0 and 2. The old line found ONE running club
++# container and credited it with EVERY card above 100 MiB. Whoever read that
++# report was wrong twice over: our engine looked like it was squatting on cards
++# it never had, and the actual fault — a foreign container sitting on the cards
++# the profile wants — was invisible.
++#
++# Attribution has to come from the process that actually holds each card:
++#
++#   nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory
++#     ⨯ --query-gpu=index,uuid       → which physical card the process is on
++#     ⨯ /proc/<pid>/cgroup           → the docker id that owns the pid
++#       (fallback: docker top,       → for pids whose cgroup this user cannot
++#        or docker inspect + the      read: it walks back to the container's
++#        PPID tree)                   main process instead
++#     ⨯ docker ps --no-trunc         → that container's NAME
++#
++# Same ground truth as the cockpit's VRAM tiles
++# (tools/serve-cockpit/club3090_cockpit/data.py:attribute_gpu_apps) and the
++# estate placement assertion (scripts/lib/profiles/estate_cli.py): the
++# compute-apps query, never a `nvidia-smi` run inside a container, because a
++# container's own GPU indices are NOT the host's.
++#
++# ⚠️ DEGRADES HONEST, NEVER CONFIDENT. A holder whose owner cannot be named
++# prints as an unnamed pid; a card holding memory with NO compute process on it
++# prints as exactly that (an X11/Wayland graphics context is not listed by
++# --query-compute-apps); a query that FAILED says so rather than looking like an
++# idle rig; and no branch ever falls back to "our container" — that
++# substitution is the bug being fixed here.
++
++# Resolution caches, built at most once per report. ⚠️ Globals because bash
++# cannot hand back an associative array; the _GPU_ prefix keeps them clear of
++# the report's other state.
++_GPU_DOCKER_PS_READ=0
++_GPU_DOCKER_SCAN_DONE=0
++declare -A _GPU_ID_NAME=()    # docker container id (any length) → name
++declare -A _GPU_UUID_IDX=()   # gpu_uuid          → host GPU index
++declare -a _GPU_MAIN_PIDS=()  # "<main pid>|<container>", for the ancestor walk
++declare -A _GPU_PID_OWNER=()  # host pid → container name ("" = could not tell)
++
++# docker_id_name_map — "<id> <name>" per RUNNING container. --no-trunc first so
++# ids are the full 64 hex that /proc/<pid>/cgroup carries; the 12-hex form is
++# merged in as well (a short id still prefix-matches).
++docker_id_name_map() {
++  have docker || return 0
++  docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null || true
++  docker ps --format '{{.ID}} {{.Names}}' 2>/dev/null || true
++  return 0
++}
++
++# docker_pids_of <container> — host PIDs of that container's processes, one per
++# line. `docker top` answers from the daemon, so it works unprivileged.
++docker_pids_of() {
++  local _dpo_c="${1:-}" _dpo_p
++  [[ -n "$_dpo_c" ]] || return 0
++  have docker || return 0
++  for _dpo_p in $(docker top "$_dpo_c" -eo pid= 2>/dev/null); do
++    [[ "$_dpo_p" =~ ^[0-9]+$ ]] && printf '%s\n' "$_dpo_p"
++  done
++  return 0
++}
++
++# docker_main_pid <container> — the host PID of the container's main process.
++docker_main_pid() {
++  local _dmp_c="${1:-}" _dmp_p
++  [[ -n "$_dmp_c" ]] || return 0
++  have docker || return 0
++  _dmp_p="$(docker inspect "$_dmp_c" --format '{{.State.Pid}}' 2>/dev/null | tr -d '[:space:]')"
++  [[ "$_dmp_p" =~ ^[0-9]+$ ]] && printf '%s' "$_dmp_p"
++  return 0
++}
++
++# pid_ppid <pid> — the parent PID, empty if /proc is unreadable for it.
++pid_ppid() {
++  local _pp_pid="${1:-}" _pp_line="" _pp_rest="" _pp_state="" _pp_ppid="" _pp_tail=""
++  [[ "$_pp_pid" =~ ^[0-9]+$ ]] || return 0
++  [[ -r "/proc/${_pp_pid}/stat" ]] || return 0
++  _pp_line="$({ cat "/proc/${_pp_pid}/stat"; } 2>/dev/null)" || return 0
++  # "pid (comm) state ppid …" — comm may hold spaces and parens, so cut at the
++  # LAST ") " and take the field after the state letter.
++  _pp_rest="${_pp_line##*) }"
++  read -r _pp_state _pp_ppid _pp_tail <<<"$_pp_rest" || return 0
++  [[ "$_pp_ppid" =~ ^[0-9]+$ ]] && printf '%s' "$_pp_ppid"
++  return 0
++}
++
++# pid_is_within <pid> <main-pid> — success when <pid> IS <main-pid> or a
++# descendant of it. The fallback attribution path: an engine's worker processes
++# are children of the PID `docker inspect` reports, and their cgroup is often
++# unreadable to a non-root reporter.
++pid_is_within() {
++  local _piw_p="${1:-}" _piw_main="${2:-}" _piw_ppid="" _piw_guard=0
++  [[ "$_piw_p" =~ ^[0-9]+$ && "$_piw_main" =~ ^[0-9]+$ ]] || return 1
++  while [[ "$_piw_p" =~ ^[0-9]+$ ]] && [[ "$_piw_p" != 0 ]] && (( _piw_guard < 64 )); do
++    [[ "$_piw_p" == "$_piw_main" ]] && return 0
++    _piw_ppid="$(pid_ppid "$_piw_p")" || return 1
++    [[ -n "$_piw_ppid" ]] || return 1
++    _piw_p="$_piw_ppid"
++    _piw_guard=$((_piw_guard+1))
++  done
++  return 1
++}
++
++# pid_container_id <pid> — the 64-hex docker id that owns <pid>, empty when the
++# pid is not a docker process or its cgroup is unreadable (another user's
++# process read without root). Tolerates both cgroup layouts:
++#   cgroup v2 / systemd:  0::/system.slice/docker-<64hex>.scope
++#   cgroup v1:            .../docker[/-]<64hex>
++pid_container_id() {
++  local _pci_pid="${1:-}" _pci_line="" _pci_cid=""
++  [[ "$_pci_pid" =~ ^[0-9]+$ ]] || return 0
++  [[ -r "/proc/${_pci_pid}/cgroup" ]] || return 0
++  while IFS= read -r _pci_line; do
++    if [[ "$_pci_line" =~ docker-([0-9a-fA-F]{64}) ]]; then
++      _pci_cid="${BASH_REMATCH[1]}"; break
++    elif [[ "$_pci_line" =~ /docker[/-]([0-9a-fA-F]{64}) ]]; then
++      _pci_cid="${BASH_REMATCH[1]}"; break
++    fi
++  done < <({ cat "/proc/${_pci_pid}/cgroup"; } 2>/dev/null || true)
++  printf '%s' "$_pci_cid"
++}
++
++# gpu_build_id_name_map — fill _GPU_ID_NAME once (id → container name).
++gpu_build_id_name_map() {
++  (( _GPU_DOCKER_PS_READ )) && return 0
++  _GPU_DOCKER_PS_READ=1
++  local _id="" _name=""
++  while read -r _id _name; do
++    [[ "$_id" =~ ^[0-9a-fA-F]{12,64}$ && -n "$_name" ]] && _GPU_ID_NAME["$_id"]="$_name"
++  done < <(docker_id_name_map)
++  return 0
++}
++
++# gpu_scan_docker_owners — fill _GPU_PID_OWNER from the DAEMON, for pids whose
++# cgroup nobody but root can read: every process `docker top` lists, plus every
++# process in the tree under a container's main PID (`docker inspect`, walked
++# back through /proc by gpu_owner_for_pid).
++gpu_scan_docker_owners() {
++  (( _GPU_DOCKER_SCAN_DONE )) && return 0
++  _GPU_DOCKER_SCAN_DONE=1
++  gpu_build_id_name_map
++  local _name="" _cid="" _pid="" _main=""
++  local -A _seen_name=() _main_pid=()
++  for _cid in "${!_GPU_ID_NAME[@]}"; do
++    _name="${_GPU_ID_NAME[$_cid]}"
++    [[ -n "${_seen_name[$_name]:-}" ]] && continue
++    _seen_name[$_name]=1
++    while read -r _pid; do
++      [[ "$_pid" =~ ^[0-9]+$ ]] && _GPU_PID_OWNER[$_pid]="$_name"
++    done < <(docker_pids_of "$_name")
++    _main="$(docker_main_pid "$_name")"
++    [[ "$_main" =~ ^[1-9][0-9]*$ ]] && _main_pid["$_name"]="$_main"
++  done
++  # Main PIDs are kept for the ancestor walk below (a worker pid that is not in
++  # `docker top`'s list still belongs to the container that owns its parent).
++  for _name in "${!_main_pid[@]}"; do
++    _GPU_PID_OWNER["${_main_pid[$_name]}"]="$_name"
++  done
++  _GPU_MAIN_PIDS=()
++  for _name in "${!_main_pid[@]}"; do
++    _GPU_MAIN_PIDS+=("${_main_pid[$_name]}|$_name")
++  done
++  return 0
++}
++
++# gpu_owner_for_pid <pid> — container name that owns <pid>, empty when nobody
++# can say. Never guesses: an empty answer is the honest one.
++gpu_owner_for_pid() {
++  local _pid="${1:-}" _name="" _cid="" _key="" _entry="" _main=""
++  [[ "$_pid" =~ ^[0-9]+$ ]] || return 0
++  if [[ -n "${_GPU_PID_OWNER[$_pid]+set}" ]]; then
++    printf '%s' "${_GPU_PID_OWNER[$_pid]}"
++    return 0
++  fi
++  gpu_build_id_name_map
++  _cid="$(pid_container_id "$_pid")"
++  if [[ -n "$_cid" ]]; then
++    _name="${_GPU_ID_NAME[$_cid]:-}"
++    if [[ -z "$_name" ]]; then
++      # A short-id map still matches: prefix, either direction.
++      for _key in "${!_GPU_ID_NAME[@]}"; do
++        if [[ "$_cid" == "$_key"* || "$_key" == "$_cid"* ]]; then
++          _name="${_GPU_ID_NAME[$_key]}"; break
++        fi
++      done
++    fi
++  fi
++  if [[ -z "$_name" ]]; then
++    gpu_scan_docker_owners
++    _name="${_GPU_PID_OWNER[$_pid]:-}"
++    if [[ -z "$_name" ]]; then
++      # Last resort: is this pid a DESCENDANT of a container's main process?
++      for _entry in "${_GPU_MAIN_PIDS[@]:-}"; do
++        _main="${_entry%%|*}"
++        [[ -n "$_main" ]] || continue
++        if pid_is_within "$_pid" "$_main"; then
++          _name="${_entry#*|}"; break
++        fi
++      done
++    fi
++  fi
++  _GPU_PID_OWNER[$_pid]="$_name"
++  printf '%s' "$_name"
++}
++
++# gpu_vram_holders — one row per CUDA compute process holding VRAM:
++#
++#   <gpu_index>|<pid>|<process_name>|<used_mib>|<container_name>
++#
++# <gpu_index> is EMPTY when the driver would not say which card the process is
++# on (no gpu_uuid in --query-compute-apps, or no index⨯uuid map);
++# <container_name> is EMPTY when the owner could not be identified.
++#
++# Exit status: 0 = the query was answered (no rows then means "no compute
++# process", NOT "no VRAM in use" — display memory, and any process the driver
++# hides, still show up in memory.used); 1 = the query itself FAILED, which is a
++# different honest case and must not be rendered as an idle card.
++gpu_vram_holders() {
++  have nvidia-smi || return 0
++  local _apps="" _rows="" _line="" _uuid="" _pid="" _pname="" _used="" _idx=""
++  local _owner="" _have_uuid=1
++
++  _apps="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
++             --format=csv,noheader,nounits 2>/dev/null)" || _apps=""
++  if [[ -z "${_apps//[[:space:]]/}" ]]; then
++    # Either an older driver (it rejects the gpu_uuid field: error on STDOUT,
++    # non-zero exit) or genuinely nothing running. Retry without the card leg —
++    # holders are still holders, they just cannot be pinned to a card, and
++    # pinning them to GPU 0 anyway would be this bug in a different hat.
++    _apps="$(nvidia-smi --query-compute-apps=pid,process_name,used_memory \
++               --format=csv,noheader,nounits 2>/dev/null)" || _apps=""
++    _have_uuid=0
++  fi
++  if [[ -z "${_apps//[[:space:]]/}" ]]; then
++    # No rows on EITHER query. An empty result from a query that ANSWERED is a
++    # real "no compute process"; a driver that errored on both is unknown.
++    nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
++      --format=csv,noheader,nounits >/dev/null 2>&1 || return 1
++    return 0
++  fi
++
++  if (( _have_uuid )); then
++    _rows="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null)" || _rows=""
++    while IFS=, read -r _idx _uuid; do
++      _idx="${_idx// /}"; _uuid="${_uuid// /}"
++      [[ -n "$_idx" && -n "$_uuid" ]] && _GPU_UUID_IDX["$_uuid"]="$_idx"
++    done <<<"$_rows"
++  fi
++
++  while IFS= read -r _line; do
++    _line="${_line#"${_line%%[![:space:]]*}"}"
++    [[ -z "$_line" ]] && continue
++    _uuid=""
++    if (( _have_uuid )); then
++      _uuid="${_line%%,*}"; _line="${_line#*,}"
++    fi
++    _pid="${_line%%,*}"; _line="${_line#*,}"
++    # used_memory is the LAST field and an engine's process_name can itself
++    # contain a comma, so the tail is taken from the right and everything
++    # between is the name — never from a fixed field count.
++    _used="${_line##*,}"
++    _pname="${_line%,*}"
++    _pid="${_pid// /}"
++    [[ "$_pid" =~ ^[0-9]+$ ]] || continue
++    _used="${_used// /}"; [[ "$_used" =~ ^[0-9]+$ ]] || _used=0
++    _pname="${_pname#"${_pname%%[![:space:]]*}"}"; _pname="${_pname%"${_pname##*[![:space:]]}"}"
++    _pname="${_pname//|/ }"          # `|` is THIS row's field separator
++    _owner="$(gpu_owner_for_pid "$_pid")"
++    _idx=""
++    [[ -n "$_uuid" ]] && _idx="${_GPU_UUID_IDX[$_uuid]:-}"
++    printf '%s|%s|%s|%s|%s\n' "$_idx" "$_pid" "${_pname:-process}" "$_used" "$_owner"
++  done <<<"$_apps"
++}
++
++# gpu_holder_list <which> <rows> <ours> — the holder phrases of ONE card,
++# "; " separated and capped at 3 (then "(+N more)"). <which> picks the bucket:
++# "mine" (rows owned by <ours>), "foreign" (rows owned by a named container that
++# is not <ours>), "unnamed" (rows with no identifiable owner). The container leg
++# is printed for foreign holders only — ours is named by the sentence wrapping
++# this list.
++gpu_holder_list() {
++  local _want="${1:-}" _rows="${2:-}" _ours="${3:-}"
++  local h_idx h_pid h_name h_mib h_c out="" n=0 total=0 sep=""
++  while IFS='|' read -r h_idx h_pid h_name h_mib h_c; do
++    [[ -n "$h_pid" ]] || continue
++    if [[ "$_want" == "mine" ]]; then
++      [[ -n "$_ours" && "$h_c" == "$_ours" ]] || continue
++    elif [[ "$_want" == "foreign" ]]; then
++      [[ -n "$h_c" && ( -z "$_ours" || "$h_c" != "$_ours" ) ]] || continue
++    else
++      [[ -z "$h_c" ]] || continue
++    fi
++    total=$((total+1))
++    if (( n < 3 )); then
++      n=$((n+1))
++      if [[ "$_want" == "foreign" ]]; then
++        out+="${sep}\`${h_c}\` (\`${h_name}\` pid ${h_pid}, ${h_mib} MiB)"
++      else
++        out+="${sep}\`${h_name}\` pid ${h_pid}, ${h_mib} MiB"
++      fi
++      # "; " not ", ": every phrase already carries a comma ("`python3` pid
++      # 4200, 23000 MiB"), so a comma BETWEEN entries reads as one holder.
++      sep="; "
++    fi
++  done <<<"$_rows"
++  (( total > n )) && out+=" (+$((total-n)) more)"
++  printf '%s' "${out# }"
++}
++
++# gpu_vram_note <rows-for-this-card> <ours> <query-failed:0|1> — the attribution
++# tail of ONE "GPU N idle VRAM" bullet. Every branch states what it actually
++# saw, and no branch blames <ours> for memory its processes do not hold.
++gpu_vram_note() {
++  local _rows="${1:-}" _ours="${2:-}" _failed="${3:-0}"
++  local _mine="" _foreign="" _unnamed=""
++  if [[ "$_failed" == "1" ]]; then
++    printf '⚠ holder UNKNOWN — `nvidia-smi --query-compute-apps` failed on this driver, so something is using this GPU (display, browser, container) and it cannot be named'
++    return 0
++  fi
++  _mine="$(gpu_holder_list mine "$_rows" "$_ours")"
++  _foreign="$(gpu_holder_list foreign "$_rows" "$_ours")"
++  _unnamed="$(gpu_holder_list unnamed "$_rows" "$_ours")"
++
++  if [[ -n "$_mine" ]]; then
++    # Ours — and if the card is shared, that is said too. The "held by running
++    # `X`" wording is kept verbatim: a card this container really does hold
++    # should read the way it always did.
++    printf '(held by running `%s` — %s)' "$_ours" "$_mine"
++    [[ -n "$_foreign" ]] && printf ' ⚠ SHARED with %s — that container is not this stack'"'"'s engine' "$_foreign"
++    [[ -n "$_unnamed" ]] && printf ' ⚠ plus an unattributable process: %s' "$_unnamed"
++    return 0
++  fi
++  if [[ -n "$_foreign" ]]; then
++    printf '⚠ held by %s' "$_foreign"
++    if [[ -n "$_ours" ]]; then
++      printf ' — NOT the running club container (`%s`)' "$_ours"
++    else
++      printf ' — not the running club container (none was detected to compare against)'
++    fi
++    [[ -n "$_unnamed" ]] && printf ' ⚠ plus an unattributable process: %s' "$_unnamed"
++    return 0
++  fi
++  if [[ -n "$_unnamed" ]]; then
++    printf '⚠ held by %s — owning container NOT identifiable (a host process, or re-run this report with sudo to read /proc/<pid>/cgroup)' "$_unnamed"
++    return 0
++  fi
++  printf '⚠ no CUDA compute process listed on this card — display / graphics memory (X11, Wayland), or a process `nvidia-smi --query-compute-apps` cannot see'
++}
++
++# gpu_vram_lines [our_container] — the per-GPU "idle VRAM" bullets of the
++# Display / desktop state section. Attribution is per CARD, from the process
++# holding it (#1537): a container name is only ever printed for the cards its
++# own processes are on.
++gpu_vram_lines() {
++  have nvidia-smi || return 0
++  local ours="${1:-}" holders="" _mem="" _holders_rc=0
++  # Called with no argument (sourced on its own, or by a test): resolve the
++  # running club container rather than crediting nobody. report.sh passes it in,
++  # because it has already paid for that detection.
++  if (( $# == 0 )) && have docker && docker info >/dev/null 2>&1; then
++    ours="$(club_running_container)"
++  fi
++  local ours_cards=0 busy=0
++  _GPU_UUID_IDX=()
++  holders="$(gpu_vram_holders)" || _holders_rc=$?
++  local idx used rows rows_ours h_idx h_pid h_name h_mib h_c unplaced=""
++
++  # Holders the driver would not pin to a card are collected FIRST, so a card
++  # with nothing on it can say "nothing pinned HERE" rather than the stronger
++  # "nothing running" while an unplaced holder is listed below it.
++  while IFS='|' read -r h_idx h_pid h_name h_mib h_c; do
++    [[ -n "$h_idx" || -z "$h_pid" ]] && continue
++    unplaced+="${h_idx}|${h_pid}|${h_name}|${h_mib}|${h_c}"$'\n'
++  done <<<"$holders"
++
++  _mem="$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null)" || _mem=""
++  while IFS=, read -r idx used; do
++    idx="${idx# }"; used="${used# }"
++    if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
++      busy=$((busy+1))
++      rows=""
++      rows_ours=0
++      while IFS='|' read -r h_idx h_pid h_name h_mib h_c; do
++        [[ -n "$h_idx" && "$h_idx" == "$idx" ]] || continue
++        rows+="${h_idx}|${h_pid}|${h_name}|${h_mib}|${h_c}"$'\n'
++        [[ -n "$ours" && "$h_c" == "$ours" ]] && rows_ours=1
++      done <<<"$holders"
++      (( rows_ours )) && ours_cards=$((ours_cards+1))
++      if [[ -z "$rows" && -n "$unplaced" ]]; then
++        echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ no compute process this driver pins to this card — the holder is one it reported but would not place (stated below), so it is NOT assumed to be ours"
++      else
++        echo "- **GPU $idx idle VRAM:** ${used} MiB $(gpu_vram_note "$rows" "$ours" "$_holders_rc")"
++      fi
++    else
++      echo "- **GPU $idx idle VRAM:** ${used} MiB ✓"
++    fi
++  done <<<"$_mem"
++
++  if [[ -n "$unplaced" ]]; then
++    echo "- **VRAM holders this driver would not place on a card:** $(gpu_vram_note "$unplaced" "$ours" "$_holders_rc")"
++  fi
++  # #1537's own summary line: on a rig where OUR container holds none of the
++  # busy cards, say so once, where a reader skimming the paste will see it,
++  # instead of leaving three ⚠ bullets to be re-read as our engine's fault.
++  if [[ -n "$ours" && "$busy" -gt 0 && "$ours_cards" -eq 0 && "$_holders_rc" -eq 0 ]]; then
++    echo "- **Running club container \`${ours}\`:** holds NO VRAM on these cards — every busy card above is somebody else's process (the bullets say whose)"
++  fi
++}
++
+ # ---------------------------------------------------------------------------
+ # Header
+ # ---------------------------------------------------------------------------
+@@ -759,23 +1173,16 @@ section "Display / desktop state"
+   if have nvidia-smi; then
+     # Check if a club-3090 container is running (lightweight — full detection is later)
+     # NB: top-level (not in a function) — plain assignment, not `local`.
++    # ⚠️ This names a CONTAINER, not a card holder. It is passed to
++    # gpu_vram_lines, which credits a card to it only once one of that
++    # container's own processes is on the card (#1537: crediting the one
++    # running container with every busy card blamed our engine for a foreign
++    # container's VRAM, and hid that foreign container entirely).
+     our_container=""
+     if have docker && docker info >/dev/null 2>&1; then
+       our_container=$(club_running_container)
+     fi
+-    nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
+-      | while IFS=, read -r idx used; do
+-          idx="${idx# }"; used="${used# }"
+-          if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
+-            if [[ -n "$our_container" ]]; then
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
+-            else
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+-            fi
+-          else
+-            echo "- **GPU $idx idle VRAM:** ${used} MiB ✓"
+-          fi
+-        done
++    gpu_vram_lines "$our_container"
+   fi
+ } | redact
+ 
+diff --git a/scripts/tests/test-report-gpu-holder.sh b/scripts/tests/test-report-gpu-holder.sh
+new file mode 100755
+index 0000000..582bd48
+--- /dev/null
++++ b/scripts/tests/test-report-gpu-holder.sh
+@@ -0,0 +1,210 @@
++#!/usr/bin/env bash
++# test-report-gpu-holder — each GPU's VRAM is attributed to the PROCESS that
++# holds it, never to "the one running club container" (#1537).
++#
++# Why this test exists. #1537's report said GPUs 0 and 2 were "held by running
++# `sglang-cmp170hx`". That container could only see GPU 1; `nvidia-smi` showed
++# another container's `VLLM::Worker_TP0/1` on 0 and 2. report.sh had found ONE
++# running club container and credited it with every card above 100 MiB, so the
++# reporter blamed their own engine for a foreign container's VRAM while the
++# foreign container — the actual fault — was never mentioned.
++#
++# Contract asserted here:
++#   - a card is credited to a container ONLY when one of that container's own
++#     processes is on it (the "(held by running `X`)" wording survives for the
++#     cards X really holds, so a correct report still reads the same);
++#   - a card held by a foreign container names that container, and says out
++#     loud that it is NOT the club container;
++#   - a card with memory in use and no compute process on it is never blamed on
++#     a container (that is display/graphics memory, or something hidden);
++#   - when nothing can be read (no docker, unreadable cgroups) the report says
++#     the holder is unidentifiable rather than guessing "ours";
++#   - an idle card still renders ✓, and a rig with no nvidia-smi still reports.
++set -uo pipefail
++export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++
++PASS=0; FAIL=0
++ok() { PASS=$((PASS+1)); }
++no() { echo "FAIL: $1" >&2; FAIL=$((FAIL+1)); }
++has()   { if [[ "$2" == *"$3"* ]]; then ok; else no "$1: missing '$3'"; fi; }
++hasnt() { if [[ "$2" != *"$3"* ]]; then ok; else no "$1: must NOT contain '$3'"; fi; }
++
++# shellcheck source=fixtures/report-harness/report-env.sh
++source "${ROOT_DIR}/scripts/tests/fixtures/report-harness/report-env.sh"
++report_env_init "$ROOT_DIR"
++trap report_env_cleanup EXIT
++
++# Two containers, one of ours and one not, and the host PIDs each owns. The
++# numbers are arbitrary: the docker stub below is what says which PID belongs
++# to which container, and nvidia-smi's stub is what says which PID is on which
++# card — that pairing is the whole behaviour under test.
++OURS=sglang-cmp170hx
++OTHER=vllm-other
++ID_OURS=2222222222222222222222222222222222222222222222222222222222222222
++ID_OTHER=1111111111111111111111111111111111111111111111111111111111111111
++PID_OTHER=41001          # cards 0 and 2 (with its TP sibling at +1), another
++PID_OURS=41003           # card 1, our engine
++PID_UNKNOWN=41004          # card 3, an owner nothing can resolve
++
++install_stubs() {
++  report_nvsmi_stub <<'EOSMI'
++#!/usr/bin/env bash
++args="$*"
++case "$args" in
++  *compute-apps=gpu_uuid*)
++    [[ "${MOCK_COMPUTE_APPS:-1}" == 1 ]] || { echo 'Field "compute_apps" is not a valid field to query.'; exit 2; }
++    echo "GPU-0, ${PID_OTHER}, VLLM::Worker_TP0, 22900"
++    echo "GPU-2, ${PID_OTHER_B}, VLLM::Worker_TP1, 22900"
++    echo "GPU-1, ${PID_OURS}, python3, 23000"
++    [[ "${MOCK_UNKNOWN_HOLDER:-0}" == 1 ]] && echo "GPU-3, ${PID_UNKNOWN}, python3, 1200"
++    exit 0 ;;
++  *compute-apps=pid*) exit 1 ;;
++  *index,uuid*)   echo "0, GPU-0"; echo "1, GPU-1"; echo "2, GPU-2"; echo "3, GPU-3"; echo "4, GPU-4"; exit 0 ;;
++  *index,memory.used*)
++    echo "0, 23000"; echo "1, 23000"; echo "2, 22900"; echo "3, ${MOCK_GPU3_USED:-400}"; echo "4, 0"; exit 0 ;;
++  "") echo "CUDA Version: 13.2"; exit 0 ;;
++  *) exit 0 ;;
++esac
++EOSMI
++  report_docker_stub <<'EOSDK'
++#!/usr/bin/env bash
++case "$*" in
++  *info*) exit 0 ;;
++  *"--no-trunc --format"*)
++    printf '%s %s\n' "$MOCK_ID_OTHER" "$OTHER"
++    printf '%s %s\n' "$MOCK_ID_OURS" "$OURS"
++    exit 0 ;;
++  *"top $OTHER "*) echo "$PID_OTHER"; echo "$PID_OTHER_B"; exit 0 ;;
++  *"top $OURS "*)  echo "$PID_OURS"; exit 0 ;;
++  *"ps --format {{.Names}}"*) echo "$OURS"; exit 0 ;;
++  *"ps --format {{.ID}} {{.Names}}"*)
++    printf '%s %s\n' "$MOCK_ID_OTHER" "$OTHER"
++    printf '%s %s\n' "$MOCK_ID_OURS" "$OURS"
++    exit 0 ;;
++esac
++exit 1
++EOSDK
++}
++
++export OURS OTHER ID_OURS ID_OTHER
++export PID_OTHER PID_OURS PID_UNKNOWN
++export PID_OTHER_B=$((PID_OTHER+1))   # 41002 — must not collide with PID_OURS
++export MOCK_ID_OURS="$ID_OURS" MOCK_ID_OTHER="$ID_OTHER"
++install_stubs
++
++# ── 1. THE #1537 STATE: three busy cards, ours holds exactly one of them ─────
++report_run --no-redact
++[[ "$REPORT_RC" -eq 0 ]] || no "#1537 report must still exit 0 (got $REPORT_RC)"
++
++# The two foreign cards name the foreign container and refuse to name ours as
++# the holder.
++gpu0="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 0 idle VRAM' || true)"
++gpu2="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 2 idle VRAM' || true)"
++has  "GPU 0 names the container that actually holds it" "$gpu0" "$OTHER"
++has  "GPU 2 names the container that actually holds it" "$gpu2" "$OTHER"
++has  "GPU 0 says it is not the club container"          "$gpu0" "NOT the running club container"
++has  "GPU 2 says it is not the club container"          "$gpu2" "NOT the running club container"
++hasnt "GPU 0 is not credited to our container"  "$gpu0" "held by running \`$OURS\`"
++hasnt "GPU 2 is not credited to our container"  "$gpu2" "held by running \`$OURS\`"
++has  "GPU 0 names the process that holds it" "$gpu0" "VLLM::Worker_TP0"
++has  "GPU 2 names the process that holds it" "$gpu2" "VLLM::Worker_TP1"
++
++# THE NEGATIVE CONTROL: the card our container really holds keeps the wording it
++# always had. Without this arm, a fix that simply stopped naming any container
++# would pass every assertion above.
++gpu1="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 1 idle VRAM' || true)"
++has "GPU 1 (ours) still reads 'held by running'" "$gpu1" "(held by running \`$OURS\`"
++has "GPU 1 names our process"                    "$gpu1" "pid ${PID_OURS}"
++
++# Idle cards are untouched, and the section never claims a holder for them.
++gpu4="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 4 idle VRAM' || true)"
++has "idle card still renders the check mark" "$gpu4" "0 MiB ✓"
++
++# ── 2. memory in use, no compute process on the card → never our fault ──────
++export MOCK_GPU3_USED=0
++report_run --no-redact
++[[ "$REPORT_RC" -eq 0 ]] || no "report with no display card exits 0"
++unset MOCK_GPU3_USED
++
++# GPU 3 has 400 MiB used and NO compute row: display memory. It must not be
++# credited to the running container.
++export MOCK_COMPUTE_APPS=1
++report_run --no-redact
++gpu3="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 3 idle VRAM' || true)"
++hasnt "a card with no compute process is not blamed on our container" "$gpu3" "held by running \`$OURS\`"
++has   "a card with no compute process says so" "$gpu3" "no CUDA compute process listed on this card"
++
++# ── 3. an unresolvable holder: stated as unknown, never as ours ─────────────
++export MOCK_UNKNOWN_HOLDER=1
++report_run --no-redact
++gpu3="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 3 idle VRAM' || true)"
++hasnt "an unresolvable holder is not blamed on our container" "$gpu3" "held by running \`$OURS\`"
++has   "an unresolvable holder is called out" "$gpu3" "NOT identifiable"
++unset MOCK_UNKNOWN_HOLDER
++
++# ── 4a. our container is running but holds NONE of the busy cards ───────────
++install_stubs
++report_docker_stub <<'EOSDK1B'
++#!/usr/bin/env bash
++case "$*" in
++  *info*) exit 0 ;;
++  *"--no-trunc --format"*)
++    printf '%s %s\n' "$MOCK_ID_OTHER" "$OTHER"
++    printf '%s %s\n' "$MOCK_ID_OURS" "$OURS"
++    exit 0 ;;
++  *"top $OTHER "*) echo "$PID_OTHER"; echo "$PID_OTHER_B"; exit 0 ;;
++  *"top $OURS "*)  exit 0 ;;      # our container owns no process on any card
++  *"ps --format {{.Names}}"*) echo "$OURS"; exit 0 ;;
++  *"ps --format {{.ID}} {{.Names}}"*)
++    printf '%s %s\n' "$MOCK_ID_OTHER" "$OTHER"
++    printf '%s %s\n' "$MOCK_ID_OURS" "$OURS"
++    exit 0 ;;
++esac
++exit 1
++EOSDK1B
++report_run --no-redact
++hasnt "no card is credited to a container that holds none of them" "$REPORT_OUT" "held by running \`$OURS\`"
++has   "the report says out loud that our container holds nothing" "$REPORT_OUT" "holds NO VRAM on these cards"
++
++# ── 4. NO docker at all: honest "cannot tell", not "ours" ───────────────────
++report_docker_stub <<'EOSDK2'
++#!/usr/bin/env bash
++exit 1
++EOSDK2
++report_run --no-redact
++[[ "$REPORT_RC" -eq 0 ]] || no "no-docker report must still exit 0 (got $REPORT_RC)"
++hasnt "with no docker nothing is credited to a running container" "$REPORT_OUT" "held by running"
++gpu0="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 0 idle VRAM' || true)"
++has  "with no docker the holder is still named by process" "$gpu0" "VLLM::Worker_TP0"
++
++# ── 5. --query-compute-apps unsupported: UNKNOWN, never an idle card ────────
++export MOCK_COMPUTE_APPS=0
++report_docker_stub <<'EOSDK3'
++#!/usr/bin/env bash
++exit 1
++EOSDK3
++report_nvsmi_stub <<'EOSMI2'
++#!/usr/bin/env bash
++args="$*"
++case "$args" in
++  *compute-apps*) echo 'Field "compute_apps" is not a valid field to query.'; exit 2 ;;
++  *index,memory.used*) echo "0, 23000"; echo "1, 0"; exit 0 ;;
++  "") echo "CUDA Version: 13.2"; exit 0 ;;
++  *) exit 0 ;;
++esac
++EOSMI2
++report_run --no-redact
++[[ "$REPORT_RC" -eq 0 ]] || no "unreadable compute-apps must still exit 0 (got $REPORT_RC)"
++gpu0="$(printf '%s\n' "$REPORT_OUT" | command grep 'GPU 0 idle VRAM' || true)"
++has   "a failed compute-apps query is reported as unknown" "$gpu0" "UNKNOWN"
++hasnt "a busy card is never rendered as held by our container" "$gpu0" "held by running"
++unset MOCK_COMPUTE_APPS
++
++echo "----------------------------------------"
++echo "PASS: $PASS  FAIL: $FAIL"
++[[ "$FAIL" -eq 0 ]] || exit 1
++echo "OK: report.sh per-GPU VRAM attribution"

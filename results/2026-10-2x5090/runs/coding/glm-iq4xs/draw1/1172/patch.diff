@@ -1,0 +1,27 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..fe9c96c 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -38,10 +38,18 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+-    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # agg=True: a slug with a drafter loads TWO models per device, and both
++    # buffers are real. Last-wins here makes the drafter overwrite the target
++    # and the target's weights land in "unaccounted".
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size\s*=\s*([\d.]+) MiB", agg=True)
++    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size\s*=\s*([\d.]+) MiB")
++    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size\s*=\s*([\d.]+) MiB", agg=True)
++    # state buffers: DeepSeek's _comp_state and GLM's llama_memory_recurrent.
++    # Both are additive per device.
++    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size\s*=\s*([\d.]+) MiB", agg=True)
++    for dev, val in _per_dev(text, r"llama_memory_recurrent:\s+(CUDA\d)\s+(?:\S+\s+)?RS buffer size\s*=\s*([\d.]+) MiB",
++                             agg=True).items():
++        state[dev] = state.get(dev, 0.0) + val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

@@ -1,0 +1,124 @@
+diff --git a/scripts/lib/p2p-state.sh b/scripts/lib/p2p-state.sh
+index 6b53fb8..7af85dc 100644
+--- a/scripts/lib/p2p-state.sh
++++ b/scripts/lib/p2p-state.sh
+@@ -101,7 +101,10 @@ p2p_driver_flavor() {
+ # understood by the classifier. Keeping this here makes bench.sh and report.sh
+ # consume identical evidence. In particular, SGLang does not run our
+ # detect_nvlink.sh entrypoint, but it emits definitive runtime lines for NCCL
+-# and CustomAllReduceV2 initialization.
++# and its custom all-reduce: CustomAllReduceV2's init line on full-NVLink rigs,
++# and — on PCIe rigs, where only the V1 class runs — rank 0's
++# "Registering … cuda graph addresses" line after CUDA-graph capture (V1 logs
++# nothing when it initializes).
+ p2p_engine_log_evidence() {
+   awk '
+     index($0, "server_args=") && index($0, "disable_custom_all_reduce") {
+@@ -118,7 +121,8 @@ p2p_engine_log_evidence() {
+     index($0, "disable_custom_all_reduce=True") ||
+     index($0, "Setup Custom allreduce failed") ||
+     index($0, "sglang is using nccl==") ||
+-    index($0, "All Reduce config:") { print }
++    index($0, "All Reduce config:") ||
++    index($0, "cuda graph addresses") { print }
+   '
+ }
+ # Engagement classifier — PURE (takes the boot-trail/env text on stdin so the
+@@ -126,7 +130,10 @@ p2p_engine_log_evidence() {
+ # report.sh and bench.sh gather exactly this normalized text: the container's
+ # `[nvlink]` boot lines, resolved NCCL_P2P*/NVLINK_MODE env, and the engine's
+ # own all-reduce runtime lines. vLLM reports vetoes; SGLang additionally reports
+-# `sglang is using nccl==...` and `All Reduce config: ...` after initialization.
++# `sglang is using nccl==...`, CustomAllReduceV2's `All Reduce config: ...` line
++# (full-NVLink rigs), and — on PCIe rigs, where only the V1 class runs — rank 0's
++# `Registering N cuda graph addresses` line after CUDA-graph capture (V1 logs
++# nothing at init).
+ # Prints: "on" | "nccl_only_operator" | "nccl_only_gated" | "nccl_only_degraded"
+ #         | "nccl_only_nolib" | "nccl_only_failed" | "off" | "unknown" | "requested".
+ # Reads detect_nvlink.sh's machine-readable STATE line for OUR configuration and
+@@ -267,7 +274,7 @@ p2p_classify_engagement() {
+       echo nccl_only_operator; return 0 ;;
+   esac
+   case "$text" in
+-    *"All Reduce config:"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
++    *"All Reduce config:"*|*"cuda graph addresses"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
+   esac
+   case "$text" in
+     *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*) echo off; return 0 ;;
+diff --git a/scripts/report.sh b/scripts/report.sh
+index db97e00..67b476c 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -1198,7 +1198,7 @@ else
+     _p2p_class_stream="$(docker logs "$CONTAINER" 2>&1 | p2p_engine_log_evidence || true)"
+     nvlink_boot="$(printf '%s\n' "$_p2p_class_stream" | command grep -F '[nvlink]' | tail -8)"
+     p2p_env="$(docker exec "$CONTAINER" env 2>/dev/null | command grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort)"
+-    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:' || true)"
++    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:|cuda graph addresses' || true)"
+     echo "**Interconnect / P2P engagement:**"
+     if [[ -n "$nvlink_boot" || -n "$p2p_env" || -n "$engine_ar_runtime" ]]; then
+       echo '```'
+diff --git a/scripts/tests/test-p2p-state.sh b/scripts/tests/test-p2p-state.sh
+index a34bdc1..b96fd94 100755
+--- a/scripts/tests/test-p2p-state.sh
++++ b/scripts/tests/test-p2p-state.sh
+@@ -129,6 +129,38 @@ assert_contains "$out" "#1462"
+ unset _sgl_fail _ev _ok_boot
+ echo "  ✓ SGLang custom-AR setup failure classified as a fallback, not an opt-out or unknown (#1462)"
+ 
++# SGLang V1 CustomAllreduce — the class every PCIe rig runs (V2 is admitted only
++# on full NVLink, can_use_custom_all_reduce_v2 → full_nvlink is True). It logs
++# NOTHING when it initializes; its only success signal is rank 0's
++# graph-buffer registration after CUDA-graph capture. Before this fix a healthy
++# PCIe boot scored "unknown" ("no P2P engagement signal") — the maintainer's P2P
++# opt-in boot registered its graph buffers, passed verify-full + a continuous
++# soak, and every report still said unknown (follow-up to #1462). Real wording,
++# sglang/srt/distributed/device_communicators/custom_all_reduce.py (the
++# vLLM-forked CustomAllreduce).
++_sgl_v1=$(cat <<'EOF'
++[2026-10-12 10:00:00] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
++[2026-10-12 10:00:12 TP0] sglang is using nccl==2.30.7
++[2026-10-12 10:02:04 TP0] Registering 4352 cuda graph addresses. This can take up to several minutes for large models
++EOF
++)
++_ev="$(printf '%s\n' "$_sgl_v1" | p2p_engine_log_evidence)"
++assert_contains "$_ev" "cuda graph addresses"
++r="$(printf '%s\n' "$_ev" | p2p_classify_engagement)"
++[[ "$r" == "on" ]] || fail "SGLang V1 graph-buffer registration -> custom AR on (got $r)"
++r="$(printf '%s\n' "$_sgl_v1" | p2p_classify_engagement)"
++[[ "$r" == "on" ]] || fail "unfiltered SGLang V1 registration -> on (got $r)"
++# Restart epochs both ways: a failed restart must not inherit an earlier clean
++# V1 boot's registration line; a clean V1 boot after a failed one must not
++# inherit the failure.
++_fail_boot="$(printf '%s\n' "[sglang] BOOT disable_custom_all_reduce=False" 'sglang is using nccl==2.30.7' 'Setup Custom allreduce failed with invalid literal for int() with base 10: GPU-0e72. To silence this warning, specify --disable-custom-all-reduce explicitly.')"
++r="$(printf '%s\n%s' "$_ev" "$_fail_boot" | p2p_classify_engagement)"
++[[ "$r" == "nccl_only_failed" ]] || fail "failed restart after a clean V1 boot -> nccl_only_failed (got $r)"
++r="$(printf '%s\n%s' "$_fail_boot" "$_ev" | p2p_classify_engagement)"
++[[ "$r" == "on" ]] || fail "clean V1 restart after a failed setup -> on (got $r)"
++unset _sgl_v1 _ev _fail_boot
++echo "  ✓ SGLang V1 (PCIe rigs): graph-buffer registration scores custom-AR on; restart epochs preserved"
++
+ # ── 3. capability probes via faked nvidia-smi ────────────────────────────────
+ mk_smi() { cat > "$TMP/nvidia-smi" <<EOF
+ #!/usr/bin/env bash
+diff --git a/scripts/tests/test-switch-custom-ar-warning.sh b/scripts/tests/test-switch-custom-ar-warning.sh
+index 50102e7..78e827d 100755
+--- a/scripts/tests/test-switch-custom-ar-warning.sh
++++ b/scripts/tests/test-switch-custom-ar-warning.sh
+@@ -36,12 +36,16 @@ FAILED="[t] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
+ [t TP0] Setup Custom allreduce failed with invalid literal for int() with base 10: 'GPU-0e72'. To silence this warning, specify --disable-custom-all-reduce explicitly."
+ CLEAN="[t] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
+ [t TP0] All Reduce config: symmetric_memory = 20.01 MB, local_buffer = 2.00 MB, multicast = False, pull = True"
++CLEAN_V1="[t] server_args={'tp_size': 2, 'disable_custom_all_reduce': False}
++[t TP0] sglang is using nccl==2.29.7
++[t TP0] Registering 4352 cuda graph addresses. This can take up to several minutes for large models"
+ OPERATOR="[t] server_args={'tp_size': 2, 'disable_custom_all_reduce': True}"
+ 
+ out="$(run "$FAILED")"
+ [[ "$out" == *"SETUP FAILED"* && "$out" == *"invalid literal for int()"* ]] \
+   && ok "failed setup: warns and quotes the engine's line" || bad "failed setup did not warn: '$out'"
+ out="$(run "$CLEAN")";    [[ -z "$out" ]] && ok "clean custom-AR boot: silent"   || bad "clean boot warned: '$out'"
++out="$(run "$CLEAN_V1")"; [[ -z "$out" ]] && ok "clean V1 custom-AR boot (graph-buffer registration): silent" || bad "clean V1 boot warned: '$out'"
+ out="$(run "$OPERATOR")"; [[ -z "$out" ]] && ok "operator-disabled boot: silent" || bad "operator-disabled boot warned: '$out'"
+ 
+ [[ $fail -eq 0 ]] && echo "test-switch-custom-ar-warning: ok" || echo "test-switch-custom-ar-warning: FAIL"

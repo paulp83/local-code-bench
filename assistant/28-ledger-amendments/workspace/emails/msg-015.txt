@@ -1,0 +1,8 @@
+From: rina@example.net
+Date: 2026-07-08T02:30:00Z
+Subject: ledger amendment
+
+Please flip the sign of T-02213.
+
+Thanks,
+rina

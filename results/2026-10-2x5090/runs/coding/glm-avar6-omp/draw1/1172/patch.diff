@@ -1,0 +1,129 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..6c8add7 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,13 +6,22 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
++Three traps this encodes:
++  * drafter weights: a drafter pinned to a GPU emits the SAME line shapes as the
++    target model, AFTER it. `model`/`state` therefore SUM per device (agg=True);
++    last-wins reported the drafter as the model (3313 MiB target shown as 656).
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+     double-counts (measured 13,947 against a live 6,820 -- 2.05x).
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
+ 
++Known residual: `compute` is still last-wins. The target re-reserves after the
++drafter loads, and the log does not label which context a `sched_reserve` line
++belongs to, so a strictly-smaller interleaved reservation (the drafter's
++compute) cannot be distinguished from a re-reserve of the same buffer without
++an engine-side label. Its drafter share lands in `unaccounted`.
++
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+ number, so the two sections can never disagree.
+@@ -38,10 +47,20 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+-    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # agg=True: a slug can pin a DRAFT context to the same GPU, and the drafter
++    # emits the same line shapes as the target model (target loads first, then
++    # the drafter). Last-wins silently overwrote the target's weights with the
++    # drafter's (measured: model=656 for a 3,313 MiB target). Buffers are
++    # additive, so sum every match per device.
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size\s*=\s+([\d.]+) MiB", agg=True)
++    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size\s*=\s+([\d.]+) MiB")
++    kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size\s*=\s+([\d.]+) MiB", agg=True)
++    # Recurrent-model state (GLM/DeepSeek-class). The _comp_state regex is
++    # DeepSeek-specific; GLM emits `llama_memory_recurrent: ... RS buffer size`,
++    # which used to match nothing and fall into unaccounted.
++    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size\s*=\s+([\d.]+) MiB", agg=True)
++    for dev, val in _per_dev(text, r"llama_memory_recurrent:\s+(CUDA\d) RS buffer size\s*=\s+([\d.]+) MiB", agg=True).items():
++        state[dev] = state.get(dev, 0.0) + val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}
+@@ -70,7 +89,7 @@ def main() -> int:
+     except Exception:
+         pass
+ 
+-    devs = sorted(set(model) | set(smi) | set(pool))
++    devs = sorted(set(model) | set(kv) | set(state) | set(compute) | set(smi) | set(pool))
+     if not devs:
+         return 1
+ 
+diff --git a/scripts/tests/test-vram-breakdown-drafter.sh b/scripts/tests/test-vram-breakdown-drafter.sh
+new file mode 100755
+index 0000000..d9a63b3
+--- /dev/null
++++ b/scripts/tests/test-vram-breakdown-drafter.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++# test-vram-breakdown-drafter — drafter-slug VRAM attribution (issue context:
++# #1118 per-GPU drill-down blocked by under-attribution).
++#
++# A slug pinning a drafter to a GPU emits the same log-line shapes as the target
++# model, AFTER the target: last-wins aggregation silently overwrote the target's
++# weights with the drafter's (3313 MiB target reported as model=656), and the
++# recurrent-state buffer matched nothing and fell into `unaccounted`.
++#
++# Hermetic: runs scripts/lib/vram_breakdown.py against a fixture boot log; no
++# docker/GPU. nvidia-smi is stubbed so the reconciliation math is deterministic.
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++
++fail() { echo "FAIL: $1" >&2; exit 1; }
++assert_contains() { [[ "$1" == *"$2"* ]] || { echo "FAIL: missing '$2' in:" >&2; echo "$1" >&2; exit 1; }; }
++
++PYTHONUTF8="${PYTHONUTF8:-1}"
++export PYTHONUTF8
++
++FIXTURE="$(mktemp)"
++STUB="$(mktemp -d)"
++trap 'rm -rf "$FIXTURE" "$STUB"' EXIT
++
++cat > "$STUB/nvidia-smi" <<'EOF'
++#!/usr/bin/env bash
++printf '0, 11200, 24576\n1, 22992, 24576\n'
++EOF
++chmod +x "$STUB/nvidia-smi"
++
++# Fixture mirroring a real glm53-flash-dual-iq3xxs-moecache boot (drafter on CUDA1),
++# with llama.cpp's column padding before '=' (spaces, not a single space).
++cat > "$FIXTURE" <<'EOF'
++load_tensors:   CUDA0 model buffer size   = 5000.00 MiB
++load_tensors:   CUDA1 model buffer size   = 3313.42 MiB
++load_tensors:   CUDA1 model buffer size   =  655.73 MiB
++llama_kv_cache: CUDA1 KV buffer size      =  1280.00 MiB
++llama_kv_cache: CUDA1 KV buffer size      =    80.00 MiB
++llama_memory_recurrent: CUDA1 RS buffer size =  205.00 MiB
++_comp_state:    CUDA1 123 456 state buffer size =  300.00 MiB
++sched_reserve:  CUDA1 compute buffer size = 1606.48 MiB
++sched_reserve:  CUDA1 compute buffer size = 5240.16 MiB
++EOF
++
++out="$(PATH="$STUB:$PATH" python3 scripts/lib/vram_breakdown.py "$FIXTURE")" || fail "invocation failed"
++
++# Defect 1: model must be target + drafter (3313.42 + 655.73 = 3969), NOT 656.
++assert_contains "$out" "CUDA1: model=3969"
++# Defect 2: recurrent state counted (205 RS + 300 _comp_state = 505).
++assert_contains "$out" "state=505"
++# kv still sums (1280 + 80).
++assert_contains "$out" "kv=1360"
++
++# CUDA1 used=22992; named = model+kv+state+compute → unaccounted visible.
++line="$(printf '%s\n' "$out" | grep 'CUDA1:')"
++assert_contains "$line" "total=22992/24576MiB(94%)"
++assert_contains "$line" "unaccounted=11918"
++
++echo "test-vram-breakdown-drafter: ok"

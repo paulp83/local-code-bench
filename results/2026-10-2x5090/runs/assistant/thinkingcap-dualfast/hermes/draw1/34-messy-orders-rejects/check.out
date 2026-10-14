@@ -1,0 +1,10 @@
+PASS clean-header
+PASS rejects-header
+PASS clean-row-count
+PASS clean-sorted
+PASS clean-exact
+PASS clean-multiline-customer-flattened
+PASS clean-dates-iso
+PASS rejects-exact
+PASS rejects-none-silently-dropped
+PASS: 9 FAIL: 0

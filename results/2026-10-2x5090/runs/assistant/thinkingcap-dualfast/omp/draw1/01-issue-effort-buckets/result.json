@@ -1,0 +1,14 @@
+{
+ "task": "01-issue-effort-buckets",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 10.7,
+ "tool_calls": 4,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 5,
+ "checks_total": 5,
+ "partial": 1.0
+}

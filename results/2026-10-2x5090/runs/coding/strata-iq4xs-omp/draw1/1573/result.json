@@ -1,0 +1,25 @@
+{
+ "n": 1573,
+ "config": "strata-iq4xs-omp",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 639.3,
+ "steps": 39,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 1,
+ "localization": 1.0,
+ "files_touched": [
+  "docs/QUALITY_TEST.md",
+  "scripts/lib/thinking-budget.sh",
+  "scripts/quality-test.sh"
+ ],
+ "p2p_run": 1,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-quality-thinking-budget.sh": 0
+ }
+}

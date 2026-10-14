@@ -1,0 +1,31 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..82f14e9 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -38,10 +38,25 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    # agg=True: a drafter pinned to the same device emits a SECOND, identically-shaped
++    # load_tensors model-buffer line (target first, drafter second). They add -- with
++    # last-wins the drafter silently overwrote the target, so model= showed the
++    # drafter's weights and the target's several GiB fell into `unaccounted`.
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
++    # compute stays last-wins for now: the target RE-reserves after the drafter loads
++    # (target, drafter, then target re-reserve on the same device), and the log does not
++    # label which context a sched_reserve line belongs to -- summing would double-count
++    # the re-reservation. Attributing the drafter's compute is tracked separately.
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
++    # State buffers are engine-shaped and two of them never overlap: a DeepSeek/HybridMoE
++    # load emits "..._comp_state: CUDA<n> ... state buffer size"; a recurrent/GDN model
++    # (e.g. GLM-5.3-Flash) emits "llama_memory_recurrent: CUDA<n> RS buffer size". The old
++    # single pattern only caught the first, so the recurrent state fell into `unaccounted`.
++    # Match both shapes and sum -- at most one fires per boot, so the merge is safe.
+     state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    for _dev, _val in _per_dev(text, r"llama_memory_recurrent:\s+(CUDA\d) \S+ buffer size =\s+([\d.]+) MiB", agg=True).items():
++        state[_dev] = state.get(_dev, 0.0) + _val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

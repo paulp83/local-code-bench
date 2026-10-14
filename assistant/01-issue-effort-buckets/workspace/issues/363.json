@@ -1,0 +1,10 @@
+{
+  "number": 363,
+  "title": "add --dry-run to bench",
+  "labels": [
+    "bug"
+  ],
+  "files_touched": 4,
+  "has_repro": true,
+  "needs_gpu": true
+}

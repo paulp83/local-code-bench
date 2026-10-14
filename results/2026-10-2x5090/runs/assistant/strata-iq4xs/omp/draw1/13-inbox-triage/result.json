@@ -1,0 +1,14 @@
+{
+ "task": "13-inbox-triage",
+ "config": "strata-iq4xs",
+ "harness": "omp",
+ "draw": 1,
+ "model": "qwen3.8-flash-next-unsloth-ud-iq4_xs",
+ "agent_s": 17.8,
+ "tool_calls": 5,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 9,
+ "checks_total": 9,
+ "partial": 1.0
+}

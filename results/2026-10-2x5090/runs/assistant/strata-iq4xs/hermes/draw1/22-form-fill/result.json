@@ -1,0 +1,14 @@
+{
+ "task": "22-form-fill",
+ "config": "strata-iq4xs",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "qwen3.8-flash-next-unsloth-ud-iq4_xs",
+ "agent_s": 29.4,
+ "tool_calls": 5,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 8,
+ "checks_total": 8,
+ "partial": 1.0
+}

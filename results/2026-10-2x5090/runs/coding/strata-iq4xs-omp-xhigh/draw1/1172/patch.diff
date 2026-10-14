@@ -1,0 +1,209 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..f224dbb 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,12 +6,25 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
++Traps this encodes, each paid for on a real rig:
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+     double-counts (measured 13,947 against a live 6,820 -- 2.05x).
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
++  * A drafter pinned with `-devd CUDA<n>` emits its OWN load_tensors and
++    llama_kv_cache lines for that device -- same shape as the target's. The
++    per-device model buffer must therefore SUM (agg=True): last-wins let the
++    drafter overwrite the target, reporting the drafter's 656 MiB as model=
++    and silently moving the target's 3,313 MiB into unaccounted (measured
++    2026-10-12 on glm53-flash-dual-iq3xxs-moecache).
++  * compute STAYS last-wins: the sched_reserve line does not label which
++    context it belongs to, and the target re-reserves AFTER the drafter loads
++    (observed CUDA1 sequence: 5208 target, 1606 drafter, 5240 target
++    re-reserve). Summing double-counts the re-reservation; last-wins keeps the
++    target's live reservation and drops the drafter's, so the drafter's
++    compute buffer (~1.6 GiB) remains in unaccounted until the engine labels
++    the reservation (tracked separately).
+ 
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+@@ -30,6 +43,11 @@ def _per_dev(text, pat, agg=False):
+     return out
+ 
+ 
++def _merge(dst, src):
++    for dev, val in src.items():
++        dst[dev] = dst.get(dev, 0.0) + val
++
++
+ def main() -> int:
+     if len(sys.argv) < 2:
+         return 1
+@@ -38,10 +56,20 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    # agg=True: target AND drafter each emit their own load_tensors line on a
++    # shared `-devd` device -- two loads, two buffers, they add. Last-wins
++    # here reports the drafter's weights as model= and loses the target's.
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
++    # last-wins is deliberate: sched_reserve does not label its context and the
++    # target re-reserves after the drafter loads, so the LAST line is the
++    # target's live buffer. Summing would double-count the re-reservation; the
++    # dropped drafter compute buffer stays in unaccounted (see module docstring).
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
++    # two shapes of non-KV persistent state: DeepSeek's _comp_state and the
++    # recurrent (Mamba/RWKV/GLM) RS buffer from llama_memory_recurrent
+     state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    _merge(state, _per_dev(text, r"llama_memory_recurrent:\s+(CUDA\d) RS buffer size =\s+([\d.]+) MiB", agg=True))
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}
+@@ -86,7 +114,8 @@ def main() -> int:
+             parts.append("total=%.0f/%.0fMiB(%.0f%%)" % (used, tot, 100 * used / tot))
+             if acc:
+                 # everything the card reports that the engine did not name:
+-                # draft context, CUDA runtime, fragmentation
++                # the drafter's compute buffer (see module docstring), CUDA
++                # runtime, fragmentation
+                 parts.append("unaccounted=%.0f" % (used - acc))
+         print("  %s: %s" % (dev, "  ".join(parts)))
+ 
+diff --git a/scripts/tests/test-vram-breakdown.sh b/scripts/tests/test-vram-breakdown.sh
+new file mode 100755
+index 0000000..631a7f4
+--- /dev/null
++++ b/scripts/tests/test-vram-breakdown.sh
+@@ -0,0 +1,128 @@
++#!/usr/bin/env bash
++# Regression contract for scripts/lib/vram_breakdown.py (#1118 prep).
++#
++# Asserts, against the measured glm53-flash-dual-iq3xxs-moecache boot shape
++# (target on CUDA0+CUDA1, DFlash2 drafter pinned to CUDA1 via -devd):
++#   1. model= SUMS target + drafter load_tensors lines on a shared device
++#      (defect 1: last-wins used to report the drafter's 656 MiB as model=
++#      and silently drop the target's 3,313 MiB into unaccounted).
++#   2. llama_memory_recurrent: ... RS buffer size is counted as state
++#      (defect 2: nothing matched it; the _comp_state regex is DeepSeek-only).
++#      Both state shapes coexist and add.
++#   3. compute= stays LAST-wins (defect 3 is deliberately NOT summed: the
++#      target re-reserves after the drafter, so summing double-counts).
++#   4. unaccounted reconciles to the issue's expected 2,563 MiB on CUDA1
++#      (6,082 as-reported minus 3,313 model + 206 state recovered).
++#   5. a no-drafter boot is unchanged: single load_tensors line -> model=.
++set -euo pipefail
++
++# Force Python's UTF-8 mode (PEP 540) for every python3 this script runs —
++# repo-wide locale invariant, guarded by test-locale-utf8.sh.
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++PY=scripts/lib/vram_breakdown.py
++
++TMP="$(mktemp -d)"
++trap 'rm -rf "$TMP"' EXIT
++
++# Stub nvidia-smi so the reconciliation (total/unaccounted) is deterministic.
++# CUDA0 used 20592, CUDA1 used 22992 (issue figures), 24576 total.
++cat > "$TMP/nvidia-smi" <<'SMI'
++#!/usr/bin/env bash
++printf '0, 20592, 24576\n1, 22992, 24576\n'
++SMI
++chmod +x "$TMP/nvidia-smi"
++export PATH="$TMP:$PATH"
++
++fail() { echo "FAIL: $*" >&2; exit 1; }
++
++# --- fixture 1: drafter boot (issue repro, CUDA1 figures) -------------------
++cat > "$TMP/boot.log" <<'LOG'
++0.01.07.881 I load_backend: loaded backend
++load_tensors:   CUDA0 model buffer size =  3313.42 MiB
++llama_kv_cache: CUDA0 KV buffer size =  1281.00 MiB
++sched_reserve:  CUDA0 compute buffer size =  5208.35 MiB
++[moe-cache] CUDA0 pool[0]: slots=2048 total=9653 MiB
++llama_memory_recurrent: CUDA0 RS buffer size =   205.69 MiB
++load_tensors:   CUDA1 model buffer size =  3313.42 MiB
++llama_kv_cache: CUDA1 KV buffer size =  1281.00 MiB
++sched_reserve:  CUDA1 compute buffer size =  5208.35 MiB
++[moe-cache] CUDA1 pool[0]: slots=2048 total=9653 MiB
++llama_memory_recurrent: CUDA1 RS buffer size =   205.69 MiB
++load_tensors:   CUDA1 model buffer size =   655.73 MiB
++llama_kv_cache: CUDA1 KV buffer size =    80.00 MiB
++sched_reserve:  CUDA1 compute buffer size =  1606.48 MiB
++sched_reserve:  CUDA1 compute buffer size =  5240.16 MiB
++LOG
++
++OUT="$(python3 "$PY" "$TMP/boot.log")"
++
++grep -F "model=3969" <<<"$OUT" >/dev/null \
++  || fail "defect 1: CUDA1 model= must sum target+drafter (3313.42+655.73). got:
++$OUT"
++grep -F "model=656" <<<"$OUT" >/dev/null \
++  && fail "defect 1 regression: drafter overwrote target as model=656"
++
++grep -F "state=206" <<<"$OUT" >/dev/null \
++  || fail "defect 2: llama_memory_recurrent RS buffer must be counted as state. got:
++$OUT"
++
++grep -F "compute=5240" <<<"$OUT" >/dev/null \
++  || fail "compute must stay last-wins (target re-reservation 5240.16). got:
++$OUT"
++grep -F "compute=6846" <<<"$OUT" >/dev/null \
++  && fail "defect 3 must NOT be summed: 5208/5240 are one re-reserved buffer"
++
++grep -F "kv=1361" <<<"$OUT" >/dev/null \
++  || fail "CUDA1 kv must sum target+drafter (1281+80). got:
++$OUT"
++
++# CUDA1: acc = 3969.15 + 1361 + 205.69 + 5240.16 + 9653 = 20429.00
++#        unaccounted = 22992 - 20429 = 2563  (issue table, "+recurrent counted")
++grep -F "unaccounted=2563" <<<"$OUT" >/dev/null \
++  || fail "CUDA1 unaccounted must reconcile to 2563. got:
++$OUT"
++# CUDA0: acc = 3313.42 + 1281 + 205.69 + 5208.35 + 9653 = 19661.46 -> 20592-acc -> 931
++grep -F "unaccounted=931" <<<"$OUT" >/dev/null \
++  || fail "CUDA0 unaccounted must reconcile to 931. got:
++$OUT"
++echo "PASS: drafter boot — model summed, recurrent state counted, compute last-wins, unaccounted reconciles"
++
++# --- fixture 2: DeepSeek _comp_state still matches AND adds with RS ----------
++cat > "$TMP/deepseek.log" <<'LOG'
++load_tensors:   CUDA0 model buffer size =  1000.00 MiB
++llama_kv_cache: CUDA0 KV buffer size =   500.00 MiB
++llama_model_comp_state: CUDA0 gate cpu state buffer size =  100.00 MiB
++LOG
++
++OUT2="$(python3 "$PY" "$TMP/deepseek.log")"
++grep -F "state=100" <<<"$OUT2" >/dev/null \
++  || fail "_comp_state regex regression (DeepSeek shape). got:
++$OUT2"
++
++cat > "$TMP/both-states.log" <<'LOG'
++load_tensors:   CUDA0 model buffer size =  1000.00 MiB
++llama_model_comp_state: CUDA0 gate cpu state buffer size =  100.00 MiB
++llama_memory_recurrent: CUDA0 RS buffer size =   50.25 MiB
++LOG
++OUT3="$(python3 "$PY" "$TMP/both-states.log")"
++grep -F "state=150" <<<"$OUT3" >/dev/null \
++  || fail "both state shapes on one device must add (100+50.25). got:
++$OUT3"
++echo "PASS: state covers _comp_state and llama_memory_recurrent, summed when both present"
++
++# --- fixture 3: no-drafter boot — unchanged attribution ----------------------
++grep -v -e "655.73" -e "80.00" -e "1606.48" -e "5240.16" "$TMP/boot.log" > "$TMP/nodrafter.log"
++OUT4="$(python3 "$PY" "$TMP/nodrafter.log")"
++grep -F "model=3313" <<<"$OUT4" >/dev/null \
++  || fail "no-drafter boot: model= must be the single target buffer. got:
++$OUT4"
++# CUDA1: acc = 3313.42 + 1281 + 205.69 + 5208.35 + 9653 = 19661.46 -> 3330.54 -> 3331
++grep -F "unaccounted=3331" <<<"$OUT4" >/dev/null \
++  || fail "no-drafter CUDA1 unaccounted must be used-minus-single-target sum. got:
++$OUT4"
++echo "PASS: no-drafter boot attribution unchanged"
++
++echo "test-vram-breakdown.sh OK"

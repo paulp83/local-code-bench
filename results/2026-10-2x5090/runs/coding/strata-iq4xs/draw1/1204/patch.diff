@@ -1,0 +1,138 @@
+diff --git a/scripts/lib/profiles/compose_registry.py b/scripts/lib/profiles/compose_registry.py
+index 31b69e8..4b483ac 100644
+--- a/scripts/lib/profiles/compose_registry.py
++++ b/scripts/lib/profiles/compose_registry.py
+@@ -39,6 +39,23 @@ STATUS_VALUES = (
+ # Statuses that launch without --force. Everything else is "(NA)".
+ FUNCTIONAL_STATUSES = frozenset({"production", "caveats"})
+ 
++# ── Catalog provenance (origin) — first-class, #1202 P2 ───────────────────────
++# WHERE an entry lives, independent of its SLUG. Two closed values:
++#   ORIGIN_CORE  — curated: git-tracked in scripts/lib/profiles/registry.yaml.
++#   ORIGIN_LOCAL — community: the gitignored scripts/lib/profiles-local/ layer.
++#
++# This used to be INFERRED from the slug prefix (a `local/` namespace), which
++# tied provenance to slug SHAPE and forced `export_pr.py` to RENAME on publish
++# (strip `local/`, prefix the engine namespace). With origin as a field, a
++# later slug hard-cut (P3 — local slugs move to `<engine>/<name>`) collapses
++# that arithmetic to identity: PUBLISH BECOMES A VALUE FLIP, NOT A RENAME, and a
++# user's scripts / notes / compose pins survive it. The merge below is CORE-WINS:
++# a curated entry is never shadowed by a same-slug local one — the catalog you
++# ship is the catalog that wins.
++ORIGIN_CORE = "core"
++ORIGIN_LOCAL = "local"
++ORIGIN_VALUES = (ORIGIN_CORE, ORIGIN_LOCAL)
++
+ # Compose `Status:` header emoji → registry status word. The header may carry
+ # trailing prose after the canonical token (e.g. "✅ Production (NEW — ...)");
+ # matching is by the leading emoji, so prose is tolerated.
+@@ -190,11 +207,24 @@ def _entry(
+     spec_method=None,
+     category=None,
+     weights_companions=None,
++    # Catalog provenance — WHERE this entry lives (see ORIGIN_CORE / ORIGIN_
++    # LOCAL above). DERIVED by the loader from the LAYER, never stored in the
++    # registry DATA / registry.local.json (it is in _DERIVED_ENTRY_KEYS): a core
++    # row reads "core", a scripts/lib/profiles-local/ row is re-wrapped as
++    # "local". Default core so a bare _entry(...) call (the curated path) is
++    # correct without the caller naming it. Always present in the returned dict
++    # (like gateway/moe_cache) so consumers .get() it without a core-vs-local
++    # shape fork.
++    origin=ORIGIN_CORE,
+ ):
+     if status not in STATUS_VALUES:
+         raise ValueError(
+             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
+         )
++    if origin not in ORIGIN_VALUES:
++        raise ValueError(
++            f"{compose_path}: origin={origin!r} not in {ORIGIN_VALUES}"
++        )
+     entry = {
+         "model": model,
+         "weights_variant": weights_variant,
+@@ -223,6 +253,10 @@ def _entry(
+         "kvcalc_key": kvcalc_key,
+         "status": status,
+         "status_note": status_note,
++        # Catalog provenance (#1202 P2) — derived from the LAYER, see the
++        # _entry() docstring. CORE-WINS merge in get_registry() keeps a curated
++        # row's origin "core" even if a same-slug local row is present.
++        "origin": origin,
+         # Extra weight-variant keys (a DFlash draft / mmproj projector) this slug's
+         # compose mounts from a separate subdir, BEYOND the core weights_variant.
+         # The serve-cockpit Download action fetches these alongside the core so the
+@@ -340,7 +374,12 @@ _REGISTRY_YAML_SCHEMA = 1
+ 
+ # Built-entry keys that _entry() DERIVES (never kwargs): stripped before entry
+ # kwargs are written back to YAML — the migrator and promote.py share this.
+-_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode"})
++# `origin` is DERIVED too: the loader stamps it from the LAYER (core YAML →
++# "core", registry.local.json → "local", see load_local_registry), so it is
++# never stored as an entry kwarg in registry.yaml — keeping the DATA file
++# byte-identical and the curated/local distinction a property of WHERE the row
++# lives, not of what it says. #1202 P2.
++_DERIVED_ENTRY_KEYS = frozenset({"pp", "gpu_assignment_mode", "origin"})
+ 
+ # Top-level keys the schema allows — anything else is a loud error, not a
+ # silently ignored section.
+@@ -850,8 +889,13 @@ def load_local_registry(root=None):
+             )
+         if model in local_models:
+             raise LocalRegistryError(f"{path}: duplicate local model id {model!r}")
++        # #1202 P2: provenance is a FIELD, stamped from the LAYER — every row
++        # read from registry.local.json is LOCAL, no matter its slug shape. A
++        # stored `origin` (a derived key) is dropped first so the layer always
++        # wins and a hand-edited value can never masquerade as core.
++        kwargs = {k: v for k, v in kwargs.items() if k != "origin"}
+         try:
+-            entry = _entry(**kwargs)
++            entry = _entry(**kwargs, origin=ORIGIN_LOCAL)
+         except TypeError as exc:
+             raise LocalRegistryError(
+                 f"{path}: local entry {slug!r} has bad _entry kwargs: {exc}"
+@@ -874,8 +918,14 @@ def get_registry(root=None):
+     local = load_local_registry(root)
+     if not local:
+         return COMPOSE_REGISTRY
+-    merged = dict(COMPOSE_REGISTRY)
+-    merged.update(local)
++    # CORE-WINS (#1202 P2): seed with the local layer, then overlay core, so a
++    # curated row can NEVER be shadowed by a same-slug local one — the catalog
++    # you ship is the catalog that wins. (Today promote/load keep the layers
++    # slug-disjoint via the `local/` namespace, so this ordering is latent; it
++    # becomes load-bearing at the P3 hard-cut when local slugs move to
++    # `<engine>/<name>` and could otherwise collide.)
++    merged = dict(local)
++    merged.update(COMPOSE_REGISTRY)
+     return merged
+ 
+ 
+diff --git a/scripts/lib/profiles/export_pr.py b/scripts/lib/profiles/export_pr.py
+index 4369d89..e1e4391 100755
+--- a/scripts/lib/profiles/export_pr.py
++++ b/scripts/lib/profiles/export_pr.py
+@@ -271,9 +271,22 @@ def core_compose_rel(mid: str, local_compose_rel: str) -> str:
+ 
+ def translated_entry(state: dict, entry: dict) -> dict:
+     """One LOCAL registry entry → its CORE ``_entry(...)`` kwargs (pure copy —
+-    the local JSON is never mutated)."""
++    the local JSON is never mutated).
++
++    #1202 P2: catalog provenance is the first-class ``origin`` field, DERIVED
++    by the loader from WHERE the row lives (registry.yaml → ``core``,
++    registry.local.json → ``local``) — never stored as an entry kwarg. So
++    publishing a model is a provenance FLIP (the loader stamps ``core`` the
++    moment the merged row lands in registry.yaml), not a property of the slug.
++    We therefore strip any ``origin`` from the emitted kwargs (it is in
++    ``_DERIVED_ENTRY_KEYS``; ``load_registry_data`` would reject a stored one),
++    and the slug arithmetic below is what P3 hard-cuts: today it renames
++    ``local/<name>`` → ``<engine>/<name>``, but once local slugs already carry
++    that shape it collapses to IDENTITY and publish stops being a rename — a
++    user's scripts, notes and compose pins survive it."""
+     mid = state["model_id"]
+     kw = dict(entry["kwargs"])
++    kw.pop("origin", None)  # derived by the loader from the CORE layer on merge
+     cpath = str(kw["compose_path"])
+     kw["compose_path"] = core_compose_rel(mid, cpath)
+     ns = compose_slug_namespace(cpath)

@@ -1,0 +1,14 @@
+{
+ "task": "20-notes-to-actions",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 14.1,
+ "tool_calls": 2,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 22,
+ "checks_total": 22,
+ "partial": 1.0
+}

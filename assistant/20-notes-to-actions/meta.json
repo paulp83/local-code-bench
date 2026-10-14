@@ -1,0 +1,9 @@
+{
+  "id": "20-notes-to-actions",
+  "source": "novel",
+  "category": "extraction",
+  "difficulty": "medium",
+  "est_minutes": 12,
+  "needs_web": false,
+  "notes": "Novel: relative-date resolution against a stated today."
+}

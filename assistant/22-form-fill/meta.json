@@ -1,0 +1,9 @@
+{
+  "id": "22-form-fill",
+  "source": "novel",
+  "category": "forms",
+  "difficulty": "easy",
+  "est_minutes": 6,
+  "needs_web": false,
+  "notes": "Novel: structured extraction under a JSON schema (enum, bounds, pattern)."
+}

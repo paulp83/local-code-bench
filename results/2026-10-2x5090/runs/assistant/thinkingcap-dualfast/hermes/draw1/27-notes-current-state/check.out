@@ -1,0 +1,10 @@
+PASS answers-parses
+FAIL q1: Tuesday
+FAIL q2: Priya Shah
+FAIL q3: 31500
+FAIL q4: Dovetail
+PASS q5
+PASS q6
+FAIL q7: 138500
+PASS q8
+PASS: 4 FAIL: 5

@@ -1,0 +1,31 @@
+{
+  "categories": {
+    "meals": {
+      "claimed": 488.34,
+      "reimbursable": 34.25
+    },
+    "transport": {
+      "claimed": 819.31,
+      "reimbursable": 819.31
+    },
+    "lodging": {
+      "claimed": 703.65,
+      "reimbursable": 703.65
+    },
+    "supplies": {
+      "claimed": 1041.01,
+      "reimbursable": 1041.01
+    }
+  },
+  "total_reimbursable": 2598.22,
+  "duplicates_dropped": [
+    "R23",
+    "R24"
+  ],
+  "over_cap": [
+    "R12",
+    "R17",
+    "R21",
+    "R22"
+  ]
+}

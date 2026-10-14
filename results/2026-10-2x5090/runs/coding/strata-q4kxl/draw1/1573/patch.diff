@@ -1,0 +1,65 @@
+diff --git a/scripts/lib/thinking-budget.sh b/scripts/lib/thinking-budget.sh
+index 636d91c..4335211 100755
+--- a/scripts/lib/thinking-budget.sh
++++ b/scripts/lib/thinking-budget.sh
+@@ -56,7 +56,9 @@
+ #       Prints the SGLang processor class for that parser, or nothing.
+ #
+ # Nothing here mutates the server. The only network calls are GETs against
+-# $URL (/v1/models, /server_info, /get_server_info).
++# $URL (/v1/models, /server_info, /get_server_info); the non-network reads are
++# `docker inspect` (argv) and, for vLLM, `docker logs` (the boot log, the only
++# place a launcher-injected --reasoning-parser shows up).
+ export PYTHONUTF8="${PYTHONUTF8:-1}"
+ 
+ _TB_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+@@ -229,6 +231,31 @@ _thinking_budget_container_facts() {
+   python3 -c "$_THINKING_BUDGET_FACTS_PY" "$1"
+ }
+ 
++# vLLM's boot log is the resolved truth when the image starts the server through
++# its OWN launcher (e.g. bucko's `qwen38-serve`): `--reasoning-parser qwen3` is
++# added inside that script, so the container argv (docker inspect) shows none —
++# but the server still prints its resolved args at boot, with the parser visible
++# in the `non-default args` dict (`'reasoning_parser': 'qwen3'`). `docker logs`
++# exposes that. stdout: the parser name (last occurrence), or nothing when the
++# log is unreachable or carries no parser (None / absent). This is a FALLBACK
++# for the argv check — positive evidence of a parser is positive evidence however
++# the image chose to set it.
++_thinking_budget_vllm_log_parser() {
++  local logs
++  logs="$(docker logs "$1" 2>&1 || true)"
++  [[ -n "$logs" ]] || return 0
++  # The value must be a quoted string; an unquoted None (no parser) is not a
++  # match. The \x27 / \x22 escapes keep the quote literals out of the single-
++  # quoted shell string that wraps this Python.
++  python3 -c '
++import re, sys
++val = ""
++for m in re.finditer(r"[\x27\"]reasoning_parser[\x27\"]\s*:\s*[\x27\"]([^\x27\"]+)[\x27\"]", sys.stdin.read()):
++    val = m.group(1)
++print(val)
++' <<<"$logs" 2>/dev/null || true
++}
++
+ # SGLang's own readback: /server_info (v0.5.20) dumps the resolved ServerArgs;
+ # /get_server_info is the deprecated alias. Walks the whole document so a
+ # regrouping of the args (v0.5.20 moved them under sub-groups) cannot hide the
+@@ -331,6 +358,17 @@ thinking_budget_verify() {
+       facts="$(docker inspect "$c" 2>/dev/null | _thinking_budget_container_facts vllm)"
+       case "$facts" in
+         "PARSER none")
++          # The argv showing no parser is NOT proof of absence: an image that
++          # starts vLLM through its own launcher adds --reasoning-parser inside
++          # that script, invisible to docker inspect. Read the server's boot log
++          # before refusing — a parser the boot log reports is real positive
++          # evidence and must not be downgraded to an un-overridable refusal.
++          local logparser
++          logparser="$(_thinking_budget_vllm_log_parser "$c")"
++          if [[ -n "$logparser" ]]; then
++            THINKING_BUDGET_EVIDENCE="container ${c} boot log shows reasoning_parser=${logparser} in non-default args — set by the image's launcher, not in the container argv"
++            return 0
++          fi
+           THINKING_BUDGET_EVIDENCE="container ${c} was booted WITHOUT --reasoning-parser — vLLM v0.29.0 rejects thinking_token_budget per request (VLLMValidationError), so every scenario would fail"
+           return 1 ;;
+         "PARSER "*)

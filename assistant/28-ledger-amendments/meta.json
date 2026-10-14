@@ -1,0 +1,29 @@
+{
+  "id": "28-ledger-amendments",
+  "set": "hard-v1",
+  "axis": "A",
+  "source": "novel",
+  "category": "long-input",
+  "difficulty": "hard",
+  "est_minutes": 45,
+  "needs_web": false,
+  "notes": "A single groupby on ledger.csv gives the unamended balances: every account whose transactions were amended is wrong, and ignored_emails.json is missing. Applying emails in file-name order instead of Date: order, or applying unapproved/disregarded emails, breaks the chained set+move and double-set cases.",
+  "spec_map": {
+    "balances-parses": "`/workspace/balances.json`: an object mapping all 12 account ids to the corrected balance in integer cents",
+    "balances-all-12-accounts": "`/workspace/balances.json`: an object mapping all 12 account ids to the corrected balance in integer cents",
+    "balance-ACC-01": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-02": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-03": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-04": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-05": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-06": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-07": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-08": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-09": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-10": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-11": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "balance-ACC-12": "the corrected balance in integer cents (the sum of the account's amounts after all amendments)",
+    "ignored-emails-exact": "sorted array of the email paths (e.g. `emails/msg-007.txt`) that had no effect",
+    "ignored-emails-sorted": "sorted array of the email paths (e.g. `emails/msg-007.txt`) that had no effect"
+  }
+}

@@ -1,0 +1,17 @@
+PASS balances-parses
+PASS balances-all-12-accounts
+PASS balance-ACC-01
+FAIL balance-ACC-02: -16448581
+PASS balance-ACC-03
+PASS balance-ACC-04
+PASS balance-ACC-05
+FAIL balance-ACC-06: -18092714
+FAIL balance-ACC-07: -17894268
+PASS balance-ACC-08
+PASS balance-ACC-09
+PASS balance-ACC-10
+PASS balance-ACC-11
+PASS balance-ACC-12
+PASS ignored-emails-exact
+PASS ignored-emails-sorted
+PASS: 13 FAIL: 3

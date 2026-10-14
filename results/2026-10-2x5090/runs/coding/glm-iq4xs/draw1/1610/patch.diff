@@ -1,0 +1,185 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..438feca 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -401,6 +401,69 @@ def service_body(text: str) -> str:
+ # invoke artifacts (as declared in patches.yml / Phase-A-prime
+ # delivery_spec) are present in the service body.
+ # --------------------------------------------------------------------------
++# Install-script artifacts whose basename is shared by every patch of the
++# same kind ("install.sh", "apply.py", ...). A compose that runs ANY install
++# script contains these strings, so they identify nothing and must never be
++# used as a wiring probe (the bug this file used to ship: the legacy
++# `delivery:` fallback matched the bare `install.sh` filename and its parent
++# dir name "patches" -- both present in every compose that mounts ANY patch
++# dir -- so an UNWIRED install-script patch always looked reached).
++GENERIC_ARTIFACT_NAMES = {
++    "install.sh",
++    "install.py",
++    "apply.sh",
++    "apply.py",
++    "setup.sh",
++    "envelope.sh",
++    "patches",
++}
++
++
++def _patch_source_markers(root: Path | None, patch: dict) -> list[str]:
++    """Host-side strings that identify THIS patch's own vendored artifacts.
++
++    Derived from ``files``: the patch directory's own name (never the
++    generic parent ``patches`` and never a generic artifact basename), so a
++    mount line carrying e.g. ``.../patches/vllm-effort-budget:...`` can be
++    attributed to this patch rather than to any patch mount.
++    """
++    markers: list[str] = []
++    for rel in patch.get("files") or []:
++        rel_path = Path(rel)
++        name = rel_path.name
++        is_dir = bool(root) and (root / rel).is_dir()
++        if not is_dir and rel_path.suffix:
++            # a file entry: the identifying component is its parent patch dir
++            name = rel_path.parent.name
++        if not name or name in GENERIC_ARTIFACT_NAMES:
++            continue
++        if name not in markers:
++            markers.append(name)
++    return markers
++
++
++def _volume_mount_attributed(
++    root: Path | None, patch: dict, body: str, mounted_at: str
++) -> bool:
++    """True iff a mount line targeting ``mounted_at`` sources THIS patch.
++
++    Matching the container-side target alone is unsound: two patches may
++    (and do) mount different vendored dirs at the same in-container path, so
++    the mount's SOURCE must carry one of this patch's own markers on the
++    same line. When the patch declares no identifying source name we cannot
++    attribute the mount and fall back to target-only (no false negatives).
++    """
++    if mounted_at not in body:
++        return False
++    sources = _patch_source_markers(root, patch)
++    if not sources:
++        return True
++    return any(
++        mounted_at in line and any(src in line for src in sources)
++        for line in body.splitlines()
++    )
++
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -463,7 +526,7 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     return vol, inv
+ 
+ 
+-def _spec_wiring_present(patch: dict, body: str) -> bool:
++def _spec_wiring_present(patch: dict, body: str, root: Path | None = None) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+     ``wired_at`` tells us which insertion point(s) the patch claims:
+@@ -481,8 +544,52 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
++    # install_script WITHOUT a declared mount target (the legacy gemma
++    # overlays): the only load-bearing, self-identifying artifact is the
++    # mount's host-side SOURCE — this patch's own directory name. A bare
++    # `install.sh` would match every compose that runs any install script.
++    if (
++        patch.get("delivery_mechanism") == "install_script"
++        and not spec.get("mounted_at")
++    ):
++        vol_markers.extend(_patch_source_markers(root, patch))
++
++    # install_script: the mount's SOURCE must be this patch's own dir, not
++    # merely a mount at the declared target (a DIFFERENT patch mounted at the
++    # same in-container path is not this patch's wiring).
++    if (
++        patch.get("delivery_mechanism") == "install_script"
++        and spec.get("mounted_at")
++        and "volumes" in wired_at
++    ):
++        if not _volume_mount_attributed(root, patch, body, spec["mounted_at"]):
++            return False
++
++    mounted = spec.get("mounted_at")
++    attributed = True
++    if mounted:
++        attributed = _volume_mount_attributed(root, patch, body, mounted)
++
+     vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
+-    inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
++
++    # A generic artifact basename ("install.sh", "apply.py", ...) appears in
++    # every compose that runs ANY install script, so on its own it proves
++    # nothing. Strong markers (an explicit invoke command line, a unique
++    # sidecar name) decide; generic basenames can only CORROBORATE wiring
++    # whose mount is already attributed to THIS patch by source.
++    inv_strong = [m for m in inv_markers if m not in GENERIC_ARTIFACT_NAMES]
++    inv_generic = [m for m in inv_markers if m in GENERIC_ARTIFACT_NAMES]
++    if inv_strong:
++        inv_ok = any(m in body for m in inv_strong)
++        if not inv_ok and inv_generic:
++            # the literal invoke line is absent (e.g. the compose calls
++            # `bash "$_p/install.sh"`): a generic basename may corroborate,
++            # but ONLY a mount already attributed to this patch by source
++            inv_ok = attributed and vol_ok
++    elif inv_generic:
++        inv_ok = attributed and vol_ok
++    else:
++        inv_ok = True
+ 
+     if wired_at == {"volumes"}:
+         return bool(vol_markers) and vol_ok
+@@ -537,22 +644,39 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+ 
+     # Primary, sound path: the patch's declared delivery_spec wiring is
+     # genuinely present at the insertion point(s) it claims.
+-    if _spec_wiring_present(patch, body):
++    if _spec_wiring_present(patch, body, root):
+         return True
+ 
++    # A patch with a declared delivery_spec is decided by that spec alone:
++    # the legacy probes below are strictly weaker (they match generic
++    # basenames / mount targets any patch could own) and would override the
++    # sound verdict with a false positive on an unwired compose.
++    if patch.get("delivery_spec"):
++        return _fallback_non_entrypoint(root, patch, body)
++
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+     # service body, so header/comment ID mentions never match.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
++        # Only identifying host-side artifacts (the patch's own dir name)
++        # and the patch's declared mount target count here; a bare generic
++        # filename ("install.sh") or the shared "patches" parent dir name
++        # match every compose that runs any install script.
++        spec = patch.get("delivery_spec") or {}
++        markers = _patch_source_markers(root, patch)
++        mounted_at = spec.get("mounted_at")
++        if mounted_at:
++            markers.append(mounted_at)
++        if any(marker in body for marker in markers):
++            return True
+         if patch["id"] in body:
+             return True
++    return _fallback_non_entrypoint(root, patch, body)
++
++
++def _fallback_non_entrypoint(root: Path, patch: dict, body: str) -> bool:
++    """Genesis / dockerfile-bake legs of the legacy ``delivery:`` fallback."""
++    delivery = patch.get("delivery") or {}
+     if (
+         delivery.get("genesis")
+         and patch.get("genesis_env")

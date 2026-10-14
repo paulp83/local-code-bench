@@ -1,0 +1,114 @@
+diff --git a/scripts/report.sh b/scripts/report.sh
+index 133e585..9ead9d9 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -731,6 +731,73 @@ else
+   nvidia-smi 2>&1 | redact | details "Full nvidia-smi output"
+ fi
+ 
++# ---------------------------------------------------------------------------
++# Per-GPU VRAM holder attribution (#1537)
++# ---------------------------------------------------------------------------
++
++# report_pid_container <pid> — best-effort name of the docker container a host
++# PID belongs to, or empty for a bare-metal process. nvidia-smi reports PIDs in
++# the host namespace, so /proc/<pid>/cgroup plus `docker ps` is enough to tell
++# "our engine container" from "some other container's worker".
++# Test seam: CLUB3090_FAKE_PROC_ROOT stands in for /proc (compose-meta.sh uses
++# the same CLUB3090_FAKE_* convention).
++report_pid_container() {
++  local pid="$1" cid match name
++  local proc_root="${CLUB3090_FAKE_PROC_ROOT:-/proc}"
++  have docker || return 0
++  docker info >/dev/null 2>&1 || return 0
++  [[ -r "${proc_root}/${pid}/cgroup" ]] || return 0
++  # cgroup v1: "12:devices:/docker/<64-hex>"; cgroup v2: "0::/system.slice/docker-<64-hex>.scope".
++  cid=$(command grep -oE '[0-9a-f]{64}' "${proc_root}/${pid}/cgroup" 2>/dev/null | head -1)
++  [[ -n "$cid" ]] || return 0
++  while IFS=$'\t' read -r match name; do
++    [[ "$match" == "${cid}"* ]] && { echo "$name"; return 0; }
++  done < <(docker ps --no-trunc --format '{{.ID}}\t{{.Names}}' 2>/dev/null)
++  return 0
++}
++
++# report_gpu_holders — one "index<TAB>description" line per (GPU, process) pair
++# that is actually holding VRAM. Description names the process, its PID and,
++# when it is containerised, the container. Empty for drivers that cannot map
++# compute processes back to a card (then the caller keeps the generic caveat).
++report_gpu_holders() {
++  local uuids apps
++  uuids=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)
++  apps=$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv,noheader 2>/dev/null || true)
++  [[ -n "$uuids" && -n "$apps" ]] || return 0
++
++  local uuid pid proc idx holder cont
++  while IFS=, read -r uuid pid proc; do
++    uuid="${uuid# }"; uuid="${uuid% }"
++    pid="${pid# }"; pid="${pid% }"
++    proc="${proc# }"; proc="${proc% }"
++    [[ -z "$uuid" || -z "$pid" ]] && continue
++    # Placeholder PIDs mean the driver cannot attribute the memory to a real
++    # process — leave those to the generic "something is using this GPU" note.
++    [[ "$pid" =~ ^[0-9]+$ ]] || continue
++    [[ "$pid" -eq 0 ]] && continue
++
++    idx=""
++    while IFS=, read -r g_idx g_uuid; do
++      g_idx="${g_idx# }"; g_uuid="${g_uuid# }"
++      if [[ "$g_uuid" == "$uuid" ]]; then
++        idx="$g_idx"
++        break
++      fi
++    done <<< "$uuids"
++    [[ -n "$idx" ]] || continue
++
++    cont=$(report_pid_container "$pid")
++    if [[ -n "$cont" ]]; then
++      holder="\`${proc}\` (pid ${pid}, container \`${cont}\`)"
++    else
++      holder="\`${proc}\` (pid ${pid})"
++    fi
++    printf '%s\t%s\n' "$idx" "$holder"
++  done <<< "$apps"
++  return 0
++}
++
+ # ---------------------------------------------------------------------------
+ # Display / desktop state
+ # ---------------------------------------------------------------------------
+@@ -763,12 +830,33 @@ section "Display / desktop state"
+     if have docker && docker info >/dev/null 2>&1; then
+       our_container=$(club_running_container)
+     fi
++    # #1537: attribute each card's VRAM to the process that ACTUALLY holds it.
++    # Crediting one running club container with every card above 100 MiB hid
++    # other tenants' workers entirely (a rig reported GPUs 0 and 2 as "held by
++    # running `sglang-cmp170hx`" when that container could only see GPU 1 and
++    # nvidia-smi showed another container's VLLM worker on 0 and 2). Map
++    # compute processes to cards by UUID instead of guessing.
++    holders=$(report_gpu_holders)
+     nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
+       | while IFS=, read -r idx used; do
+           idx="${idx# }"; used="${used# }"
+           if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
+-            if [[ -n "$our_container" ]]; then
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
++            ours=""
++            theirs=""
++            while IFS=$'\t' read -r h_idx h_desc; do
++              [[ "$h_idx" == "$idx" ]] || continue
++              if [[ -n "$our_container" && "$h_desc" == *"container \`${our_container}\`"* ]]; then
++                ours="${ours:+, }${h_desc}"
++              else
++                theirs="${theirs:+, }${h_desc}"
++              fi
++            done <<< "$holders"
++            if [[ -n "$ours" && -z "$theirs" ]]; then
++              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running ${ours})"
++            elif [[ -n "$ours" ]]; then
++              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ held by ${ours} and ${theirs}"
++            elif [[ -n "$theirs" ]]; then
++              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ held by ${theirs} (not our container)"
+             else
+               echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+             fi

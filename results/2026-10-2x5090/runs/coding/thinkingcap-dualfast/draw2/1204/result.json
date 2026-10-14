@@ -1,0 +1,24 @@
+{
+ "n": 1204,
+ "config": "thinkingcap-dualfast",
+ "draw": 2,
+ "exit_status": "Submitted",
+ "agent_s": 527.3,
+ "steps": 56,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.333,
+ "checks_passed": 1,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/profiles/compose_registry.py",
+  "scripts/lib/profiles/export_pr.py",
+  "scripts/lib/profiles/registry.yaml"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-registry-origin-field.sh": 1
+ }
+}

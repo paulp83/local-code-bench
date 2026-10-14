@@ -1,0 +1,277 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index e69007a..95afa35 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -420,6 +420,164 @@ def _install_sources(patch: dict) -> list[str]:
+     return sorted(n for n in names if n and n not in _GENERIC_SCRIPT_NAMES and n != "patches")
+ 
+ 
++# Vendored-template filenames that many chat_template patches share — like the
++# generic script names above, a bare one would match every compose that mounts
++# ANY template, so it never identifies a patch on its own (#1611).
++_GENERIC_TEMPLATE_NAMES = frozenset(
++    {"chat_template.jinja", "chat_template.jinja2", "chat_template.j2"}
++)
++
++# `--chat-template` / `--chat-template-file` launch flags (the two engine styles
++# that select a mounted template by path). Matched EXACTLY (not by substring) so
++# a bare `--chat-template` never satisfies a check meant for `--chat-template-file`
++# and vice-versa (#1611).
++_CHAT_TEMPLATE_FLAGS = ("--chat-template", "--chat-template-file")
++
++
++def _chat_template_sources(patch: dict) -> list[str]:
++    """Host-side names that identify THIS patch's template on its mount line.
++
++    The basename of each vendored `.jinja` (e.g. ``apex-qwen-chat-template.jinja``)
++    plus the name of the directory it is vendored under (e.g.
++    ``qwen38-reasoning-effort-template``), minus the generic shared names
++    (``chat_template.jinja`` / the ``patches`` directory) that appear in every
++    compose that mounts any template. Mirrors :func:`_install_sources` (#1611).
++    """
++    if patch.get("delivery_mechanism") != "chat_template":
++        return []
++    names: set[str] = set()
++    rels = list(patch.get("files") or [])
++    spec_jinja = (patch.get("delivery_spec") or {}).get("jinja")
++    if spec_jinja:
++        rels.append(spec_jinja)
++    for rel in rels:
++        path = Path(rel)
++        if path.name and path.name not in _GENERIC_TEMPLATE_NAMES:
++            names.add(path.name)
++        if path.parent.name and path.parent.name not in _GENERIC_SCRIPT_NAMES and path.parent.name != "patches":
++            names.add(path.parent.name)
++    return sorted(names)
++
++
++def _parse_mount_pairs(body: str) -> list[tuple[str | None, str | None]]:
++    """Parse volume mounts into ``(source, target)`` pairs from compose text.
++
++    Handles BOTH the short ``source:target:mode`` list-item form (what the offline
++    ``extends:`` merge renders) and the docker ``config`` long form
++    (``- {type: bind, source: …, target: …}``), so the source-aware check is
++    independent of whether a docker CLI is available (#1611).
++    """
++    pairs: list[tuple[str | None, str | None]] = []
++    cur_src: str | None = None
++    cur_tgt: str | None = None
++
++    def _flush():
++        nonlocal cur_src, cur_tgt
++        if cur_src is not None or cur_tgt is not None:
++            pairs.append((cur_src, cur_tgt))
++        cur_src = cur_tgt = None
++
++    for raw in body.splitlines():
++        s = raw.strip()
++        m_item = re.match(r"^-\s*(.*)$", s)
++        if m_item:
++            _flush()
++            inner = m_item.group(1).strip()
++            # short form "src:dst[:mode]" (src/dst are paths, no leading key:)
++            if inner.count(":") >= 1 and not re.match(r"^\w[\w. -]*:", inner):
++                parts = inner.split(":")
++                pairs.append((parts[0], parts[1]))
++            continue
++        m_src = re.match(r"^source:\s*(.+)$", s)
++        if m_src:
++            cur_src = m_src.group(1).strip().strip('"\'')
++            continue
++        m_tgt = re.match(r"^target:\s*(.+)$", s)
++        if m_tgt:
++            cur_tgt = m_tgt.group(1).strip().strip('"\'')
++    _flush()
++    return pairs
++
++
++def _chat_template_mounted_at(body: str, mounted_at: str, sources: list[str]) -> bool:
++    """True iff THIS patch's own template file is mounted at its declared target.
++
++    The container target alone is shared by every chat_template override (and a
++    suffix like ``/chat_template.jinja`` matches any model-dir mount), so the
++    vendored template's own directory/filename must be the SOURCE of the very
++    same mount (#1611 — same idea #1610 applied to install scripts).
++    """
++    for src, tgt in _parse_mount_pairs(body):
++        if not tgt or not (tgt == mounted_at or tgt.endswith(mounted_at)):
++            continue
++        if src and any(name in src for name in sources):
++            return True
++    return False
++
++
++def _chat_template_flag_names_path(body: str, mounted_at: str) -> bool:
++    """True iff a ``--chat-template``/``--chat-template-file`` flag names ``mounted_at``.
++
++    Accepts the flag with its value as an adjacent list item
++    (``- --chat-template`` / ``- /path``), in a flow list
++    (``[--chat-template, /path]``) or inline/space-separated
++    (``--chat-template-file /path``, or ``--chat-template=/path``). The flag is
++    matched by exact token, so a bare flag pointing elsewhere — or `--chat-template`
++    read as a prefix of another flag — never counts (#1611).
++    """
++    items: list[str] = []
++    for raw in body.splitlines():
++        s = raw.strip()
++        if s.startswith("- "):
++            s = s[2:]
++        for tok in re.split(r"[,\s]+", s):
++            tok = tok.strip().strip("[]").strip('"\'').strip()
++            if tok:
++                items.append(tok)
++    for i, tok in enumerate(items):
++        flag = tok.split("=", 1)[0]
++        if flag not in _CHAT_TEMPLATE_FLAGS:
++            continue
++        if "=" in tok:
++            value = tok.split("=", 1)[1]
++        elif i + 1 < len(items):
++            value = items[i + 1]
++        else:
++            continue
++        if value and value.endswith(mounted_at):
++            return True
++    return False
++
++
++def _chat_template_wired(patch: dict, body: str) -> bool:
++    """reaches() contract for a ``chat_template`` patch (#1611).
++
++    * Always require the compose to mount THIS patch's template file (the
++      vendored template's own source mounted at the declared target).
++    * When the patch is wired at the launch command too (``wired_at`` declares
++      ``entrypoint`` or ``command`` — the froggeric/gemma ``--chat-template`` and
++      the apex/glm53 ``--chat-template-file`` styles), additionally require that
++      flag to name the mounted path. A ``wired_at: [volumes]`` patch (carnice,
++      and the mount-over-model-dir qwen38 SGLang lane) is mount-only: the
++      launch-command flag is not required there.
++    """
++    spec = patch.get("delivery_spec") or {}
++    mounted_at = spec.get("mounted_at")
++    if not mounted_at:
++        return False
++    sources = _chat_template_sources(patch)
++    if not sources:
++        return False
++    mount_ok = _chat_template_mounted_at(body, mounted_at, sources)
++    wired_at = spec.get("wired_at")
++    if isinstance(wired_at, str):
++        wired_at = [wired_at]
++    wired_at = set(wired_at or [])
++    if "entrypoint" in wired_at or "command" in wired_at:
++        return mount_ok and _chat_template_flag_names_path(body, mounted_at)
++    return mount_ok
++
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -494,6 +652,13 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     spec = patch.get("delivery_spec")
+     if not spec:
+         return False
++    # chat_template has its own source-aware contract (#1611): the vendored
++    # template's own source must back the mount target, and (for the explicit
++    # launch-flag styles) a --chat-template/--chat-template-file flag must name
++    # that exact path. A bare --chat-template flag, or a suffix mount target like
++    # /chat_template.jinja, never satisfies it on its own.
++    if patch.get("delivery_mechanism") == "chat_template":
++        return _chat_template_wired(patch, body)
+     wired_at = spec.get("wired_at")
+     if isinstance(wired_at, str):
+         wired_at = [wired_at]
+diff --git a/scripts/lib/profiles/patches.yml b/scripts/lib/profiles/patches.yml
+index 1f9ed8e..3f42e77 100644
+--- a/scripts/lib/profiles/patches.yml
++++ b/scripts/lib/profiles/patches.yml
+@@ -419,7 +419,7 @@ patches:
+       mounted_at: /chat_template.jinja
+       mount_mode: ro
+       invoke: "--chat-template <model dir>/chat_template.jinja (vLLM composes only, directly after --model)"
+-      wired_at: [volumes, entrypoint]
++      wired_at: [volumes]   # mount is the load-bearing artifact (vLLM also names it with --chat-template; SGLang is mount-only) — #1611
+       note: "MOUNTED OVER the served checkpoint's own chat_template.jinja, so every engine renders it from the model dir with no flag. The vLLM composes ALSO name the same file with --chat-template (2026-09-27): vLLM v0.30.0's Anthropic /v1/messages decides whether a template can take a mid-conversation system message by testing only that flag (unset -> move every such message to the front), so Claude Code, which sends one per turn, re-prefilled the whole conversation every turn. vllm#58754 fixes the check (docs/UPSTREAM.md). SGLang tests the loaded template and needs no flag. This reverses the earlier mount-only choice, made to keep the command list untouched for rebases (11 commits touched these composes in the 7 days to 2026-08-23, and one collided with the arg this patch used to insert); the flag sits directly after --model, the one pair every compose has, and test-qwen38-template checks each vLLM compose names the file it mounts. ⚠️ The container-side target therefore DIFFERS PER WEIGHTS VARIANT and per engine: on vLLM /root/.cache/huggingface/qwen3.8-27b-autoround-int4/chat_template.jinja (9 composes), /root/.cache/huggingface/qwen3.8-27b-fp8/chat_template.jinja (9), /root/.cache/huggingface/qwen3.8-27b-nvfp4/chat_template.jinja (2); on SGLang /models/<weights-dir>/chat_template.jinja (qwen3.8-27b-fp8, qwen3.8-27b-autoround-int4, thinkingcap-qwen3.8-27b-fp8, thinkingcap-qwen3.8-27b-autoround-int4; SGLang's transformers 5.12 prefers the model dir's chat_template.jinja over the copy embedded in tokenizer_config.json). `mounted_at` takes ONE string, so it declares the suffix those three share; it is the coverage marker _spec_wiring_present greps for, and it appears only on this patch's mount line. Data-only mount, NOT an engine-code overlay, so vllm-stable's overlay-free CONTRACT-5 status (and its usability as a derived-emission base) is unaffected."
+     drift_guard:
+       kind: behavioral
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 9db6fc1..fd62e9c 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -171,6 +171,53 @@ for _pid, _slug in (("qwen-w4a8-int8-act", "sgl/qwen38-27b-dual-fast"),
+     if reaches(_pmap[_pid], str(_path)):
+         errors.append(f"#1597: {_pid} 'reaches' {_slug}, which mounts a DIFFERENT patch at the same target")
+ 
++# ---------------------------------------------------------------------------
++# #1611 — chat-template patches must NOT "reach" a compose that only mounts /
++# names a DIFFERENT template. The chat_template branch used to count the bare
++# --chat-template flag (and a shared mount suffix like /chat_template.jinja) as
++# wiring, so qwen38 "reached" 109 composes (only 62 load-bearing), apex 91 (4),
++# glm53 91 (0). A vLLM compose that mounts the gemma canonical template and
++# passes --chat-template for it must not be reached by any OTHER template patch.
++# ---------------------------------------------------------------------------
++_CT_NEG_COMPOSE = "vllm/gemma-mtp-tp1"  # vLLM gemma: mounts google-canonical template + --chat-template
++for _pid in ("qwen38-reasoning-effort-template", "apex-qwen-chat-template",
++             "glm53-minja-numeric-index"):
++    _src = COMPOSE_REGISTRY.get(_CT_NEG_COMPOSE)
++    if _pmap.get(_pid) is None or _src is None:
++        errors.append(f"#1611 control: {_pid} / {_CT_NEG_COMPOSE} no longer exist — pick another pair")
++        continue
++    _path = root / (_src["compose_path"] if isinstance(_src, dict) else _src)
++    if reaches(_pmap[_pid], str(_path)):
++        errors.append(f"#1611: {_pid} 'reaches' {_CT_NEG_COMPOSE}, which mounts + names a DIFFERENT "
++                      "chat template (a bare --chat-template flag / shared mount suffix was accepted)")
++# The gemma canonical patch DOES reach its own compose (positive control).
++_gemma_ct = _pmap.get("gemma-google-canonical-chat-template")
++_gemma_src = COMPOSE_REGISTRY.get(_CT_NEG_COMPOSE)
++if _gemma_ct is not None and _gemma_src is not None:
++    _gpath = root / (_gemma_src["compose_path"] if isinstance(_gemma_src, dict) else _gemma_src)
++    if not reaches(_gemma_ct, str(_gpath)):
++        errors.append(f"#1611 positive control: gemma canonical does not reach {_CT_NEG_COMPOSE}")
++    _gtext = _gpath.read_text(encoding="utf-8")
++    # (a) Remove the mount line -> not reached.
++    # (b) Remove the --chat-template flag (and the path it names) -> not reached.
++    # (c) Point --chat-template at a different file -> not reached.
++    _variants = {
++        "mount removed": [ln for ln in _gtext.splitlines(keepends=True)
++                          if "google-canonical-chat-template/chat_template.jinja" not in ln],
++        "flag removed": [ln for ln in _gtext.splitlines(keepends=True)
++                         if ln.strip() not in ("- --chat-template",
++                                               "- /etc/club3090/gemma-canonical-template.jinja")],
++        "flag names another file": [ln.replace("- /etc/club3090/gemma-canonical-template.jinja",
++                                               "- /other-template.jinja") if ln.strip() == "- /etc/club3090/gemma-canonical-template.jinja" else ln
++                                    for ln in _gtext.splitlines(keepends=True)],
++    }
++    for _label, _kept in _variants.items():
++        with _tf.TemporaryDirectory() as _d:
++            _neg = Path(_d) / _gpath.name
++            _neg.write_text("".join(_kept), encoding="utf-8")
++            if pa.reaches(root, _gemma_ct, str(_neg)):
++                errors.append(f"#1611: gemma canonical still 'reaches' {_CT_NEG_COMPOSE} with the {_label}")
++
+ # ---------------------------------------------------------------------------
+ # CONTRACT-2b-i — chat_template delivery class + REAL extends merge.
+ # ---------------------------------------------------------------------------
+@@ -246,14 +293,20 @@ if chat_template_patches:
+         keep_child = _tdp / "keep.yml"
+         reset_child = _tdp / "reset.yml"
+         noextend = _tdp / "noextend.yml"
++        # Mount THIS patch's own vendored template (source tail = <patch dir>/<file>) so the
++        # source-aware chat_template check pins the right patch; #1611 rejects a mount whose
++        # source belongs to a different patch.
++        ctp_src = "../../patches/" + "/".join(
++            Path((ctp.get("delivery_spec") or {}).get("jinja") or "x/jinja.jinja").parts[-2:]
++        )
+         base.write_text(
+             "services:\n"
+             "  base-svc:\n"
+             "    image: scratch\n"
+             "    command: [--model, m, --chat-template, %s]\n"
+             "    volumes:\n"
+-            "      - ../../patches/froggeric-chat-template/chat_template.jinja:%s:ro\n"
+-            % (mounted, mounted),
++            "      - %s:%s:ro\n"
++            % (mounted, ctp_src, mounted),
+             encoding="utf-8",
+         )
+         # (a) Child that KEEPS inheritance (only overrides an env) -> still

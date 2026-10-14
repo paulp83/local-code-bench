@@ -1,0 +1,7 @@
+folder,slug,size_bytes,files
+GLM-5.3-Flash-UD-Q4_K_XL,glm53-flash-q4,8400,3
+Qwen3.8-27B-Q4_K_M,qwen-27b-q4,6800,2
+Qwen3.8-Flash-Next-fp8,qfn-fp8,8730,4
+glm5.3-flash_Q6_K,glm53-flash-q6,7400,2
+misc-notes,,50,1
+qwen3.8-flash-next_FP8_old,,1350,2

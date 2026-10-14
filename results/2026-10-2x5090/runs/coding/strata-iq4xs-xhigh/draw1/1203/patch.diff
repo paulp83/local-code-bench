@@ -1,0 +1,419 @@
+diff --git a/scripts/lib/profiles/compose_facts.py b/scripts/lib/profiles/compose_facts.py
+new file mode 100644
+index 0000000..b2c9a84
+--- /dev/null
++++ b/scripts/lib/profiles/compose_facts.py
+@@ -0,0 +1,173 @@
++"""compose_facts — read what a user-supplied compose file mechanically states.
++
++Lifted out of ``tools/serve-cockpit/club3090_cockpit/data.py`` by #1202 P1.  It
++used to live INSIDE the cockpit, which meant the UI owned the only implementation
++of compose→spec derivation: a user with an existing working compose had a door in
++``c3`` (① Bring, Route-K) and no door at all from the CLI — which is *why* the
++local model layer was write-only from the UI (#1153).  Everything else in #1202
++(local layer → CLI → shared read path) depends on this being shared code.
++
++``club3090_cockpit.data`` DELEGATES here and re-exports ``ComposeFacts``, so
++callers/tests written against the cockpit keep working unchanged.
++
++STDLIB ONLY — ``re`` + ``dataclasses``, no PyYAML, no sibling profiles module.
++A compose is user input parsed on the launcher's no-PyYAML path (the same rule
++that keeps ``serve_override_defaults`` / ``model_spec`` importable there), and
++deriving facts must never require a YAML parser: a broken or hand-written compose
++is exactly the input that has to be read.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++
++__all__ = ["ComposeFacts", "derive_compose_facts"]
++
++
++@dataclass
++class ComposeFacts:
++    """What a compose file mechanically tells us (#1153 Route-K).
++
++    A user who already has a working compose is the most common BYOM position,
++    and until now the funnel had no door for them: ① takes an HF repo, and the
++    only compose that could enter was one c3 itself emitted. This is the read
++    half — everything a compose CAN state about itself. Arch dims are absent by
++    construction (a compose does not carry hidden_size); those come from the
++    weights, or stay as required inline edits in ⑤.
++
++    Regex over text, stdlib only — matching serve_override_defaults, which must
++    stay importable on the launcher's no-PyYAML path.
++
++    #1202 P1: this lives in the shared core (was ``club3090_cockpit.data``) so
++    the CLI and the UI derive from ONE implementation — the cockpit re-exports
++    it, so every existing caller keeps working."""
++
++    path: str = ""
++    ok: bool = False
++    error: str = ""
++    image: str = ""
++    engine: str = ""          # vllm | llama-cpp | ik-llama | unknown
++    model_path: str = ""      # --model / -m / GGUF_FILE
++    served_name: str = ""     # --served-model-name / -a
++    port: str = ""            # ${PORT:-N} or a ports: mapping
++    max_ctx: str = ""         # --max-model-len / -c
++    kv_dtype: str = ""        # --kv-cache-dtype / -ctk
++    tp: str = ""              # --tensor-parallel-size / -ts / device count
++    status_header: str = ""   # the profile-header Status: line, when present
++    service: str = ""
++
++
++_ENGINE_BY_IMAGE = (
++    ("vllm", "vllm"),
++    ("llamacpp-club3090", "llama-cpp"),
++    ("llama.cpp", "llama-cpp"),
++    ("llama-cpp", "llama-cpp"),
++    ("ik-llama", "ik-llama"),
++    ("ik_llama", "ik-llama"),
++)
++
++
++def derive_compose_facts(text: str, path: str = "") -> ComposeFacts:
++    """Read a user-supplied compose (#1153 Route-K). Never raises.
++
++    Flags are read from a TOKEN stream, not by regex-guessing around each name:
++    a compose states its command either as a YAML list (``- --model`` / ``- val``
++    on separate lines) or as one folded string (``>- -m x -c 65536``), and a
++    per-flag regex gets the list form wrong — it captures the next line's ``-``.
++    Flatten first, then walk pairs."""
++    f = ComposeFacts(path=path)
++    if not (text or "").strip():
++        f.error = "empty compose"
++        return f
++
++    f.image = ""
++    m = re.search(r"^\s*image:\s*(\S+)", text, re.M)
++    if m:
++        f.image = m.group(1).strip().strip('"').strip("'")
++    low = f.image.lower()
++    for needle, eng in _ENGINE_BY_IMAGE:
++        if needle in low:
++            f.engine = eng
++            break
++    else:
++        f.engine = "unknown" if f.image else ""
++
++    m = re.search(r"^services:\s*\n\s{2,}([A-Za-z0-9_.-]+):", text, re.M)
++    if m:
++        f.service = m.group(1)
++
++    # ── token stream ────────────────────────────────────────────────────────
++    toks: list[str] = []
++    for raw in text.splitlines():
++        ln = raw.strip()
++        if not ln or ln.startswith("#"):
++            continue
++        if ln.startswith("- "):
++            ln = ln[2:].strip()
++        elif ln == "-":
++            continue
++        # exec form: command: ["--model=/w/x", "--max-model-len=32768"]
++        if ln.startswith(("command:", "entrypoint:")) and "[" in ln:
++            ln = ln[ln.index("[") + 1:]
++        ln = ln.replace("[", " ").replace("]", " ").replace(",", " ")
++        ln = ln.strip('"').strip("'")
++        if not ln or ln.endswith(":"):
++            continue
++        toks.extend(t.strip('"').strip("'") for t in ln.split() if t.strip('"').strip("'"))
++
++    # YAML block-scalar introducers. A flag whose "value" is one of these did not
++    # get a value at all — the next line starts a literal block.
++    _BLOCK_SCALARS = {"|", ">", "|-", ">-", "|+", ">+"}
++    # A short flag directly after a shell is the SHELL's flag, not the engine's:
++    # `entrypoint: [bash, -c, |...]` is the standard vLLM compose shape, and its
++    # bash -c was being read as llama.cpp's -c (ctx-size), so max_ctx came back
++    # as "|" for every such compose.
++    _SHELLS = {"bash", "sh", "zsh", "/bin/bash", "/bin/sh"}
++
++    def flag(*names: str) -> str:
++        # Alias PRIORITY, not token order: callers list the canonical name first
++        # (e.g. "--max-model-len" before "-c"), so an unrelated short flag
++        # appearing earlier in the file must not win over the real one.
++        for name in names:
++            for i, t in enumerate(toks):
++                base = t.split("=", 1)[0]
++                if base != name:
++                    continue
++                if i > 0 and toks[i - 1] in _SHELLS and not name.startswith("--"):
++                    continue
++                if "=" in t:                      # --flag=value
++                    v = t.split("=", 1)[1]
++                elif i + 1 < len(toks):           # --flag value
++                    v = toks[i + 1]
++                else:
++                    continue
++                v = v.strip().strip('"').strip("'")
++                if v and not v.startswith("-") and v not in _BLOCK_SCALARS:
++                    return v
++        return ""
++
++    f.model_path  = flag("--model", "-m", "GGUF_FILE")
++    f.served_name = flag("--served-model-name", "-a", "--alias")
++    f.max_ctx     = flag("--max-model-len", "-c", "--ctx-size")
++    f.kv_dtype    = flag("--kv-cache-dtype", "-ctk", "--cache-type-k")
++    f.tp          = flag("--tensor-parallel-size", "-tp", "-ts")
++    if not f.tp:
++        m = re.search(r"CUDA_VISIBLE_DEVICES[=:\s]+\"?([0-9,]+)", text)
++        if m:
++            f.tp = str(len([x for x in m.group(1).split(",") if x.strip()]))
++
++    m = (re.search(r"\$\{PORT:-([0-9]+)\}", text)
++         or re.search(r"^\s*-\s*\"?([0-9]{2,5}):[0-9]+", text, re.M))
++    if m:
++        f.port = m.group(1)
++
++    m = re.search(r"^#\s*Status:\s*(.+)$", text, re.M)
++    if m:
++        f.status_header = m.group(1).strip()
++
++    if not f.image:
++        f.error = "no image: found — is this a compose file?"
++        return f
++    f.ok = True
++    return f
+diff --git a/tools/serve-cockpit/club3090_cockpit/data.py b/tools/serve-cockpit/club3090_cockpit/data.py
+index e0c3cd5..487cf85 100644
+--- a/tools/serve-cockpit/club3090_cockpit/data.py
++++ b/tools/serve-cockpit/club3090_cockpit/data.py
+@@ -23,6 +23,7 @@ from typing import Any, Optional, TYPE_CHECKING
+ from club3090_tui_core.registry import VariantRow
+ 
+ if TYPE_CHECKING:  # pragma: no cover - annotations only
++    from scripts.lib.profiles.compose_facts import ComposeFacts
+     from scripts.lib.profiles.model_spec import ModelSpec
+ 
+ # ── Fit verdict ───────────────────────────────────────────────────────────────
+@@ -2374,50 +2375,72 @@ def _quant_slug_for_arch(byo: Optional["ByoResult"]) -> str:
+     return "autoround-int4"
+ 
+ 
+-@dataclass
+-class ComposeFacts:
+-    """What a compose file mechanically tells us (#1153 Route-K).
++# ── ComposeFacts / derive_compose_facts — MOVED to scripts/lib/profiles/ ────────
++#
++# #1202 P1: `derive_compose_facts` used to live HERE, which meant the cockpit
++# owned the only implementation of compose→spec derivation — a user holding a
++# working compose had a door in c3 (① Bring, Route-K) and no door at all from the
++# CLI, which is *why* the local model layer was write-only from the UI (#1153).
++# The implementation is now shared: scripts/lib/profiles/compose_facts.py
++# (stdlib-only, like serve_override_defaults).
++#
++# data.py DELEGATES rather than importing at module level: data.py must stay
++# importable on the launcher's no-PyYAML path, and `scripts` is not on sys.path
++# when `c3` runs from tools/serve-cockpit/.  So the lookup is lazy —
++# `derive_compose_facts` (below, in its old place) calls through, and PEP 562
++# `__getattr__` re-exports the MOVED NAMES so that
++# `from club3090_cockpit.data import ComposeFacts` still works, handing back THE
++# SAME class object the shared module returns (isinstance checks stay honest).
+ 
+-    A user who already has a working compose is the most common BYOM position,
+-    and until now the funnel had no door for them: ① takes an HF repo, and the
+-    only compose that could enter was one c3 itself emitted. This is the read
+-    half — everything a compose CAN state about itself. Arch dims are absent by
+-    construction (a compose does not carry hidden_size); those come from the
+-    weights, or stay as required inline edits in ⑤.
++MOVED_NAMES = ("ComposeFacts",)
+ 
+-    Regex over text, stdlib only — matching serve_override_defaults, which must
+-    stay importable on the launcher's no-PyYAML path."""
+ 
+-    path: str = ""
+-    ok: bool = False
+-    error: str = ""
+-    image: str = ""
+-    engine: str = ""          # vllm | llama-cpp | ik-llama | unknown
+-    model_path: str = ""      # --model / -m / GGUF_FILE
+-    served_name: str = ""     # --served-model-name / -a
+-    port: str = ""            # ${PORT:-N} or a ports: mapping
+-    max_ctx: str = ""         # --max-model-len / -c
+-    kv_dtype: str = ""        # --kv-cache-dtype / -ctk
+-    tp: str = ""              # --tensor-parallel-size / -ts / device count
+-    status_header: str = ""   # the profile-header Status: line, when present
+-    service: str = ""
+-
+-
+-_ENGINE_BY_IMAGE = (
+-    ("vllm", "vllm"),
+-    ("llamacpp-club3090", "llama-cpp"),
+-    ("llama.cpp", "llama-cpp"),
+-    ("llama-cpp", "llama-cpp"),
+-    ("ik-llama", "ik-llama"),
+-    ("ik_llama", "ik-llama"),
+-)
++def _compose_facts():
++    """The shared compose-facts module — lazy import, cached by the import system.
++
++    Raises ImportError rather than guessing: every cockpit path that gets here
++    runs inside the checkout."""
++    import os
++    import sys
++    from pathlib import Path
++
++    try:
++        from scripts.lib.profiles import compose_facts as mod
++    except ModuleNotFoundError:
++        mod = None
++    if getattr(mod, "derive_compose_facts", None) is not None:
++        return mod
++
++    # ``services.CockpitData`` puts the repo root on sys.path, but data.py has to
++    # work without a constructed data layer (the panes' pure helpers and the
++    # tests import it directly).  Insert ONLY a root that really carries THIS
++    # module — a tmp fixture root would shadow the real package tree.
++    root = Path(os.environ.get("C3_REPO_ROOT") or Path(__file__).resolve().parents[3])
++    if not (root / "scripts" / "lib" / "profiles" / "compose_facts.py").is_file():
++        raise ImportError(
++            "compose facts unavailable: scripts/lib/profiles/compose_facts.py is "
++            f"not importable and the repo root at {root} has none — run inside the "
++            "club-3090 checkout, or set C3_REPO_ROOT"
++        )
++    if str(root) not in sys.path:
++        sys.path.insert(0, str(root))
++    from scripts.lib.profiles import compose_facts as shared
++    return shared
++
++
++def __getattr__(name: str):
++    """PEP 562: re-export the names that moved into the shared profiles module."""
++    if name in MOVED_NAMES:
++        return getattr(_compose_facts(), name)
++    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+ 
+ 
+ # Compose `Status:` header emoji → registry status word.  DUPLICATED from
+ # scripts/lib/profiles/compose_registry.COMPOSE_STATUS_EMOJI on purpose: data.py
+ # is stdlib-only and importable on the launcher's no-PyYAML path, so it must not
+-# import the profiles package.  `test_status_emoji_map_parity` asserts the two
+-# stay identical.
++# import the profiles package AT MODULE SCOPE (the compose-facts delegation above
++# is the one LAZY exception — compose_facts.py is itself stdlib-only).
++# `test_status_emoji_map_parity` asserts the two stay identical.
+ COMPOSE_STATUS_EMOJI = {
+     "✅": "production",
+     "⚠️": "caveats",
+@@ -2578,111 +2601,14 @@ def classify_compose_provenance(path: str, repo_root) -> ComposeProvenance:
+     return prov
+ 
+ 
+-def derive_compose_facts(text: str, path: str = "") -> ComposeFacts:
+-    """Read a user-supplied compose (#1153 Route-K). Never raises.
+-
+-    Flags are read from a TOKEN stream, not by regex-guessing around each name:
+-    a compose states its command either as a YAML list (``- --model`` / ``- val``
+-    on separate lines) or as one folded string (``>- -m x -c 65536``), and a
+-    per-flag regex gets the list form wrong — it captures the next line's ``-``.
+-    Flatten first, then walk pairs."""
+-    import re as _re
+-
+-    f = ComposeFacts(path=path)
+-    if not (text or "").strip():
+-        f.error = "empty compose"
+-        return f
+-
+-    f.image = ""
+-    m = _re.search(r"^\s*image:\s*(\S+)", text, _re.M)
+-    if m:
+-        f.image = m.group(1).strip().strip('"').strip("'")
+-    low = f.image.lower()
+-    for needle, eng in _ENGINE_BY_IMAGE:
+-        if needle in low:
+-            f.engine = eng
+-            break
+-    else:
+-        f.engine = "unknown" if f.image else ""
+-
+-    m = _re.search(r"^services:\s*\n\s{2,}([A-Za-z0-9_.-]+):", text, _re.M)
+-    if m:
+-        f.service = m.group(1)
+-
+-    # ── token stream ────────────────────────────────────────────────────────
+-    toks: list[str] = []
+-    for raw in text.splitlines():
+-        ln = raw.strip()
+-        if not ln or ln.startswith("#"):
+-            continue
+-        if ln.startswith("- "):
+-            ln = ln[2:].strip()
+-        elif ln == "-":
+-            continue
+-        # exec form: command: ["--model=/w/x", "--max-model-len=32768"]
+-        if ln.startswith(("command:", "entrypoint:")) and "[" in ln:
+-            ln = ln[ln.index("[") + 1:]
+-        ln = ln.replace("[", " ").replace("]", " ").replace(",", " ")
+-        ln = ln.strip('"').strip("'")
+-        if not ln or ln.endswith(":"):
+-            continue
+-        toks.extend(t.strip('"').strip("'") for t in ln.split() if t.strip('"').strip("'"))
+-
+-    # YAML block-scalar introducers. A flag whose "value" is one of these did not
+-    # get a value at all — the next line starts a literal block.
+-    _BLOCK_SCALARS = {"|", ">", "|-", ">-", "|+", ">+"}
+-    # A short flag directly after a shell is the SHELL's flag, not the engine's:
+-    # `entrypoint: [bash, -c, |...]` is the standard vLLM compose shape, and its
+-    # bash -c was being read as llama.cpp's -c (ctx-size), so max_ctx came back
+-    # as "|" for every such compose.
+-    _SHELLS = {"bash", "sh", "zsh", "/bin/bash", "/bin/sh"}
+-
+-    def flag(*names: str) -> str:
+-        # Alias PRIORITY, not token order: callers list the canonical name first
+-        # (e.g. "--max-model-len" before "-c"), so an unrelated short flag
+-        # appearing earlier in the file must not win over the real one.
+-        for name in names:
+-            for i, t in enumerate(toks):
+-                base = t.split("=", 1)[0]
+-                if base != name:
+-                    continue
+-                if i > 0 and toks[i - 1] in _SHELLS and not name.startswith("--"):
+-                    continue
+-                if "=" in t:                      # --flag=value
+-                    v = t.split("=", 1)[1]
+-                elif i + 1 < len(toks):           # --flag value
+-                    v = toks[i + 1]
+-                else:
+-                    continue
+-                v = v.strip().strip('"').strip("'")
+-                if v and not v.startswith("-") and v not in _BLOCK_SCALARS:
+-                    return v
+-        return ""
+-
+-    f.model_path  = flag("--model", "-m", "GGUF_FILE")
+-    f.served_name = flag("--served-model-name", "-a", "--alias")
+-    f.max_ctx     = flag("--max-model-len", "-c", "--ctx-size")
+-    f.kv_dtype    = flag("--kv-cache-dtype", "-ctk", "--cache-type-k")
+-    f.tp          = flag("--tensor-parallel-size", "-tp", "-ts")
+-    if not f.tp:
+-        m = _re.search(r"CUDA_VISIBLE_DEVICES[=:\s]+\"?([0-9,]+)", text)
+-        if m:
+-            f.tp = str(len([x for x in m.group(1).split(",") if x.strip()]))
+-
+-    m = (_re.search(r"\$\{PORT:-([0-9]+)\}", text)
+-         or _re.search(r"^\s*-\s*\"?([0-9]{2,5}):[0-9]+", text, _re.M))
+-    if m:
+-        f.port = m.group(1)
+-
+-    m = _re.search(r"^#\s*Status:\s*(.+)$", text, _re.M)
+-    if m:
+-        f.status_header = m.group(1).strip()
++def derive_compose_facts(text: str, path: str = "") -> "ComposeFacts":
++    """Read a user-supplied compose (#1153 Route-K) — DELEGATES to the shared core.
+ 
+-    if not f.image:
+-        f.error = "no image: found — is this a compose file?"
+-        return f
+-    f.ok = True
+-    return f
++    #1202 P1 moved the implementation (the token-stream flag resolution, the
++    never-raises contract, the engine map) to
++    ``scripts/lib/profiles/compose_facts.py`` so the CLI and this UI derive from
++    ONE source.  The call sites here are unchanged."""
++    return _compose_facts().derive_compose_facts(text, path=path)
+ 
+ 
+ def compute_promote_scaffold(

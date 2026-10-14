@@ -1,0 +1,128 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 03a2274..4ecb158 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -411,8 +411,13 @@ if [[ "$MATRIX" == "1" ]]; then
+   if [[ "$SWEEP_DRY" != "1" ]]; then warmup_gate || exit 1; fi
+   slots="$(_detect_slots || true)"
+   slots_src="undetected"
++  # Same order as _detect_slots, including the two SGLang paths (container
++  # --max-running-requests and /get_server_info max_running_requests): without
++  # them a correctly-detected SGLang slot count was labelled "(undetected)".
+   if [[ -n "$(_served_seqs || true)" ]]; then slots_src="container max-num-seqs"
+   elif [[ -n "$(_served_np || true)" ]]; then slots_src="container -np"
++  elif [[ -n "$(_served_max_running || true)" ]]; then slots_src="container max-running-requests"
++  elif [[ -n "$(_sgl_max_running || true)" ]]; then slots_src="server /get_server_info max_running_requests"
+   elif [[ -n "$(_props_slots || true)" ]]; then slots_src="server /props total_slots"
+   fi
+   max_len="$(_served_ctx || true)"
+@@ -569,6 +574,7 @@ PY
+   rec_json="$(mktemp /tmp/cprobe-rec.XXXXXX)"
+   if [[ "$slots_src" == "container -np" ]]; then engine="llamacpp"
+   elif [[ "$slots_src" == "container max-num-seqs" ]]; then engine="vllm"
++  elif [[ "$slots_src" == "container max-running-requests" || "$slots_src" == "server /get_server_info max_running_requests" ]]; then engine="sglang"
+   else engine=""
+   fi
+   MODEL="$MODEL" SLUG="${SLUG:-}" SPEC="$(_spec_fp)" GPUS="$(_gpu_fp)" \
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 4bcd814..703df51 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -96,33 +96,34 @@ def fmt_ttft(seconds):
+ 
+ 
+ def parse_kv_tokens_text(txt):
+-    """vLLM boot: 'GPU KV cache size: 210,000 tokens' (optional leading ~)."""
++    """Token capacity of the KV pool from the engine's boot log, or None.
++
++    Both engines size it with a line printed ONCE at boot:
++      vLLM:    'GPU KV cache size: 210,000 tokens' (optional leading ~)
++      SGLang:  'KV Cache is allocated. ... #tokens: 210000' and the effective
++               scheduler line '... max_total_num_tokens=210000 ...'.
++
++    A container that has been serving for a while has scrolled past these, so
++    the caller must read the HEAD of the log, not a tail window."""
+     if not txt:
+         return None
+-    matches = list(
+-        re.finditer(r"GPU KV cache size:\s*~?([\d,]+)\s*tokens", txt, re.I)
+-    )
+-    if not matches:
+-        return None
+-    return int(matches[-1].group(1).replace(",", ""))
++    for pat in (
++        r"GPU KV cache size:\s*~?([\d,]+)\s*tokens",   # vLLM
++        r"KV Cache is allocated\.[^\n]*?#tokens:\s*([\d,]+)",  # SGLang
++        r"max_total_num_tokens=([\d,]+)",                # SGLang (effective)
++    ):
++        matches = list(re.finditer(pat, txt, re.I))
++        if matches:
++            return int(matches[-1].group(1).replace(",", ""))
++    return None
+ 
+ 
+ def detect_kv_tokens(container):
+     if not container:
+         return None
+-    try:
+-        out = subprocess.run(
+-            ["docker", "logs", "--tail", "2500", container],
+-            capture_output=True,
+-            text=True,
+-            timeout=20,
+-            encoding="utf-8",
+-            errors="replace",
+-        )
+-        txt = (out.stdout or "") + (out.stderr or "")
+-    except Exception:
+-        return None
+-    return parse_kv_tokens_text(txt)
++    # The allocation line is printed once at boot; a --tail window on a
++    # long-serving container has long scrolled past it, so read the head.
++    return parse_kv_tokens_text(_docker_logs_head(container))
+ 
+ 
+ def plan_matrix(
+@@ -1216,21 +1217,28 @@ def format_recommend(rec):
+     served = rec.get("served_max_len")
+     slug = rec.get("slug") or "<slug>"
+     engine = (rec.get("engine") or "").lower()
++    # SGLang composes compose --max-running-requests / --context-length from the
++    # MAX_RUNNING_REQUESTS / CONTEXT_LENGTH env vars; vLLM's MAX_NUM_SEQS /
++    # MAX_MODEL_LEN names are silently ignored there, so the recommendation must
++    # spell them the way the target engine actually reads them.
++    is_sglang = engine.startswith("sglang")
++    seqs_name = "MAX_RUNNING_REQUESTS" if is_sglang else "MAX_NUM_SEQS"
++    len_name = "CONTEXT_LENGTH" if is_sglang else "MAX_MODEL_LEN"
+     lines = ["=== recommend ==="]
+ 
+     def knobs(n, ctx_keep, ctx_set=None):
+-        launch = [f"MAX_NUM_SEQS={n}"]
++        launch = [f"{seqs_name}={n}"]
+         if ctx_set is not None:
+-            launch.append(f"MAX_MODEL_LEN={ctx_set}")
++            launch.append(f"{len_name}={ctx_set}")
+         launch.append(f"bash scripts/switch.sh {slug}")
+         out = [
+-            f"    MAX_NUM_SEQS={n}",
++            f"    {seqs_name}={n}",
+         ]
+         if ctx_set is not None:
+-            out.append(f"    MAX_MODEL_LEN={ctx_set}")
++            out.append(f"    {len_name}={ctx_set}")
+         else:
+             keep = fmt_ctx(ctx_keep) if ctx_keep else "compose default"
+-            out.append(f"    MAX_MODEL_LEN=<keep {keep}>")
++            out.append(f"    {len_name}=<keep {keep}>")
+         out.append(f"    {' '.join(launch)}")
+         if engine in ("llamacpp", "llama.cpp", "ik_llama", "ik-llama"):
+             c = ctx_set if ctx_set is not None else ctx_keep
+@@ -1265,7 +1273,7 @@ def format_recommend(rec):
+             lines.extend(knobs(peak["n"], served, ctx_set=peak["ctx"]))
+             if served and peak["ctx"] < served:
+                 lines.append(
+-                    f"    do not drop MAX_MODEL_LEN unless traffic stays near {fmt_ctx(peak['ctx'])} — "
++                    f"    do not drop {len_name} unless traffic stays near {fmt_ctx(peak['ctx'])} — "
+                     f"raising slots to {peak['n']} at {served_s} will not reproduce {peak['agg']:.0f} tok/s"
+                 )
+         elif engine.startswith("vllm") or engine == "":

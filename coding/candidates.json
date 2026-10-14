@@ -1,0 +1,1947 @@
+[
+ {
+  "n": 1623,
+  "merged": "2026-10-10",
+  "merge": "c8b6a737988640bd0985e7d8ab6d0571f81a49fc",
+  "files": [
+   "scripts/lib/gpu-select.sh",
+   "scripts/tests/test-gpu-select.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-gpu-select.sh"
+  ],
+  "title": "fix(gpu-select): false PLACEMENT MISMATCH on every multi-GPU --gpus launch",
+  "issues": [],
+  "size": 49
+ },
+ {
+  "n": 1622,
+  "merged": "2026-10-10",
+  "merge": "b0179e52882a53cb345515af0934cb122ac42391",
+  "files": [
+   "scripts/detect_nvlink.sh",
+   "scripts/lib/p2p-state.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-no-grep-q-sigpipe.sh",
+   "scripts/tests/test-p2p-state.sh",
+   "scripts/verify-full.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-no-grep-q-sigpipe.sh",
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "title": "fix: grep -q SIGPIPE under pipefail hid NVLink; CNS probe matched the legend",
+  "issues": [],
+  "size": 157
+ },
+ {
+  "n": 1621,
+  "merged": "2026-10-10",
+  "merge": "3a8a5950f991df4e1890e00e2111e9eb8dfcb3c5",
+  "files": [
+   "docs/QUALITY_TEST.md",
+   "scripts/lib/quality_line.py",
+   "scripts/quality-test.sh",
+   "scripts/tests/test-quality-server-budget.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-quality-server-budget.sh"
+  ],
+  "title": "fix(quality-test): read a llama.cpp server's reasoning budget back too",
+  "issues": [],
+  "size": 148
+ },
+ {
+  "n": 1614,
+  "merged": "2026-10-10",
+  "merge": "540865aa59f27fd8c832064f628787d82594b9e1",
+  "files": [
+   "scripts/lib/generate_compose.py",
+   "scripts/tests/test-generate-compose.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-generate-compose.sh"
+  ],
+  "title": "fix(generate-compose): strip only an omitted template's own wiring",
+  "issues": [],
+  "size": 144
+ },
+ {
+  "n": 1613,
+  "merged": "2026-10-10",
+  "merge": "1b0fb07eb014e4b8dc43b4592a7b77ecf1b28296",
+  "files": [
+   "scripts/lib/profiles/patches.yml",
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "title": "fix(patches): list the 18 GLM composes glm53's template is wired into",
+  "issues": [],
+  "size": 25
+ },
+ {
+  "n": 1612,
+  "merged": "2026-10-10",
+  "merge": "f5695eaf80b7518bcfcf71e4795895c40d628ae1",
+  "files": [
+   "scripts/lib/profiles/patch_attribution.py",
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "title": "fix(patch-attribution): chat templates reach only composes that run them",
+  "issues": [
+   1611
+  ],
+  "size": 242
+ },
+ {
+  "n": 1610,
+  "merged": "2026-10-10",
+  "merge": "9a72acf2c8d8199f3d1d1fc3f3514ebdbaa496d2",
+  "files": [
+   "scripts/lib/profiles/patch_attribution.py",
+   "scripts/lib/profiles/patches.yml",
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "title": "fix(patch-attribution): reaches() no longer says \"wired\" for unwired patches (#1597)",
+  "issues": [
+   1597
+  ],
+  "size": 112
+ },
+ {
+  "n": 1608,
+  "merged": "2026-10-10",
+  "merge": "70b2e5939ee2ca7ff77e6ce7ad33a56761aca150",
+  "files": [
+   "models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml",
+   "scripts/tests/test-compose-args-array-scope.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-compose-args-array-scope.sh"
+  ],
+  "title": "fix(qwen3.8): initialise LM_ONLY_ARGS before the vision case (#1599)",
+  "issues": [
+   1599
+  ],
+  "size": 5
+ },
+ {
+  "n": 1607,
+  "merged": "2026-10-10",
+  "merge": "71ff56758591b3a6bd3169ba72dfc2ef4c0a1700",
+  "files": [
+   "scripts/tests/test-act-format-drift.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-act-format-drift.sh"
+  ],
+  "title": "test(act-format): read the W4A8 default from ${W4A8:=N} too (#1598)",
+  "issues": [
+   1598
+  ],
+  "size": 7
+ },
+ {
+  "n": 1606,
+  "merged": "2026-10-10",
+  "merge": "daecd83042732a0cd405ba273fbbe502ef1145a6",
+  "files": [
+   "scripts/tests/test-weights-revision.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-weights-revision.sh"
+  ],
+  "title": "test(weights): build the revision fixture at PROFILE_ROOT's real depth (#1604)",
+  "issues": [
+   1604
+  ],
+  "size": 12
+ },
+ {
+  "n": 1596,
+  "merged": "2026-10-09",
+  "merge": "6305d83a6357bb32dc0794dce7e600919f8ea1d8",
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/tests/test-preflight-autodetect.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-preflight-autodetect.sh"
+  ],
+  "title": "fix(preflight): URL= no longer ends quality-test.sh silently",
+  "issues": [],
+  "size": 17
+ },
+ {
+  "n": 1593,
+  "merged": "2026-10-09",
+  "merge": "18c63eb55bffd1ab8f14b59f53c889dd3cd2741d",
+  "files": [
+   "AGENTS.md",
+   "scripts/report.sh",
+   "scripts/spec-sweep.sh",
+   "scripts/tests/test-pickers-follow-url.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-pickers-follow-url.sh"
+  ],
+  "title": "fix(report,spec-sweep): pick the container that serves URL (#1590)",
+  "issues": [
+   1590
+  ],
+  "size": 216
+ },
+ {
+  "n": 1592,
+  "merged": "2026-10-09",
+  "merge": "e8c1896268a35c5637fa3081175fbd3aefb7fe47",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/lib/listen-scope.sh",
+   "scripts/tests/test-concurrency-probe.sh",
+   "scripts/tests/test-preflight-autodetect.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh",
+   "scripts/tests/test-preflight-autodetect.sh"
+  ],
+  "title": "fix(concurrency-probe): don't put this rig's GPUs on a remote endpoint's card",
+  "issues": [],
+  "size": 75
+ },
+ {
+  "n": 1589,
+  "merged": "2026-10-09",
+  "merge": "4e75ce42cc40769943b6d6b1918fb739f45a1cbc",
+  "files": [
+   "scripts/lib/quality_line.py",
+   "scripts/tests/test-quality-sampling-stamp.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-quality-sampling-stamp.sh"
+  ],
+  "title": "fix(quality): stamp the thinking sampler benchlocal recorded (#1583 follow-up)",
+  "issues": [],
+  "size": 17
+ },
+ {
+  "n": 1588,
+  "merged": "2026-10-09",
+  "merge": "216eae6a998ac68b6f64d143393533f20d51f9fb",
+  "files": [
+   "AGENTS.md",
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "title": "fix(concurrency-probe): pick the container that serves the URL (#1584 follow-up)",
+  "issues": [],
+  "size": 126
+ },
+ {
+  "n": 1586,
+  "merged": "2026-10-09",
+  "merge": "14eb13bcb0649650f8e796d44f626c05684cc921",
+  "files": [
+   "scripts/tests/test-trust-pipeline.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-trust-pipeline.sh"
+  ],
+  "title": "fix(tests): trust-pipeline reads only schema-1 .pull-captures (#1585)",
+  "issues": [
+   1585
+  ],
+  "size": 64
+ },
+ {
+  "n": 1582,
+  "merged": "2026-10-09",
+  "merge": "348c9cb7b6d1c461a8c5a9b582d46d48034579cd",
+  "files": [
+   "scripts/tests/test-bench-agentic-ramp.sh",
+   "scripts/tests/test-concurrency-probe.sh",
+   "scripts/tests/test-deep-context-probe.sh",
+   "scripts/tests/test-served-model-id.sh",
+   "scripts/tests/test-tests-stub-lifecycle.sh",
+   "scripts/tests/test-verify-stress-salt.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-agentic-ramp.sh",
+   "scripts/tests/test-concurrency-probe.sh",
+   "scripts/tests/test-deep-context-probe.sh",
+   "scripts/tests/test-served-model-id.sh",
+   "scripts/tests/test-tests-stub-lifecycle.sh",
+   "scripts/tests/test-verify-stress-salt.sh"
+  ],
+  "title": "fix(tests): stop stub servers leaking past their tests",
+  "issues": [],
+  "size": 197
+ },
+ {
+  "n": 1581,
+  "merged": "2026-10-09",
+  "merge": "b1f02166d90362e2cf668299f78b302f3ab5ad48",
+  "files": [
+   "docs/QUALITY_TEST.md",
+   "scripts/lib/listen-scope.sh",
+   "scripts/quality-test.sh",
+   "scripts/tests/test-hermes-reachability.sh",
+   "scripts/tests/test-script-permissions.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-hermes-reachability.sh",
+   "scripts/tests/test-script-permissions.sh"
+  ],
+  "title": "fix(quality-test): say why hermes can't reach the endpoint (#1578)",
+  "issues": [
+   1578
+  ],
+  "size": 322
+ },
+ {
+  "n": 1580,
+  "merged": "2026-10-09",
+  "merge": "50699416c2d264cc7c46ee53ab9c781a3f076af3",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/served-slots.sh",
+   "scripts/rebench-full.sh",
+   "scripts/rebench-report.py",
+   "scripts/tests/test-script-permissions.sh",
+   "scripts/tests/test-served-slots.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-script-permissions.sh",
+   "scripts/tests/test-served-slots.sh"
+  ],
+  "title": "fix(rebench): read SGLang slots over --url; flag N=1-only runs (#1577)",
+  "issues": [
+   1577
+  ],
+  "size": 389
+ },
+ {
+  "n": 1573,
+  "merged": "2026-10-07",
+  "merge": "3fd0fab3de78d860723bf2a90bd4084b6abbd344",
+  "files": [
+   "docs/QUALITY_TEST.md",
+   "scripts/lib/thinking-budget.sh",
+   "scripts/tests/test-quality-thinking-budget.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-quality-thinking-budget.sh"
+  ],
+  "title": "fix(quality-test): read vLLM's boot log when the parser isn't in the container argv",
+  "issues": [],
+  "size": 38
+ },
+ {
+  "n": 1571,
+  "merged": "2026-10-06",
+  "merge": "185111a25de5575f0ed3afa923741f8240825f16",
+  "files": [
+   "scripts/lib/gpu-select.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-report-gpu-attribution.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-report-gpu-attribution.sh"
+  ],
+  "title": "fix(report): attribute each GPU's VRAM to the process that holds it (#1537)",
+  "issues": [],
+  "size": 166
+ },
+ {
+  "n": 1568,
+  "merged": "2026-10-06",
+  "merge": "6c6c34cb1fccf7b4d3c933b12fde179da2db20d2",
+  "files": [
+   "scripts/tests/test-compose-flags-accepted.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-compose-flags-accepted.sh"
+  ],
+  "title": "fix(test): check folded command: strings in test-compose-flags-accepted",
+  "issues": [],
+  "size": 86
+ },
+ {
+  "n": 1565,
+  "merged": "2026-10-06",
+  "merge": "0fa53108c6b42dfae313fe196b8c0f0812456c00",
+  "files": [
+   "scripts/tests/test-spec-toggle-contract.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-spec-toggle-contract.sh"
+  ],
+  "title": "fix(test): stub nvidia-smi in the spec-toggle gate so it is hermetic",
+  "issues": [],
+  "size": 59
+ },
+ {
+  "n": 1564,
+  "merged": "2026-10-06",
+  "merge": "dceb9c796a05aeda852a140e3474486b7915f582",
+  "files": [
+   "scripts/catalog.sh",
+   "scripts/lib/profiles/promote.py",
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test_promote.py"
+  ],
+  "tests": [
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test_promote.py"
+  ],
+  "title": "fix(catalog): register --dry-run no longer writes the engine profile",
+  "issues": [],
+  "size": 141
+ },
+ {
+  "n": 1563,
+  "merged": "2026-10-06",
+  "merge": "ef3c2134c42ab057bd7d4cf649b632ff53f156aa",
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/tests/test-preflight-compose-deps.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-preflight-compose-deps.sh"
+  ],
+  "title": "fix(preflight): defaulted MODEL_DIR volumes and commented paths",
+  "issues": [],
+  "size": 34
+ },
+ {
+  "n": 1560,
+  "merged": "2026-10-06",
+  "merge": "a10144eee0ed0e470eaa3d249307e0198e326db3",
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/switch.sh",
+   "scripts/tests/test-preflight-nv-page-pool.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-preflight-nv-page-pool.sh"
+  ],
+  "title": "feat(switch): hint drop_caches when the NVIDIA page pool holds RAM",
+  "issues": [],
+  "size": 228
+ },
+ {
+  "n": 1557,
+  "merged": "2026-10-05",
+  "merge": "5bb43cad06c3c0900197a3d90ac0160930fa60c8",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "title": "fix(concurrency-probe): served context from the engine, not a flag grep (#1537)",
+  "issues": [],
+  "size": 106
+ },
+ {
+  "n": 1556,
+  "merged": "2026-10-05",
+  "merge": "2c2be9f29ffa0748f6fd89e1fc50dbed01788e4a",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "title": "fix(concurrency-probe): card's KV pool, slot source and SGLang knob names (#1537)",
+  "issues": [],
+  "size": 124
+ },
+ {
+  "n": 1555,
+  "merged": "2026-10-05",
+  "merge": "5221ad8e4c740b0885234be6d2dbef09ad0b040b",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/lib/run_context.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "title": "fix(concurrency-probe): card names the right container, GPUs and drafter (#1537)",
+  "issues": [],
+  "size": 219
+ },
+ {
+  "n": 1550,
+  "merged": "2026-10-04",
+  "merge": "3794093e59b5f6e5431c80a44e3b6949a3d16cb8",
+  "files": [
+   "scripts/lib/resolved_config.py",
+   "scripts/tests/test-report-resolved-config.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-report-resolved-config.sh"
+  ],
+  "title": "fix(report): compare the recipe as the launcher starts it on this host",
+  "issues": [],
+  "size": 74
+ },
+ {
+  "n": 1549,
+  "merged": "2026-10-04",
+  "merge": "14fca591c1fad9e8f92fb5e32bf68cc3a62391db",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/lib/capture.sh",
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "title": "fix(bench): pool lines below verbosity 4 are not \"0 pools\"",
+  "issues": [],
+  "size": 81
+ },
+ {
+  "n": 1546,
+  "merged": "2026-10-03",
+  "merge": "01da5ebc4b28648aab76e83cdab89a3ad6c565a9",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/lib/capture.sh",
+   "scripts/tests/fixtures/offload-matrix/fake-nvidia-smi",
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "title": "feat(bench): BENCH_GPUS limits capture to the selected cards",
+  "issues": [
+   1545
+  ],
+  "size": 198
+ },
+ {
+  "n": 1541,
+  "merged": "2026-10-02",
+  "merge": "7f2a9ce3a9d03bdfe762694fca3d423c84b2a107",
+  "files": [
+   "docs/HARDWARE.md",
+   "models/qwen3.8-27b/sglang/compose/single/autoround-int4/mtp.yml",
+   "models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml",
+   "scripts/lib/profiles/registry.yaml",
+   "scripts/switch.sh",
+   "scripts/tests/test-switch-gpu-pin.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-switch-gpu-pin.sh"
+  ],
+  "title": "fix(switch): honour CLUB3090_GPU on every single-card slug, --force too",
+  "issues": [],
+  "size": 141
+ },
+ {
+  "n": 1530,
+  "merged": "2026-10-02",
+  "merge": "f11e042fb6eee99305794d9be794221e0c49eeeb",
+  "files": [
+   "scripts/report.sh",
+   "scripts/tests/test-report-recent-exits.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-report-recent-exits.sh"
+  ],
+  "title": "Stop reporting clean (code 0) exits as failed boots in report.sh",
+  "issues": [],
+  "size": 160
+ },
+ {
+  "n": 1528,
+  "merged": "2026-10-02",
+  "merge": "bb7e4b905ce027ea96d2020466977782607ebe59",
+  "files": [
+   "scripts/lib/post-ready-sync.sh",
+   "scripts/switch.sh",
+   "scripts/tests/test-post-ready-sync.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-post-ready-sync.sh"
+  ],
+  "title": "Sync the gateway once the server answers when switch.sh didn't wait",
+  "issues": [
+   1522
+  ],
+  "size": 263
+ },
+ {
+  "n": 1524,
+  "merged": "2026-10-02",
+  "merge": "207bb1572a17ce8763bc1624f0b10a10528bf98b",
+  "files": [
+   "scripts/lib/litellm_sync.py",
+   "scripts/tests/test-litellm-sync.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-litellm-sync.sh"
+  ],
+  "title": "fix(gateway): name tabbyAPI routes from the loaded model, not the model directory",
+  "issues": [
+   1523
+  ],
+  "size": 71
+ },
+ {
+  "n": 1521,
+  "merged": "2026-10-02",
+  "merge": "d8847a45bd5aee90f116965d9016171ba5357c9e",
+  "files": [
+   "docs/CODING_AGENTS.md",
+   "scripts/lib/litellm-emit.sh",
+   "scripts/lib/litellm_sync.py",
+   "scripts/tests/test-litellm-generate.sh",
+   "scripts/tests/test-litellm-sync.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-litellm-generate.sh",
+   "scripts/tests/test-litellm-sync.sh"
+  ],
+  "title": "fix(gateway): bridge Responses calls to chat completions on engines without /v1/responses (#1520)",
+  "issues": [
+   1520
+  ],
+  "size": 190
+ },
+ {
+  "n": 1518,
+  "merged": "2026-10-01",
+  "merge": "7c451a5f629ae490cd85e85ed6028e13e12b4e2b",
+  "files": [
+   "scripts/lib/bench-row-formatter.sh",
+   "scripts/switch.sh",
+   "scripts/tests/test-switch-orphan-teardown.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-switch-orphan-teardown.sh"
+  ],
+  "title": "Split the comma-joined config_files label in switch.sh teardown",
+  "issues": [
+   1515
+  ],
+  "size": 65
+ },
+ {
+  "n": 1517,
+  "merged": "2026-10-01",
+  "merge": "6e4493435b15a7efa815488346c0d48084323a35",
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-git-checkout-detect.sh",
+   "scripts/update.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-git-checkout-detect.sh"
+  ],
+  "title": "fix(scripts): detect a git checkout with -e .git, not -d (worktrees)",
+  "issues": [],
+  "size": 36
+ },
+ {
+  "n": 1514,
+  "merged": "2026-10-01",
+  "merge": "4bee214552fc6e6d3e6158483c305ad88e0cf6de",
+  "files": [
+   "scripts/report.sh",
+   "scripts/tests/test-report-ansi.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-report-ansi.sh"
+  ],
+  "title": "fix(report): strip terminal colour codes from the report (#1427)",
+  "issues": [],
+  "size": 77
+ },
+ {
+  "n": 1511,
+  "merged": "2026-10-01",
+  "merge": "fa27f383ffdc9a291e6d6e29ee8bdf78fef10a0e",
+  "files": [
+   "scripts/lib/p2p_collective_check.py",
+   "scripts/tests/test-p2p-validate.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-p2p-validate.sh"
+  ],
+  "title": "fix(p2p-validate): time the peer copy with both GPUs awake (#1507)",
+  "issues": [
+   1507
+  ],
+  "size": 58
+ },
+ {
+  "n": 1510,
+  "merged": "2026-10-01",
+  "merge": "6f8251e7e3a4cf32b628095ab8cf4dd62e96dad3",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "title": "fix(concurrency-probe): sweep survives a skipped cell; VRAM per container (#1502)",
+  "issues": [
+   1502
+  ],
+  "size": 199
+ },
+ {
+  "n": 1500,
+  "merged": "2026-09-29",
+  "merge": "8c1984f76062df48c9b38096c0862b6dcb608e79",
+  "files": [
+   "scripts/lib/membw_probe.c",
+   "scripts/tests/test-report-membw.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-report-membw.sh"
+  ],
+  "title": "fix(report): spread partial-core bandwidth runs over every socket and die",
+  "issues": [],
+  "size": 69
+ },
+ {
+  "n": 1497,
+  "merged": "2026-09-29",
+  "merge": "f782440d131303fbd466c55e4a6bf2a77fc52bab",
+  "files": [
+   "scripts/lib/profiles/estate_cli.py",
+   "scripts/lib/profiles/measurement_record.py",
+   "scripts/rebench-full.sh",
+   "scripts/tests/test-measurement-record-resolve.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-measurement-record-resolve.sh"
+  ],
+  "title": "fix(records): attribute measurement records to the right slug, pods included (#1477)",
+  "issues": [
+   1477
+  ],
+  "size": 359
+ },
+ {
+  "n": 1495,
+  "merged": "2026-09-29",
+  "merge": "77fcc9ed3f38c2fcee14b00f5d9ff5402fa0c163",
+  "files": [
+   "AGENTS.md",
+   "scripts/health.sh",
+   "scripts/tests/test-health-container.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-health-container.sh"
+  ],
+  "title": "fix(health): autodetect the running endpoint; name the engine via engine-kind",
+  "issues": [],
+  "size": 141
+ },
+ {
+  "n": 1494,
+  "merged": "2026-09-29",
+  "merge": "ba31dab08f95943eae111449d299a6d978467b0c",
+  "files": [
+   "AGENTS.md",
+   "scripts/tests/test-quality-passthrough.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-quality-passthrough.sh"
+  ],
+  "title": "docs(agents): working on a rig + fix stale defaults, examples, Tier 0 list",
+  "issues": [],
+  "size": 68
+ },
+ {
+  "n": 1483,
+  "merged": "2026-09-28",
+  "merge": "f426ed51143734f4c53f460f733fcdc97fc3a2f9",
+  "files": [
+   "scripts/gpu-mode.sh",
+   "scripts/tests/test-gpu-mode-compose-env.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-gpu-mode-compose-env.sh"
+  ],
+  "title": "fix(gpu-mode): settings file per compose call; pass exported studio paths (#1466)",
+  "issues": [],
+  "size": 161
+ },
+ {
+  "n": 1478,
+  "merged": "2026-09-28",
+  "merge": "e238e8245b5e45cb61fae3700c30ecd636e1af6d",
+  "files": [
+   "scripts/lib/club-config.sh",
+   "scripts/lib/club_config.py",
+   "scripts/tests/test-club-config.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-club-config.sh"
+  ],
+  "title": "feat(config): `unset --root` also clears the legacy repo .env (#1466)",
+  "issues": [],
+  "size": 57
+ },
+ {
+  "n": 1471,
+  "merged": "2026-09-28",
+  "merge": "c686bca059c5784eb06f3badc35c221711266e46",
+  "files": [
+   "models/qwen3.8-27b/sglang/compose/dual/autoround-int4/mtp.yml",
+   "models/thinkingcap-qwen3.8-27b/sglang/compose/dual/autoround-int4/mtp.yml",
+   "scripts/tests/test-registry-compose-defaults.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-registry-compose-defaults.sh"
+  ],
+  "title": "fix(sglang): SPEC_N=0 on dual-fast boots again (mem fraction 0.90 w/o drafter)",
+  "issues": [],
+  "size": 41
+ },
+ {
+  "n": 1470,
+  "merged": "2026-09-28",
+  "merge": "21ae0e9e00cd5500f83c80af4e92bdbdce6d6c14",
+  "files": [
+   "scripts/lib/p2p-state.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "title": "fix(p2p): score SGLang's V1 custom all-reduce as on (PCIe rigs)",
+  "issues": [],
+  "size": 46
+ },
+ {
+  "n": 1464,
+  "merged": "2026-09-28",
+  "merge": "5ab88a5dbf533faca08187689ceea5dee8fc557f",
+  "files": [
+   "scripts/switch.sh",
+   "scripts/tests/test-switch-refuse-before-teardown.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-switch-refuse-before-teardown.sh"
+  ],
+  "title": "fix(switch): refuse a launch before tearing down the running slug",
+  "issues": [],
+  "size": 135
+ },
+ {
+  "n": 1461,
+  "merged": "2026-09-27",
+  "merge": "9f199f96114b50f3338599677fadd038471f6b3b",
+  "files": [
+   "docs/CODING_AGENTS.md",
+   "docs/UPSTREAM.md",
+   "scripts/lib/litellm_sync.py",
+   "scripts/tests/test-litellm-sync.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-litellm-sync.sh"
+  ],
+  "title": "feat(gateway): send Claude Code's /v1/messages straight to SGLang",
+  "issues": [],
+  "size": 184
+ },
+ {
+  "n": 1459,
+  "merged": "2026-09-27",
+  "merge": "a8aee482d08f063d95836886584e80a7cadc7839",
+  "files": [
+   "docs/CODING_AGENTS.md",
+   "docs/README.md",
+   "scripts/hermes-setup.sh",
+   "scripts/tests/test-hermes-setup.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-hermes-setup.sh"
+  ],
+  "title": "agents: Hermes Agent setup (scripts/hermes-setup.sh + docs), tested through the gateway",
+  "issues": [],
+  "size": 354
+ },
+ {
+  "n": 1458,
+  "merged": "2026-09-27",
+  "merge": "4cdf6547831da80a0c45e1d6de1f0bf25cdbb40d",
+  "files": [
+   "models/qwen3.8-27b/vllm/patches/qwen38-reasoning-effort-template/PROVENANCE.md",
+   "models/qwen3.8-27b/vllm/patches/qwen38-reasoning-effort-template/chat_template.jinja",
+   "scripts/lib/profiles/patches.yml",
+   "scripts/tests/test-qwen38-template.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-qwen38-template.sh"
+  ],
+  "title": "fix(qwen3.8 template): accept reasoning_effort minimal and max",
+  "issues": [],
+  "size": 59
+ },
+ {
+  "n": 1457,
+  "merged": "2026-09-27",
+  "merge": "bb3fa7c0ba2a04d5a5bd50ab0c12d7d9b3e03229",
+  "files": [
+   "scripts/lib/profiles/patches.yml",
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "title": "fix(patches): list every slug that mounts a vendored chat template (+ guard)",
+  "issues": [],
+  "size": 65
+ },
+ {
+  "n": 1456,
+  "merged": "2026-09-27",
+  "merge": "f898712004f17ed7ae42c8a32ce3cec59c1bc394",
+  "files": [
+   "docs/CODING_AGENTS.md",
+   "models/qwen3.8-27b/vllm/patches/qwen38-reasoning-effort-template/PROVENANCE.md",
+   "models/qwen3.8-27b/vllm/patches/qwen38-reasoning-effort-template/chat_template.jinja",
+   "scripts/lib/profiles/patches.yml",
+   "scripts/tests/test-qwen38-template.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-qwen38-template.sh"
+  ],
+  "title": "fix(qwen3.8 template): render a later system message in place \u2014 Claude Code on vLLM (#1447)",
+  "issues": [],
+  "size": 201
+ },
+ {
+  "n": 1449,
+  "merged": "2026-09-27",
+  "merge": "0c3545b9ab8b8e60991de5896a54dc782bf2661e",
+  "files": [
+   "docs/CODING_AGENTS.md",
+   "scripts/tests/test-omp-setup.sh",
+   "services/omp/omp-club.yml"
+  ],
+  "tests": [
+   "scripts/tests/test-omp-setup.sh"
+  ],
+  "title": "omp: don't limit omp to club models; meter section; Claude Code status on vLLM",
+  "issues": [],
+  "size": 145
+ },
+ {
+  "n": 1445,
+  "merged": "2026-09-27",
+  "merge": "ac4767f8d14ba50605bfdcfb8a151aabfa986e52",
+  "files": [
+   "docs/CODING_AGENTS.md",
+   "scripts/omp-setup.sh",
+   "scripts/tests/test-omp-setup.sh",
+   "services/omp/omp-club.yml"
+  ],
+  "tests": [
+   "scripts/tests/test-omp-setup.sh"
+  ],
+  "title": "omp: pin the Qwen3.8 reply cap; document what the gateway sets; link the doug.sh articles",
+  "issues": [],
+  "size": 244
+ },
+ {
+  "n": 1438,
+  "merged": "2026-09-27",
+  "merge": "d84a8adde7399a3fb2ca7d2640936e6699da4679",
+  "files": [
+   "scripts/lib/litellm-emit.sh",
+   "scripts/lib/litellm_sync.py",
+   "scripts/tests/test-litellm-sync.sh",
+   "services/litellm/config.yaml"
+  ],
+  "tests": [
+   "scripts/tests/test-litellm-sync.sh"
+  ],
+  "title": "feat(litellm): agent-ready gateway routes \u2014 effort passes, reasoning survives, real context window",
+  "issues": [],
+  "size": 318
+ },
+ {
+  "n": 1437,
+  "merged": "2026-09-27",
+  "merge": "543a6dc0ae2a9a12deecb45c9ec63c0982bacfa0",
+  "files": [
+   ".gitignore",
+   "docs/FAQ.md",
+   "scripts/gpu-mode.sh",
+   "scripts/tests/test-gpu-mode-service-upgrade.sh",
+   "scripts/tests/test-tests-never-launch.sh",
+   "scripts/update.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-gpu-mode-service-upgrade.sh",
+   "scripts/tests/test-tests-never-launch.sh"
+  ],
+  "title": "feat(gpu-mode): report support-service image drift; add `gpu-mode upgrade`",
+  "issues": [],
+  "size": 284
+ },
+ {
+  "n": 1426,
+  "merged": "2026-09-26",
+  "merge": "b56d16295da33ff4672e4b9405a6bfbfd5d6b8c0",
+  "files": [
+   "docs/ADDING_MODELS.md",
+   "docs/GETTING_STARTED.md",
+   "models/qwen3.8-27b/llama-cpp/compose/single/unsloth-iq4xs/q4kv-vision.yml",
+   "scripts/setup.sh",
+   "scripts/tests/test-setup-slug-companions.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-setup-slug-companions.sh"
+  ],
+  "title": "feat(setup): `setup.sh <slug>` fetches a slug's weights + companions",
+  "issues": [],
+  "size": 179
+ },
+ {
+  "n": 1424,
+  "merged": "2026-09-26",
+  "merge": "63175df6de167194499213d0755af841c95d0482",
+  "files": [
+   "BENCHMARKS.md",
+   "models/qwen3.8-27b/llama-cpp/compose/single/unsloth-iq4xs/q4kv-vision.yml",
+   "scripts/tests/test-compose-mmproj-offload-knob.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-compose-mmproj-offload-knob.sh"
+  ],
+  "title": "feat(qwen38-single-iq4xs): LLAMA_ARG_MMPROJ_OFFLOAD knob for the #1380 recipe",
+  "issues": [],
+  "size": 95
+ },
+ {
+  "n": 1423,
+  "merged": "2026-09-25",
+  "merge": "59cfb620ad80016198c4e73c22da02dc9223c424",
+  "files": [
+   "scripts/tests/test-engine-detection-sglang.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-engine-detection-sglang.sh"
+  ],
+  "title": "test(engine-detection): assert sglang is in report.sh's override arm, not its exact shape",
+  "issues": [],
+  "size": 8
+ },
+ {
+  "n": 1422,
+  "merged": "2026-09-25",
+  "merge": "98c8200cf2751c5a8ef8cdefc614f8c9cd90fca2",
+  "files": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "title": "Fix test-bench-capture triad branch for numpy-less rigs",
+  "issues": [],
+  "size": 6
+ },
+ {
+  "n": 1420,
+  "merged": "2026-09-25",
+  "merge": "12c5792812189c3dc9aec9d21d6f91bb5efb8d8b",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/lib/capture.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "title": "Fix ExLlamaV3 benchmark telemetry",
+  "issues": [],
+  "size": 63
+ },
+ {
+  "n": 1417,
+  "merged": "2026-09-25",
+  "merge": "74af1db29ed518cd702c422b36f895381a2191c5",
+  "files": [
+   "scripts/lib/profiles/registry.yaml",
+   "scripts/tests/test-registry-compose-defaults.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-registry-compose-defaults.sh"
+  ],
+  "title": "fix(registry): sync max_num_seqs / mem_util with the composes; guard against drift",
+  "issues": [],
+  "size": 120
+ },
+ {
+  "n": 1415,
+  "merged": "2026-09-25",
+  "merge": "fe41b76dc608252e32b70c5a1d97bd14412a4368",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/lib/capture.sh",
+   "scripts/lib/p2p-state.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-bench-capture.sh",
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh",
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "title": "fix(bench): detect SGLang collective runtime state",
+  "issues": [
+   1414
+  ],
+  "size": 211
+ },
+ {
+  "n": 1404,
+  "merged": "2026-09-24",
+  "merge": "cb59619bfaf102101dc9ff60983408bea72ea42f",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/tests/test-engine-restart-guard.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-engine-restart-guard.sh"
+  ],
+  "title": "fix(bench): exit 0 on a clean run, not 1",
+  "issues": [],
+  "size": 32
+ },
+ {
+  "n": 1400,
+  "merged": "2026-09-24",
+  "merge": "8cf303b1de2acc4e68a4e3f1bef924718bb0e8c8",
+  "files": [
+   "docs/ai-studio/image.md",
+   "scripts/tests/test-comfyui-clone-pinned.sh",
+   "services/comfyui/download_hidream_o1.sh",
+   "services/comfyui/entrypoint.sh",
+   "services/studio/step-voice/Dockerfile"
+  ],
+  "tests": [
+   "scripts/tests/test-comfyui-clone-pinned.sh"
+  ],
+  "title": "fix(studio): fetch Saganaki22's nodes from forks at pinned commits (#1394)",
+  "issues": [
+   1394
+  ],
+  "size": 159
+ },
+ {
+  "n": 1399,
+  "merged": "2026-09-24",
+  "merge": "3f12e1d9f6a02bcf4ca7d67830eb29c8133ac050",
+  "files": [
+   "scripts/lib/resolved_config.py",
+   "scripts/lib/run_context.py",
+   "scripts/tests/test-report-resolved-config.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-report-resolved-config.sh"
+  ],
+  "title": "fix(report): parse SGLang v0.5.20's dict-shaped server_args dump",
+  "issues": [],
+  "size": 161
+ },
+ {
+  "n": 1379,
+  "merged": "2026-09-21",
+  "merge": "7d757f44f7d6e6c3728d01c805b9a68f112d5f5e",
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/tests/test-preflight-engine-detection.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-preflight-engine-detection.sh"
+  ],
+  "title": "fix(preflight): recognise our own fork images \u2014 30 slugs skipped the weights check (#1247)",
+  "issues": [
+   1247
+  ],
+  "size": 183
+ },
+ {
+  "n": 1374,
+  "merged": "2026-09-21",
+  "merge": "d2165b724403bc85f28a27b04b9a2e15d21c0e8e",
+  "files": [
+   "models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-iq2-xxs/offload.yml",
+   "models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-q8-kxl/offload.yml",
+   "models/deepseek-v4-flash-0731/llama-cpp/compose/multi4/unsloth-q8-kxl/offload.yml",
+   "scripts/tests/test-compose-flags-accepted.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-compose-flags-accepted.sh"
+  ],
+  "title": "fix(deepseek-flash): --load-mode none, not --no-mmap \u2014 three slugs could not boot (#1370)",
+  "issues": [
+   1370
+  ],
+  "size": 159
+ },
+ {
+  "n": 1373,
+  "merged": "2026-09-21",
+  "merge": "4dc310a6809254de771763844f83faf0996dae05",
+  "files": [
+   "models/qwen3.8-flash-next/exllamav3/compose/dual/exl3-3.05bpw/cpumoe.yml",
+   "models/qwen3.8-flash-next/exllamav3/compose/dual/exl3-4.05bpw/cpumoe.yml",
+   "scripts/lib/compose-meta.sh",
+   "scripts/switch.sh",
+   "scripts/tests/test-cpu-moe-split-fit.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-cpu-moe-split-fit.sh"
+  ],
+  "title": "feat(exl3): size MOE_SPLIT as a VRAM fit instead of a hardcoded expert count (#1366)",
+  "issues": [
+   1366
+  ],
+  "size": 372
+ },
+ {
+  "n": 1368,
+  "merged": "2026-09-21",
+  "merge": "3126bc31978d80e26ee9010647b7203f7db1e4ba",
+  "files": [
+   "scripts/lib/profiles/envelopes.yml",
+   "scripts/lib/profiles/launch_compat.py",
+   "scripts/tests/test-launch-compat.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-launch-compat.sh"
+  ],
+  "title": "fix(launch): hardware detector discarded VRAM above the SM floor \u2014 A6000 (48 GB) resolved to rtx-3090 (#1364)",
+  "issues": [],
+  "size": 48
+ },
+ {
+  "n": 1367,
+  "merged": "2026-09-21",
+  "merge": "51a801f6f21164d1ec8043b442f434df96a3d689",
+  "files": [
+   "scripts/launch.sh",
+   "scripts/switch.sh",
+   "scripts/tests/fixtures/envelope-matrix.py",
+   "scripts/tests/test-envelope-matrix.sh"
+  ],
+  "tests": [
+   "scripts/tests/fixtures/envelope-matrix.py",
+   "scripts/tests/test-envelope-matrix.sh"
+  ],
+  "title": "test(launch): #1363 matrix guard \u2014 catches the MOE_RESERVE_MB exit-2 landmine before #1365 flips the gate",
+  "issues": [],
+  "size": 229
+ },
+ {
+  "n": 1362,
+  "merged": "2026-09-21",
+  "merge": "1973dc3d84602ad345a62c24cc0e3cf0c4e93e4d",
+  "files": [
+   "scripts/lib/profiles/launch_compat.py",
+   "scripts/tests/fixtures/envelope-knob-probe.py",
+   "scripts/tests/test-envelopes.sh"
+  ],
+  "tests": [
+   "scripts/tests/fixtures/envelope-knob-probe.py",
+   "scripts/tests/test-envelopes.sh"
+  ],
+  "title": "feat(launch): per-engine concurrency knob for #246 Phase 2 (#1361, layer 3)",
+  "issues": [],
+  "size": 131
+ },
+ {
+  "n": 1357,
+  "merged": "2026-09-20",
+  "merge": "b8f017ce7f083bc43955739fc29fad7a01db0340",
+  "files": [
+   "scripts/lib/report_calib.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-report-calib.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-report-calib.sh"
+  ],
+  "title": "fix(report): don't report a borrowed calibration verdict for an unchecked model (#1076)",
+  "issues": [],
+  "size": 67
+ },
+ {
+  "n": 1355,
+  "merged": "2026-09-20",
+  "merge": "ea704133dea545486e44fce998c9451a2aefe9bd",
+  "files": [
+   "scripts/tests/test-script-permissions.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-script-permissions.sh"
+  ],
+  "title": "fix(tests): allowlist engine-restart-guard.sh as sourced (master is red after #1354)",
+  "issues": [],
+  "size": 1
+ },
+ {
+  "n": 1354,
+  "merged": "2026-09-20",
+  "merge": "4eaf69937484baed99b02f1eedfc90d9f8f59a25",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/lib/engine-restart-guard.sh",
+   "scripts/quality-test.sh",
+   "scripts/tests/test-engine-restart-guard.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-engine-restart-guard.sh"
+  ],
+  "title": "fix(harness): fail loudly when the engine restarts mid-run (#1076)",
+  "issues": [],
+  "size": 210
+ },
+ {
+  "n": 1348,
+  "merged": "2026-09-19",
+  "merge": "589264bbec2b0b36f7061e47fe1eb86ec2d63108",
+  "files": [
+   "scripts/tests/test-soak-decode-basis.sh",
+   "scripts/tests/test-soak-vram-baseline.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-soak-decode-basis.sh",
+   "scripts/tests/test-soak-vram-baseline.sh"
+  ],
+  "title": "fix(tests): repair the two soak gates \u2014 incomplete baseline tree",
+  "issues": [],
+  "size": 89
+ },
+ {
+  "n": 1333,
+  "merged": "2026-09-16",
+  "merge": "bfe4273cd94426bb737ed5665e57ae9099e051da",
+  "files": [
+   "scripts/lib/p2p-state.sh",
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "title": "fix(p2p): attribute a 2-GPU nccl_only verdict to the operator, not the world>2 gate (#1332)",
+  "issues": [],
+  "size": 23
+ },
+ {
+  "n": 1318,
+  "merged": "2026-09-14",
+  "merge": "53f00bb7e0a29629e771a66e3d06954c401ebec8",
+  "files": [
+   "scripts/tests/test_export_pr.py",
+   "scripts/tests/test_local_registry.py",
+   "scripts/tests/test_promote.py"
+  ],
+  "tests": [
+   "scripts/tests/test_export_pr.py",
+   "scripts/tests/test_local_registry.py",
+   "scripts/tests/test_promote.py"
+  ],
+  "title": "Isolate the pytest fixtures from the machine's real local layer (follow-up to #1317)",
+  "issues": [],
+  "size": 34
+ },
+ {
+  "n": 1314,
+  "merged": "2026-09-14",
+  "merge": "80351b8fbf8b811ba38c6610831b0e2a375538b6",
+  "files": [
+   "scripts/tests/lib-scan-bare-grep.py",
+   "scripts/tests/test-no-bare-grep.sh"
+  ],
+  "tests": [
+   "scripts/tests/lib-scan-bare-grep.py",
+   "scripts/tests/test-no-bare-grep.sh"
+  ],
+  "title": "fix(tests): the bare-grep scanner must not fire on comments",
+  "issues": [],
+  "size": 44
+ },
+ {
+  "n": 1307,
+  "merged": "2026-09-13",
+  "merge": "0cbf3bdb57a67afd911871372104afa8f291d3d2",
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/tests/test-preflight-model-path-extract.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-preflight-model-path-extract.sh"
+  ],
+  "title": "fix(preflight): stop capturing a trailing backslash from escaped JSON drafter paths",
+  "issues": [
+   1306
+  ],
+  "size": 77
+ },
+ {
+  "n": 1302,
+  "merged": "2026-09-13",
+  "merge": "928360efffd47388468832bcc1f392e13f62b67b",
+  "files": [
+   "scripts/deep-context-probe.sh",
+   "scripts/lib/deep_context_probe.py",
+   "scripts/tests/test-deep-context-probe.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-deep-context-probe.sh"
+  ],
+  "title": "feat(probe): concurrent mode \u2014 two deep sessions, then compact one",
+  "issues": [],
+  "size": 177
+ },
+ {
+  "n": 1296,
+  "merged": "2026-09-13",
+  "merge": "c4ed9cab3f37f003f36a498289b915f40bfd0022",
+  "files": [
+   "models/qwen3.8-27b/sglang/compose/dual/autoround-int4/dflash2-bf16.yml",
+   "models/qwen3.8-27b/sglang/compose/dual/autoround-int4/dflash2.yml",
+   "models/qwen3.8-27b/sglang/compose/dual/autoround-int4/mtp.yml",
+   "models/qwen3.8-27b/sglang/compose/dual/fp8/dflash2.yml",
+   "models/qwen3.8-27b/sglang/compose/dual/fp8/mtp.yml",
+   "scripts/tests/test-compose-continuation-comments.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-compose-continuation-comments.sh"
+  ],
+  "title": "fix(sglang): a doc comment after a line continuation silently dropped every flag after it",
+  "issues": [],
+  "size": 388
+ },
+ {
+  "n": 1291,
+  "merged": "2026-09-13",
+  "merge": "3364c251e4d8da20cb9e13a3bda53f585d5537de",
+  "files": [
+   "scripts/soak-helper.py",
+   "scripts/tests/test-soak-engine-rate-ceiling.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-soak-engine-rate-ceiling.sh"
+  ],
+  "title": "fix(soak): stop the client-timing ceiling deleting engine-reported decode rates",
+  "issues": [
+   1290
+  ],
+  "size": 143
+ },
+ {
+  "n": 1289,
+  "merged": "2026-09-13",
+  "merge": "2dcbb99497c7e9ed047028720cd821ab3e5ea003",
+  "files": [
+   "scripts/tests/fixtures/offload-matrix/fake-nvidia-smi",
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "title": "fix(tests): give the fixture an `nvidia-smi -L` arm, and assert the precondition it enables",
+  "issues": [],
+  "size": 28
+ },
+ {
+  "n": 1263,
+  "merged": "2026-09-12",
+  "merge": "cd6153d6b876c3c78f6f85e8524d42187d034c59",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/lib/report_calib.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-engine-detection-sglang.sh",
+   "scripts/verify-full.sh",
+   "scripts/verify-stress.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-engine-detection-sglang.sh"
+  ],
+  "title": "fix(harness): resolve sglang-* containers to ENGINE_KIND=sglang (5 sites)",
+  "issues": [],
+  "size": 115
+ },
+ {
+  "n": 1228,
+  "merged": "2026-09-09",
+  "merge": "f29da2e403f4e1c055eaf84f27f858c9e17fda25",
+  "files": [
+   "models/glm-5.3-flash/sglang/patches/README.md",
+   "scripts/gpu-mode.sh",
+   "scripts/lib/profiles/engines/sglang-stable.yml",
+   "scripts/tests/test-profiles-compat.sh",
+   "services/spark-dashboard/docker-compose.yml"
+  ],
+  "tests": [
+   "scripts/tests/test-profiles-compat.sh"
+  ],
+  "title": "feat(engines): register sglang-stable + define the sglang patch contract",
+  "issues": [],
+  "size": 157
+ },
+ {
+  "n": 1224,
+  "merged": "2026-09-09",
+  "merge": "19eeafe95f4e128bd11dbe66f709acce2c4304b5",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe-verdict.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe-verdict.sh"
+  ],
+  "title": "fix(concurrency-probe): a -1 MB VRAM delta must not FAIL the fit verdict",
+  "issues": [
+   1211
+  ],
+  "size": 193
+ },
+ {
+  "n": 1222,
+  "merged": "2026-09-08",
+  "merge": "5dcf23ca5e7600b15f58210d9246814990665989",
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/tests/test-concurrency-probe.sh",
+   "scripts/tests/test-spec-sweep.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh",
+   "scripts/tests/test-spec-sweep.sh"
+  ],
+  "title": "fix(concurrency-probe): SWEEP_DRY must not boot the slug",
+  "issues": [],
+  "size": 104
+ },
+ {
+  "n": 1218,
+  "merged": "2026-09-08",
+  "merge": "300b5e56f884df6a8e3180cdf35a61ddb7c5593f",
+  "files": [
+   "scripts/bench-agentic.sh",
+   "scripts/catalog.sh",
+   "scripts/lib/profiles/compose_facts.py",
+   "scripts/tests/test-bench-agentic-ramp.sh",
+   "scripts/tests/test-catalog-detectability.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-agentic-ramp.sh",
+   "scripts/tests/test-catalog-detectability.sh"
+  ],
+  "title": "fix(bench-agentic): measure decode correctly on reasoning models",
+  "issues": [],
+  "size": 379
+ },
+ {
+  "n": 1213,
+  "merged": "2026-09-08",
+  "merge": "f73fcdab413208552f6bdb5e02b3725a9ea53441",
+  "files": [
+   "scripts/catalog.sh",
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test-compose-status-drift.sh",
+   "scripts/tests/test-profiles-compat.sh",
+   "tools/serve-cockpit/club3090_cockpit/app.py"
+  ],
+  "tests": [
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test-compose-status-drift.sh",
+   "scripts/tests/test-profiles-compat.sh"
+  ],
+  "title": "fix(catalog): unbreak --weights <gguf>, surface the local-layer view, keep the suite green once a model is registered",
+  "issues": [],
+  "size": 93
+ },
+ {
+  "n": 1210,
+  "merged": "2026-09-07",
+  "merge": "83a40c4b2f7b1bc997319693050f3d3eeb39a9f9",
+  "files": [
+   "scripts/lib/profiles/amend.py",
+   "scripts/lib/profiles/compose_registry.py",
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test-local-entries-view.sh",
+   "tools/serve-cockpit/club3090_cockpit/app.py",
+   "tools/serve-cockpit/club3090_cockpit/services.py"
+  ],
+  "tests": [
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test-local-entries-view.sh"
+  ],
+  "title": "feat(c3): manage the local layer from the cockpit \u2014 list, rename, edit, remove (#1153)",
+  "issues": [
+   1153
+  ],
+  "size": 386
+ },
+ {
+  "n": 1209,
+  "merged": "2026-09-07",
+  "merge": "02caaeedd522ed4b43a5048c48327f14ccb7f9cc",
+  "files": [
+   "docs/BRING_YOUR_OWN.md",
+   "scripts/catalog.sh",
+   "scripts/lib/profiles/amend.py",
+   "scripts/tests/test-catalog-amend.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-catalog-amend.sh"
+  ],
+  "title": "feat(catalog): rename + update for local entries \u2014 the shadowing remedy we owed (#1202 P7)",
+  "issues": [],
+  "size": 392
+ },
+ {
+  "n": 1208,
+  "merged": "2026-09-07",
+  "merge": "9b2b046e20424639eb484b016f8ff09c96ccabbe",
+  "files": [
+   "docs/ADDING_MODELS.md",
+   "docs/BRING_YOUR_OWN.md",
+   "scripts/tests/test-local-never-default.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-local-never-default.sh"
+  ],
+  "title": "docs+test(catalog): document the local workflow; pin that a local entry is never a default (#1202 P6)",
+  "issues": [],
+  "size": 109
+ },
+ {
+  "n": 1207,
+  "merged": "2026-09-07",
+  "merge": "60e5d6ee1664be647403830a64bddcc223c00186",
+  "files": [
+   "scripts/catalog.sh",
+   "scripts/lib/registry-emit.sh",
+   "scripts/switch.sh",
+   "scripts/tests/test-switch-local-filter.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-switch-local-filter.sh"
+  ],
+  "title": "feat(switch): `--local` filter and a provenance marker on local rows (#1202 P5)",
+  "issues": [],
+  "size": 205
+ },
+ {
+  "n": 1204,
+  "merged": "2026-09-07",
+  "merge": "3e2d591fe582704da194eaf6b3085550d8be5984",
+  "files": [
+   "scripts/lib/profiles/compose_registry.py",
+   "scripts/tests/test-registry-origin-field.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-registry-origin-field.sh"
+  ],
+  "title": "feat(profiles): make catalog provenance a first-class `origin` field; core wins (#1202 P2)",
+  "issues": [],
+  "size": 131
+ },
+ {
+  "n": 1203,
+  "merged": "2026-09-07",
+  "merge": "d854c5df94cee3861f04b572f04a6ac37e192e12",
+  "files": [
+   "scripts/lib/profiles/compose_facts.py",
+   "scripts/tests/test-compose-facts-shared.sh",
+   "tools/serve-cockpit/club3090_cockpit/data.py"
+  ],
+  "tests": [
+   "scripts/tests/test-compose-facts-shared.sh"
+  ],
+  "title": "refactor(profiles): lift derive_compose_facts out of the cockpit into shared profiles (#1202 P1)",
+  "issues": [],
+  "size": 354
+ },
+ {
+  "n": 1196,
+  "merged": "2026-09-06",
+  "merge": "8d242747138f98b003a3faa69fea33931e720cd6",
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/tests/test-thinking-probe-optin.sh",
+   "scripts/verify-full.sh",
+   "scripts/verify-stress.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-thinking-probe-optin.sh"
+  ],
+  "title": "fix(verify): detect thinking-only models instead of assuming a dial means OFF",
+  "issues": [],
+  "size": 98
+ },
+ {
+  "n": 1194,
+  "merged": "2026-09-06",
+  "merge": "f31ee992f0a9016640431ecdd955bff041a42d1f",
+  "files": [
+   "scripts/tests/test-verify-stress-ladder-verdict.sh",
+   "scripts/verify-full.sh",
+   "scripts/verify-stress.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-verify-stress-ladder-verdict.sh"
+  ],
+  "title": "fix(verify): stop reporting a crash when the model returns no content",
+  "issues": [
+   1128,
+   1129
+  ],
+  "size": 124
+ },
+ {
+  "n": 1192,
+  "merged": "2026-09-06",
+  "merge": "08bd17f03d24f9364091495f23429de0d4302235",
+  "files": [
+   "scripts/tests/test-generate-compose.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-generate-compose.sh"
+  ],
+  "title": "fix(tests): repair the generate-compose fixtures #1188 broke",
+  "issues": [],
+  "size": 27
+ },
+ {
+  "n": 1187,
+  "merged": "2026-09-06",
+  "merge": "6dc741150e6e01c43f7b002bd01ec3d4f231727c",
+  "files": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "title": "fix(tests): test-bench-capture must start the bench right after the first stats sample (#1137)",
+  "issues": [
+   1137
+  ],
+  "size": 28
+ },
+ {
+  "n": 1184,
+  "merged": "2026-09-06",
+  "merge": "e9522199f71aaf3b17e4ad23d10a36abe9c56a2a",
+  "files": [
+   "scripts/tests/test-compose-args-array-scope.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-compose-args-array-scope.sh"
+  ],
+  "title": "fix(tests): args-array-scope gate must export PYTHONUTF8 (#779)",
+  "issues": [],
+  "size": 3
+ },
+ {
+  "n": 1179,
+  "merged": "2026-09-05",
+  "merge": "718f66955b3aeca5b84fbf3c28dd900d8ec17cb8",
+  "files": [
+   "scripts/tests/test-litellm-generate.sh",
+   "services/litellm/config.yaml"
+  ],
+  "tests": [
+   "scripts/tests/test-litellm-generate.sh"
+  ],
+  "title": "fix(litellm): regenerate config for the #1175 status change; stop the test hard-coding a status",
+  "issues": [],
+  "size": 24
+ },
+ {
+  "n": 1174,
+  "merged": "2026-09-05",
+  "merge": "dee0133306e1d5fca09164da83b3921894821a84",
+  "files": [
+   "scripts/lib/profiles/hf_fetch.py",
+   "scripts/tests/test-pull-download-ladder.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-pull-download-ladder.sh"
+  ],
+  "title": "fix(hf-fetch): missing hf binary escalates to rung 3; CLI announces failure",
+  "issues": [
+   1132
+  ],
+  "size": 110
+ },
+ {
+  "n": 1172,
+  "merged": "2026-09-05",
+  "merge": "e6bf6e52a7729c33b9249b1ce795ce0edd9fd6be",
+  "files": [
+   "scripts/lib/vram_breakdown.py",
+   "scripts/tests/test-vram-breakdown.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-vram-breakdown.sh"
+  ],
+  "title": "fix(vram-breakdown): count drafter weights and GLM recurrent state",
+  "issues": [
+   1171
+  ],
+  "size": 107
+ },
+ {
+  "n": 1155,
+  "merged": "2026-09-03",
+  "merge": "e815afb203d839f64167944d99cf22010b28653f",
+  "files": [
+   "scripts/lib/profiles/promote.py",
+   "scripts/tests/test-model-spec-roundtrip.sh",
+   "scripts/tests/test_export_pr.py",
+   "scripts/tests/test_local_registry.py",
+   "scripts/tests/test_promote.py"
+  ],
+  "tests": [
+   "scripts/tests/test-model-spec-roundtrip.sh",
+   "scripts/tests/test_export_pr.py",
+   "scripts/tests/test_local_registry.py",
+   "scripts/tests/test_promote.py"
+  ],
+  "title": "feat(promote): state the written layer, pose the default, and un-break the test fixture",
+  "issues": [],
+  "size": 79
+ },
+ {
+  "n": 1154,
+  "merged": "2026-09-03",
+  "merge": "492eddb2697b66ec498bd5999f47949e62682848",
+  "files": [
+   "scripts/bench.sh",
+   "scripts/lib/capture.sh",
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-bench-capture.sh"
+  ],
+  "title": "fix(bench): make the RAM-derivation refusal loud, and split its two failure causes",
+  "issues": [],
+  "size": 51
+ },
+ {
+  "n": 1152,
+  "merged": "2026-09-03",
+  "merge": "63871fe31166451032cc947824235272ac45d0e6",
+  "files": [
+   "docs/BRING_YOUR_OWN.md",
+   "scripts/lib/profiles-local/README.md",
+   "scripts/lib/profiles/promote.py",
+   "scripts/tests/test_promote.py"
+  ],
+  "tests": [
+   "scripts/tests/test_promote.py"
+  ],
+  "title": "feat(byom): keep local models out of the curated port band; document what destroys the layer",
+  "issues": [],
+  "size": 106
+ },
+ {
+  "n": 1150,
+  "merged": "2026-09-03",
+  "merge": "66d70755f1ab99b7d7c48389938102cfb48747e0",
+  "files": [
+   "scripts/tests/test-quality-passthrough.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-quality-passthrough.sh"
+  ],
+  "title": "fix(tests): allow --spec-file in the quality-test doc drift guard (regression from #1143)",
+  "issues": [],
+  "size": 1
+ },
+ {
+  "n": 1149,
+  "merged": "2026-09-03",
+  "merge": "a1874c73ca708ed9b1c1ffc2936019f8668510fa",
+  "files": [
+   "scripts/tests/test-caveat-patch-ambiguity.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-caveat-patch-ambiguity.sh"
+  ],
+  "title": "test: guard against a caveat promising an upstream fix we already ship a patch for",
+  "issues": [],
+  "size": 95
+ },
+ {
+  "n": 1145,
+  "merged": "2026-09-02",
+  "merge": "e189f8d651f7184f5d680758a844547feeebe473",
+  "files": [
+   "scripts/lib/profiles/export_pr.py",
+   "scripts/lib/profiles/promote.py",
+   "scripts/lib/profiles/repo_dotenv.py",
+   "scripts/tests/test_promote.py"
+  ],
+  "tests": [
+   "scripts/tests/test_promote.py"
+  ],
+  "title": "fix(promote): honour repo-root .env so the core gate stops being a silent no-op",
+  "issues": [],
+  "size": 135
+ },
+ {
+  "n": 1143,
+  "merged": "2026-09-02",
+  "merge": "0b0e186d7e4faea48f5af02787e8b422f016138a",
+  "files": [
+   "AGENTS.md",
+   "README.md",
+   "docs/ADDING_MODELS.md",
+   "docs/BRING_YOUR_OWN.md",
+   "scripts/lib/profiles-local/README.md",
+   "scripts/tests/test-docs-local-layer.sh"
+  ],
+  "tests": [
+   "scripts/tests/test-docs-local-layer.sh"
+  ],
+  "title": "docs: route BYOM to the local model layer, not the curated catalog",
+  "issues": [],
+  "size": 175
+ }
+]

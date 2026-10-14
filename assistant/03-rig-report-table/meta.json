@@ -1,0 +1,9 @@
+{
+  "id": "03-rig-report-table",
+  "source": "session-derived",
+  "category": "summarising",
+  "difficulty": "easy",
+  "est_minutes": 10,
+  "needs_web": false,
+  "notes": "Shape from sessions summarising rig/bench reports into fixed tables (units, one superseded figure)."
+}

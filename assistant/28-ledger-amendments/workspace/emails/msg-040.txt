@@ -1,0 +1,8 @@
+From: sol@example.net
+Date: 2026-07-11T13:19:00Z
+Subject: ledger amendment
+
+The amount on T-01128 should have been $534.90, not what is in the ledger.
+
+Thanks,
+sol

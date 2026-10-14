@@ -1,0 +1,71 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..0370ab9 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -30,6 +30,38 @@ def _per_dev(text, pat, agg=False):
+     return out
+ 
+ 
++def _compute_per_dev(text):
++    """Per-device compute MiB from ``sched_reserve`` lines, without double-counting.
++
++    A device can log several ``compute buffer size`` reservations in one boot:
++    the target reserves, the drafter reserves, then the target RE-reserves a
++    larger buffer once the drafter is in. The target's own (re)reservations are
++    one buffer and must NOT be summed; the drafter's reservation is a distinct
++    context and IS additive. The log does not label which context a line
++    belongs to, so we infer it: a reservation that drops strictly below a size
++    already established (and is followed by a larger one) is the interleaved
++    drafter buffer; the largest value is the target's final reservation.
++    """
++    vals = {}
++    for m in re.finditer(
++        r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB", text
++    ):
++        vals.setdefault(m.group(1), []).append(float(m.group(2)))
++    out = {}
++    for dev, v in vals.items():
++        if not v:
++            continue
++        extra, running = 0.0, v[0]
++        for i, x in enumerate(v[1:], start=1):
++            if x >= running:
++                running = x            # target growing / re-reserving its own buffer
++            elif max(v[i + 1:], default=x) > x:
++                extra += x             # strict dip below an established size, then a
++                #                      larger one follows -> interleaved drafter
++        out[dev] = max(v) + extra
++    return out
++
++
+ def main() -> int:
+     if len(sys.argv) < 2:
+         return 1
+@@ -38,10 +70,24 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
++    # model is ADDITIVE, not last-wins: a drafter pinned to the same GPU emits
++    # the same "load_tensors ... model buffer size" line as the target, so the
++    # two weight buffers must be summed (a last-wins parse silently dropped the
++    # ~3.3 GiB target for a ~0.65 GiB drafter).
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
++    # compute is subtler than a plain sum: the target re-reserves AFTER the
++    # drafter loads, so its own (re)reservations are one buffer and must not be
++    # summed; only the drafter's interleaved reservation is additive.
++    compute = _compute_per_dev(text)
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # Recurrent state is logged under different prefixes per arch: DeepSeek's
++    # `_comp_state:` and GLM/hybrid's `llama_memory_recurrent:` ("RS buffer").
++    # Both are the same kind of buffer, so match either prefix and sum.
++    state = _per_dev(
++        text,
++        r"(?:_comp_state|llama_memory_recurrent):\s+(CUDA\d).*?buffer size =\s+([\d.]+) MiB",
++        agg=True,
++    )
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

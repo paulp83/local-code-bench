@@ -1,0 +1,441 @@
+{
+ "1172": {
+  "n": 1172,
+  "src_files": [
+   "scripts/lib/vram_breakdown.py"
+  ],
+  "p2p": [],
+  "p2p_candidates": 0,
+  "checks_base": {
+   "passed": 4,
+   "failed": 2
+  },
+  "checks_head": {
+   "passed": 6,
+   "failed": 0
+  }
+ },
+ "1174": {
+  "n": 1174,
+  "src_files": [
+   "scripts/lib/profiles/hf_fetch.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-pull-verify-in-place.sh",
+   "scripts/tests/test-setup-verify-count.sh"
+  ],
+  "p2p_candidates": 2,
+  "checks_base": {
+   "passed": 52,
+   "failed": 5
+  },
+  "checks_head": {
+   "passed": 57,
+   "failed": 0
+  }
+ },
+ "1203": {
+  "n": 1203,
+  "src_files": [
+   "scripts/lib/profiles/compose_facts.py",
+   "tools/serve-cockpit/club3090_cockpit/data.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-arch-ab.sh",
+   "scripts/tests/test-bench-agentic-ramp.sh",
+   "scripts/tests/test-bench-card.sh",
+   "scripts/tests/test-classifier.sh",
+   "scripts/tests/test-comfyui-paths.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 0,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 4,
+   "failed": 0
+  }
+ },
+ "1204": {
+  "n": 1204,
+  "src_files": [
+   "scripts/lib/profiles/compose_registry.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-baselines.sh",
+   "scripts/tests/test-compose-image-drift.sh",
+   "scripts/tests/test-compose-port-conflicts.sh",
+   "scripts/tests/test-compose-registry-disk.sh",
+   "scripts/tests/test-compose-sampler-profiles.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 0,
+   "failed": 3
+  },
+  "checks_head": {
+   "passed": 3,
+   "failed": 0
+  }
+ },
+ "1209": {
+  "n": 1209,
+  "src_files": [
+   "docs/BRING_YOUR_OWN.md",
+   "scripts/catalog.sh",
+   "scripts/lib/profiles/amend.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-baselines.sh",
+   "scripts/tests/test-catalog-baseline.sh",
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test-compose-offload-drift.sh",
+   "scripts/tests/test-demote-refuses-core.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 8,
+   "failed": 4
+  },
+  "checks_head": {
+   "passed": 12,
+   "failed": 0
+  }
+ },
+ "1307": {
+  "n": 1307,
+  "src_files": [
+   "scripts/preflight.sh"
+  ],
+  "p2p": [
+   "scripts/tests/test-default-resolver.sh",
+   "scripts/tests/test-homogeneous-arch-drift.sh",
+   "scripts/tests/test-model-weights-registry.sh",
+   "scripts/tests/test-no-bare-grep.sh",
+   "scripts/tests/test-preflight-add-model.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 3,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 5,
+   "failed": 0
+  }
+ },
+ "1464": {
+  "n": 1464,
+  "src_files": [
+   "scripts/switch.sh"
+  ],
+  "p2p": [
+   "scripts/tests/test-agent-statusline-meter.sh",
+   "scripts/tests/test-arch-ab.sh",
+   "scripts/tests/test-compose-drafter-preflight.sh",
+   "scripts/tests/test-compose-healthcheck-reachability.sh",
+   "scripts/tests/test-compose-restart-policy.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 1,
+   "failed": 3
+  },
+  "checks_head": {
+   "passed": 4,
+   "failed": 0
+  }
+ },
+ "1470": {
+  "n": 1470,
+  "src_files": [
+   "scripts/lib/p2p-state.sh",
+   "scripts/report.sh"
+  ],
+  "p2p": [
+   "scripts/tests/test-agent-statusline-meter.sh",
+   "scripts/tests/test-bench-agentic-ramp.sh",
+   "scripts/tests/test-bench-card.sh",
+   "scripts/tests/test-cache-share.sh",
+   "scripts/tests/test-catalog-baseline.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 2,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 13,
+   "failed": 0
+  }
+ },
+ "1510": {
+  "n": 1510,
+  "src_files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-concurrency-probe-verdict.sh",
+   "scripts/tests/test-default-url-gateway.sh",
+   "scripts/tests/test-measurement-record.sh",
+   "scripts/tests/test-spec-sweep.sh"
+  ],
+  "p2p_candidates": 4,
+  "checks_base": {
+   "passed": 12,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 14,
+   "failed": 0
+  }
+ },
+ "1518": {
+  "n": 1518,
+  "src_files": [
+   "scripts/lib/bench-row-formatter.sh",
+   "scripts/switch.sh"
+  ],
+  "p2p": [
+   "scripts/tests/test-agent-statusline-meter.sh",
+   "scripts/tests/test-arch-ab.sh",
+   "scripts/tests/test-club-config.sh",
+   "scripts/tests/test-compose-drafter-preflight.sh",
+   "scripts/tests/test-compose-healthcheck-reachability.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 10,
+   "failed": 5
+  },
+  "checks_head": {
+   "passed": 15,
+   "failed": 0
+  }
+ },
+ "1555": {
+  "n": 1555,
+  "src_files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/lib/run_context.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-concurrency-probe-verdict.sh",
+   "scripts/tests/test-default-url-gateway.sh",
+   "scripts/tests/test-measurement-record.sh",
+   "scripts/tests/test-run-context.sh",
+   "scripts/tests/test-spec-sweep.sh"
+  ],
+  "p2p_candidates": 5,
+  "checks_base": {
+   "passed": 13,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 15,
+   "failed": 0
+  }
+ },
+ "1556": {
+  "n": 1556,
+  "src_files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-concurrency-probe-verdict.sh",
+   "scripts/tests/test-default-url-gateway.sh",
+   "scripts/tests/test-measurement-record.sh",
+   "scripts/tests/test-spec-sweep.sh"
+  ],
+  "p2p_candidates": 4,
+  "checks_base": {
+   "passed": 15,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 16,
+   "failed": 0
+  }
+ },
+ "1564": {
+  "n": 1564,
+  "src_files": [
+   "scripts/catalog.sh",
+   "scripts/lib/profiles/promote.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-baselines.sh",
+   "scripts/tests/test-catalog-amend.sh",
+   "scripts/tests/test-catalog-baseline.sh",
+   "scripts/tests/test-catalog-derivation-robustness.sh",
+   "scripts/tests/test-catalog-detectability.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 12,
+   "failed": 4
+  },
+  "checks_head": {
+   "passed": 15,
+   "failed": 0
+  }
+ },
+ "1571": {
+  "n": 1571,
+  "src_files": [
+   "scripts/lib/gpu-select.sh",
+   "scripts/report.sh"
+  ],
+  "p2p": [
+   "scripts/tests/test-agent-statusline-meter.sh",
+   "scripts/tests/test-bench-agentic-ramp.sh",
+   "scripts/tests/test-bench-card.sh",
+   "scripts/tests/test-cache-share.sh",
+   "scripts/tests/test-catalog-baseline.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 0,
+   "failed": 8
+  },
+  "checks_head": {
+   "passed": 8,
+   "failed": 0
+  }
+ },
+ "1573": {
+  "n": 1573,
+  "src_files": [
+   "docs/QUALITY_TEST.md",
+   "scripts/lib/thinking-budget.sh"
+  ],
+  "p2p": [
+   "scripts/tests/test-quality-passthrough.sh"
+  ],
+  "p2p_candidates": 1,
+  "checks_base": {
+   "passed": 0,
+   "failed": 2
+  },
+  "checks_head": {
+   "passed": 1,
+   "failed": 0
+  }
+ },
+ "1588": {
+  "n": 1588,
+  "src_files": [
+   "AGENTS.md",
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-concurrency-probe-verdict.sh",
+   "scripts/tests/test-default-url-gateway.sh",
+   "scripts/tests/test-dsh-setup.sh",
+   "scripts/tests/test-hermes-setup.sh",
+   "scripts/tests/test-measurement-record.sh"
+  ],
+  "p2p_candidates": 13,
+  "checks_base": {
+   "passed": 14,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 18,
+   "failed": 0
+  }
+ },
+ "1608": {
+  "n": 1608,
+  "src_files": [
+   "models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml"
+  ],
+  "p2p": [
+   "scripts/tests/test-catalog-derivation-robustness.sh",
+   "scripts/tests/test-caveat-patch-ambiguity.sh",
+   "scripts/tests/test-compose-cache-ownership.sh",
+   "scripts/tests/test-compose-draft-sample-method.sh",
+   "scripts/tests/test-compose-image-drift.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 0,
+   "failed": 1
+  },
+  "checks_head": {
+   "passed": 0,
+   "failed": 0
+  }
+ },
+ "1610": {
+  "n": 1610,
+  "src_files": [
+   "scripts/lib/profiles/patch_attribution.py",
+   "scripts/lib/profiles/patches.yml"
+  ],
+  "p2p": [
+   "scripts/tests/test-caveat-patch-ambiguity.sh",
+   "scripts/tests/test-compose-sampler-profiles.sh",
+   "scripts/tests/test-docs-slugs-resolve.sh",
+   "scripts/tests/test-fa2-artifact.sh",
+   "scripts/tests/test-fa2-envelope.sh"
+  ],
+  "p2p_candidates": 13,
+  "checks_base": {
+   "passed": 0,
+   "failed": 0
+  },
+  "checks_head": {
+   "passed": 0,
+   "failed": 0
+  }
+ },
+ "1612": {
+  "n": 1612,
+  "src_files": [
+   "scripts/lib/profiles/patch_attribution.py"
+  ],
+  "p2p": [
+   "scripts/tests/test-generate-compose.sh",
+   "scripts/tests/test-pull.sh"
+  ],
+  "p2p_candidates": 2,
+  "checks_base": {
+   "passed": 0,
+   "failed": 0
+  },
+  "checks_head": {
+   "passed": 0,
+   "failed": 0
+  }
+ },
+ "1621": {
+  "n": 1621,
+  "src_files": [
+   "docs/QUALITY_TEST.md",
+   "scripts/lib/quality_line.py",
+   "scripts/quality-test.sh"
+  ],
+  "p2p": [
+   "scripts/tests/test-default-url-gateway.sh",
+   "scripts/tests/test-hermes-reachability.sh",
+   "scripts/tests/test-quality-baseline.sh",
+   "scripts/tests/test-quality-card.sh",
+   "scripts/tests/test-quality-passthrough.sh"
+  ],
+  "p2p_candidates": 15,
+  "checks_base": {
+   "passed": 0,
+   "failed": 0
+  },
+  "checks_head": {
+   "passed": 1,
+   "failed": 0
+  }
+ }
+}

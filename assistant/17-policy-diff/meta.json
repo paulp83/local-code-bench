@@ -1,0 +1,9 @@
+{
+  "id": "17-policy-diff",
+  "source": "novel",
+  "category": "documents",
+  "difficulty": "hard",
+  "est_minutes": 15,
+  "needs_web": false,
+  "notes": "Novel: clause identity by title, so renumbered/changed/added/removed must be told apart."
+}

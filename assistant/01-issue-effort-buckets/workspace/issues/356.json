@@ -1,0 +1,10 @@
+{
+  "number": 356,
+  "title": "kv cache size message unclear",
+  "labels": [
+    "enhancement"
+  ],
+  "files_touched": 6,
+  "has_repro": true,
+  "needs_gpu": true
+}

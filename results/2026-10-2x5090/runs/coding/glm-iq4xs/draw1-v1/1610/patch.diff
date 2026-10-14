@@ -1,0 +1,153 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..1fe0052 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -401,6 +401,17 @@ def service_body(text: str) -> str:
+ # invoke artifacts (as declared in patches.yml / Phase-A-prime
+ # delivery_spec) are present in the service body.
+ # --------------------------------------------------------------------------
++_GENERIC_PATCH_PARENTS = {"patches", "local", "."}
++# Filenames so common in this estate that they identify nothing.
++_GENERIC_FILENAMES = {
++    "install.sh",
++    "apply.py",
++    "patch.py",
++    "install_artifact.py",
++    "envelope.sh",
++    "sitecustomize.py",
++}
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -437,7 +448,25 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+ 
+     script = spec.get("script")
+     if script:
+-        inv.append(Path(script).name)
++        script_name = Path(script).name
++        # The install script lives in the patch's own directory, which is
++        # what a compose bind-mounts. The bare filename is NOT identifying
++        # (`install.sh` appears in every compose that runs any install
++        # script), so also offer the patch dir's own name - it is unique
++        # per patch, and vanishes from the body the moment the mount is
++        # removed. Skipped for generic parents (`patches/`, `local/`).
++        parent = Path(script).parent.name
++        if parent not in _GENERIC_PATCH_PARENTS:
++            vol.append(parent)
++            inv.append(parent)
++        if script_name not in _GENERIC_FILENAMES:
++            inv.append(script_name)
++        elif mounted_at:
++            # A generic script filename identifies nothing on its own, so
++            # anchor the invoke to the declared mount target instead: the
++            # compose must still reference the mounted patch dir for the
++            # invoke line to count as wired.
++            inv.append(mounted_at)
+ 
+     invoke = spec.get("invoke")
+     # Only treat `invoke` as a literal body marker when it is an actual
+@@ -496,6 +525,25 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     return (bool(vol_markers) and vol_ok) or (bool(inv_markers) and inv_ok)
+ 
+ 
++def _legacy_file_marker(root: Path, rel: str) -> str | None:
++    """Identifying marker for a legacy `delivery:`-only entry's file/dir.
++
++    Deliberately NARROW: the old heuristic matched the bare filename
++    (``install.sh`` — present in every compose that runs any install
++    script) or, for directories, the parent's name (always ``patches`` —
++    present in every compose that mounts any patch dir), which made the
++    fallback vacuously true. Here a marker only counts if it names the
++    patch's own directory (for a directory entry) or is a filename that is
++    unique to the patch (for a file entry).
++    """
++    target = root / rel
++    if target.is_dir():
++        return Path(rel).name
++    name = Path(rel).name
++    if name in _GENERIC_PATCH_PARENTS or name in _GENERIC_FILENAMES:
++        return None
++    return name
++
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
+@@ -542,14 +590,17 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+ 
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+     # service body, so header/comment ID mentions never match.
++    #
++    # A patch that declares a `delivery_spec` already has a sound,
++    # self-describing wiring contract (mount target / invoke line), so the
++    # spec probe above gets the final say: the heuristic fallback below
++    # must NOT override a spec verdict, or an install-script entry whose
++    # mount + invoke have been removed from a compose can never be
++    # detected as unwired.
+     delivery = patch.get("delivery") or {}
+-    if delivery.get("entrypoint_invoke"):
++    if delivery.get("entrypoint_invoke") and not patch.get("delivery_spec"):
+         for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
++            if _legacy_file_marker(root, rel) in body:
+                 return True
+         if patch["id"] in body:
+             return True
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 6f4aabf..af8c323 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -18,6 +18,7 @@ from __future__ import annotations
+ 
+ import re
+ import sys
++import tempfile
+ from pathlib import Path
+ 
+ root = Path(sys.argv[1])
+@@ -427,6 +428,41 @@ for patch in patches:
+         errors.append(f"patch {patch.get('id')}: {len(_unlisted)} slug(s) mount its template but are missing "
+                       f"from load_bearing_when (generate_compose would leave the template out): {_unlisted}")
+ 
++# ---------------------------------------------------------------------------
++# NEGATIVE CONTROL â the legacy `delivery:` fallback must not override the
++# sound delivery_spec verdict. Strip a patch's mount + invoke lines from a
++# copy of a compose that carries it and assert reaches() == False. The old
++# fallback matched the bare filename (`install.sh`) or the parent dir name
++# (`patches`), so a stripped compose still reported True and an unwired
++# install-script patch was undetectable.
++for _patch in patches:
++    _spec = _patch.get("delivery_spec") or {}
++    if not (_spec.get("script") or _spec.get("sidecar")):
++        continue
++    _needles = [
++        _patch["id"],
++        _spec.get("mounted_at") or "",
++        Path(_spec.get("script") or _spec.get("sidecar")).parent.name,
++    ]
++    _needles = [n for n in _needles if n]
++    for _lb in _patch.get("load_bearing_when") or []:
++        for _slug in _lb.get("composes") or []:
++            _entry = COMPOSE_REGISTRY.get(_slug)
++            _cp = _compose_path(_entry) if _entry else None
++            if not _cp or not (root / _cp).exists():
++                continue
++            _text = (root / _cp).read_text(encoding="utf-8")
++            _kept = [l for l in _text.splitlines() if not any(n in l for n in _needles)]
++            if len(_kept) == len(_text.splitlines()):
++                continue  # nothing left to strip â not a meaningful control
++            _stripped = Path(tempfile.mkdtemp()) / Path(_cp).name
++            _stripped.write_text("\n".join(_kept), encoding="utf-8")
++            if reaches(_patch, str(_stripped)):
++                errors.append(
++                    f"{_patch['id']}: reaches() still True on {Path(_cp).name} with its "
++                    f"mount + invoke stripped (legacy fallback overriding delivery_spec)"
++                )
++
+ if known_gaps:
+     print("[patch-attribution] known delivery gaps:")
+     for gap in sorted(known_gaps):

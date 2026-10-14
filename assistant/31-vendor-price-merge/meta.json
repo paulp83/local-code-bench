@@ -1,0 +1,24 @@
+{
+  "id": "31-vendor-price-merge",
+  "set": "hard-v1",
+  "axis": "C",
+  "source": "novel",
+  "category": "conflicting-sources",
+  "difficulty": "hard",
+  "est_minutes": 35,
+  "needs_web": false,
+  "notes": "A naive concat-and-compare treats `ax-107` and `AX107` as different SKUs, compares Birch's case price against unit prices, and misses the SKU whose raw numbers match while Birch's is per case. Fails: merged-prices-and-vendors, conflicts-skus-exact, conflicts-no-false-positives/misses.",
+  "spec_map": {
+    "merged-header": "`/workspace/merged.csv` with header `sku,description,unit_price,vendors`",
+    "merged-skus-exact": "one row per SKU sorted by SKU",
+    "merged-sorted": "one row per SKU sorted by SKU",
+    "merged-prices-and-vendors": "`unit_price` with 2 decimals, or empty if the SKU is in conflict",
+    "merged-descriptions": "`description` from the first vendor in the order Alder, Birch, Cobalt that lists it",
+    "conflicts-parses": "`/workspace/conflicts.json`: an object mapping each conflicting SKU",
+    "conflicts-skus-exact": "Report **exactly** the conflicting SKUs, no others.",
+    "conflicts-no-false-positives": "Report **exactly** the conflicting SKUs, no others.",
+    "conflicts-no-misses": "Report **exactly** the conflicting SKUs, no others.",
+    "conflicts-detail": "`{vendor: [unit prices as 2-decimal strings, ascending, no repeats]}` for the vendors that list it",
+    "conflict-rows-blank-price": "`unit_price` with 2 decimals, or empty if the SKU is in conflict"
+  }
+}

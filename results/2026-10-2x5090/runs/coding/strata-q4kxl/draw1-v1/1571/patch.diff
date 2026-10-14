@@ -1,0 +1,244 @@
+diff --git a/scripts/report.sh b/scripts/report.sh
+index 133e585..e842ff6 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -203,6 +203,100 @@ gpu_power_caps() {
+       done
+ }
+ 
++# report_gpu_vram — one "GPU N idle VRAM: …" line per GPU, attributing each busy
++# card to the CONTAINER whose process actually holds it (#1537).
++#
++# The old code asked only "is ANY club-3090 container running?" and credited it
++# with every card above 100 MiB. On a rig where a second stack's tensor-parallel
++# workers owned other cards, report.sh told the maintainer our container held
++# GPUs it could not even see — `nvidia-smi` showed `VLLM::Worker_TP*` on cards
++# the running sglang container had no access to. Attribute PER CARD instead:
++#   1. `--query-compute-apps` names the holding PID on each card (by UUID);
++#   2. `docker top <c> -o pid` maps host PIDs back to a running container;
++#   3. `club_container_re` says whether that container is one of ours.
++# Our container is named against a card only when its own process is on it. A
++# busy card held by a foreign container is flagged as such, never credited to
++# us. A card with no attributable process keeps the original warning.
++report_gpu_vram() {
++  have nvidia-smi || return 0
++
++  local _vram_uuid _vram_apps
++  # Card identity: compute-apps keys on UUID, this section keys on index.
++  _vram_uuid="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)"
++  # Which PID is resident on which card (UUID).
++  _vram_apps="$(nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader,nounits 2>/dev/null || true)"
++
++  # host PID -> container name, for every RUNNING container. Best-effort: empty
++  # without docker, in which case attribution degrades to the generic warning.
++  local _vram_owner="" _vram_c _vram_p
++  if have docker && docker info >/dev/null 2>&1; then
++    while IFS= read -r _vram_c; do
++      [[ -z "$_vram_c" ]] && continue
++      while read -r _vram_p; do
++        [[ "$_vram_p" =~ ^[0-9]+$ ]] || continue
++        _vram_owner+="${_vram_p}"$'\t'"${_vram_c}"$'\n'
++      done < <(docker top "$_vram_c" -o pid 2>/dev/null)
++    done < <(docker ps --format '{{.Names}}' 2>/dev/null)
++  fi
++
++  local _vram_re _vram_idx _vram_used _vram_uu _vram_holders \
++        _vram_au _vram_ap _vram_name _vram_ours _vram_foreign
++  _vram_re="$(club_container_re 2>/dev/null || true)"
++
++  nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
++    | while IFS=, read -r _vram_idx _vram_used; do
++        _vram_idx="${_vram_idx# }"; _vram_used="${_vram_used# }"
++        _vram_idx="${_vram_idx% }"; _vram_used="${_vram_used% }"
++        [[ "$_vram_idx" =~ ^[0-9]+$ ]] || continue
++        [[ "$_vram_used" =~ ^[0-9]+$ ]] || continue
++        if (( _vram_used <= 100 )); then
++          echo "- **GPU $_vram_idx idle VRAM:** ${_vram_used} MiB ✓"
++          continue
++        fi
++
++        # Map this index to its UUID, then list every container with a process
++        # resident on that card.
++        _vram_uu="$(awk -F',' -v i="$_vram_idx" \
++            'function t(s){gsub(/^ +| +$/,"",s);return s} t($1)==i{print t($2); exit}' <<<"$_vram_uuid")"
++        _vram_holders=""
++        if [[ -n "$_vram_apps" && -n "$_vram_uu" ]]; then
++          while IFS=, read -r _vram_au _vram_ap; do
++            _vram_au="${_vram_au# }"; _vram_au="${_vram_au% }"
++            _vram_ap="${_vram_ap# }"; _vram_ap="${_vram_ap% }"
++            [[ "$_vram_au" == "$_vram_uu" ]] || continue
++            _vram_name="$(awk -F'\t' -v p="$_vram_ap" '$1==p{print $2; exit}' <<<"$_vram_owner")"
++            [[ -n "$_vram_name" ]] && _vram_holders+="${_vram_name}"$'\n'
++          done <<<"$_vram_apps"
++        fi
++        _vram_holders="$(sort -u <<<"$_vram_holders" | sed '/^$/d')"
++
++        # Split the holders into ours and not-ours.
++        _vram_ours=""; _vram_foreign=""
++        while IFS= read -r _vram_name; do
++          [[ -z "$_vram_name" ]] && continue
++          if [[ -n "$_vram_re" ]] && command grep -qE -- "$_vram_re" <<<"$_vram_name"; then
++            _vram_ours+="${_vram_ours:+, }\`${_vram_name}\`"
++          else
++            _vram_foreign+="${_vram_foreign:+, }\`${_vram_name}\`"
++          fi
++        done <<<"$_vram_holders"
++
++        if [[ -n "$_vram_ours" ]]; then
++          echo "- **GPU $_vram_idx idle VRAM:** ${_vram_used} MiB (held by running ${_vram_ours})"
++        elif [[ -n "$_vram_foreign" ]]; then
++          # Holders exist but are not one of ours (or the registry could not be
++          # read, in which case do not assert "not ours" — just name the holder).
++          if [[ -n "$_vram_re" ]]; then
++            echo "- **GPU $_vram_idx idle VRAM:** ${_vram_used} MiB ⚠ held by ${_vram_foreign} — another container, not a club-3090 engine"
++          else
++            echo "- **GPU $_vram_idx idle VRAM:** ${_vram_used} MiB (held by running ${_vram_foreign})"
++          fi
++        else
++          echo "- **GPU $_vram_idx idle VRAM:** ${_vram_used} MiB ⚠ something is using this GPU (display, browser, container)"
++        fi
++      done
++}
++
+ # ---------------------------------------------------------------------------
+ # Header
+ # ---------------------------------------------------------------------------
+@@ -756,27 +850,7 @@ section "Display / desktop state"
+     echo "- **Display processes running:** none detected"
+   fi
+ 
+-  if have nvidia-smi; then
+-    # Check if a club-3090 container is running (lightweight — full detection is later)
+-    # NB: top-level (not in a function) — plain assignment, not `local`.
+-    our_container=""
+-    if have docker && docker info >/dev/null 2>&1; then
+-      our_container=$(club_running_container)
+-    fi
+-    nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
+-      | while IFS=, read -r idx used; do
+-          idx="${idx# }"; used="${used# }"
+-          if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
+-            if [[ -n "$our_container" ]]; then
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
+-            else
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+-            fi
+-          else
+-            echo "- **GPU $idx idle VRAM:** ${used} MiB ✓"
+-          fi
+-        done
+-  fi
++  report_gpu_vram
+ } | redact
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/scripts/tests/test-report-gpu-vram.sh b/scripts/tests/test-report-gpu-vram.sh
+new file mode 100644
+index 0000000..4d1a4e0
+--- /dev/null
++++ b/scripts/tests/test-report-gpu-vram.sh
+@@ -0,0 +1,104 @@
++#!/usr/bin/env bash
++# test-report-gpu-vram — report.sh must attribute each GPU's VRAM to the
++# CONTAINER whose process actually holds that card (#1537).
++#
++# The old code asked only "is ANY club-3090 container running?" and credited it
++# with every card above 100 MiB. On a rig where a second stack's tensor-parallel
++# workers owned other cards, the report told the maintainer our sglang container
++# held GPUs 0 and 2 it could not even see, while nvidia-smi showed another
++# container's VLLM::Worker processes there.
++#
++# Contract asserted here (against stub nvidia-smi + docker):
++#   - an idle card reads as idle (the negative control);
++#   - a card held by one of our containers names that container;
++#   - a card held by a DIFFERENT container names that container, and never
++#     credits the running club container with a card it does not hold;
++#   - a card held by a non-club container is flagged as not ours;
++#   - with no docker, a busy card falls back to the generic warning rather
++#     than naming a container we cannot verify.
++set -uo pipefail
++export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++
++PASS=0; FAIL=0
++ok(){ PASS=$((PASS+1)); }
++no(){ echo "FAIL: $1" >&2; FAIL=$((FAIL+1)); }
++has(){ [[ "$2" == *"$3"* ]] && ok || no "$1: missing '$3' (got: $2)"; }
++hasnt(){ [[ "$2" != *"$3"* ]] && ok || no "$1: must NOT contain '$3' (got: $2)"; }
++
++tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
++mkdir -p "$tmp/bin"
++
++fn="$tmp/fn.sh"
++awk '/^report_gpu_vram\(\) \{/,/^}/' scripts/report.sh > "$fn"
++[[ -s "$fn" ]] || { echo "FAIL: report_gpu_vram() not found in report.sh"; exit 1; }
++
++# nvidia-smi + docker stubs are driven by $GPU_ROWS / $UUID_ROWS / $APP_ROWS and
++# a $PS / <container>.pids mapping.
++cat > "$tmp/bin/nvidia-smi" <<'EOS'
++#!/usr/bin/env bash
++case "$*" in
++  *"--query-gpu=index,uuid"*)     printf '%s\n' "${UUID_ROWS:-}" ;;
++  *"--query-compute-apps"*)       printf '%s\n' "${APP_ROWS:-}" ;;
++  *"--query-gpu=index,memory.used"*) printf '%s\n' "${GPU_ROWS:-}" ;;
++esac
++EOS
++cat > "$tmp/bin/docker" <<'EOS'
++#!/usr/bin/env bash
++case "$1" in
++  info) exit 0 ;;
++  ps)   [[ -f "$STUB/ps" ]] && cat "$STUB/ps" ;;
++  top)  [[ -f "$STUB/$2.pids" ]] && cat "$STUB/$2.pids" ;;
++esac
++EOS
++chmod +x "$tmp/bin"/*
++export STUB="$tmp"
++
++run(){
++  (
++    export PATH="$tmp/bin:$PATH"
++    have(){ command -v "$1" >/dev/null 2>&1; }
++    club_container_re(){ echo '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-|club3090-|tabbyapi-|exl3-)'; }
++    # shellcheck source=/dev/null
++    source "$fn"
++    report_gpu_vram
++  )
++}
++
++# --- the #1537 rig: GPU1 = our sglang, GPU0/2 = another vllm container's TP workers
++export UUID_ROWS=$'0, GPU-aaa\n1, GPU-bbb\n2, GPU-ccc'
++export GPU_ROWS=$'0, 18000\n1, 17500\n2, 2'
++export APP_ROWS=$'GPU-aaa, 100\nGPU-bbb, 200'
++printf 'vllm-other\nsglang-cmp170hx\n' > "$tmp/ps"
++printf '100\n' > "$tmp/vllm-other.pids"
++printf '200\n' > "$tmp/sglang-cmp170hx.pids"
++out="$(run)"
++
++# GPU 0 is now correctly attributed to vllm-other, NOT to the running sglang.
++has  "GPU0 named its real holder (not our single running container)" "$out" 'GPU 0 idle VRAM:** 18000 MiB (held by running `vllm-other`)'
++has  "GPU1 names our container" "$out" 'GPU 1 idle VRAM:** 17500 MiB (held by running `sglang-cmp170hx`)'
++has  "GPU2 idle reads as idle" "$out" 'GPU 2 idle VRAM:** 2 MiB ✓'
++hasnt "GPU0 no longer falsely credited to sglang-cmp170hx" "$out" 'GPU 0 idle VRAM:** 18000 MiB (held by running `sglang-cmp170hx`)'
++
++# --- a busy card held by a NON-club container is flagged, never called ours
++printf 'stack-x\nsglang-cmp170hx\n' > "$tmp/ps"
++printf '100\n' > "$tmp/stack-x.pids"
++out="$(run)"
++has "foreign holder flagged as not ours" "$out" 'GPU 0 idle VRAM:** 18000 MiB ⚠ held by `stack-x` — another container, not a club-3090 engine'
++
++# --- no docker: busy card with a resident process degrades to the generic warning
++(
++  export PATH="$tmp/bin:$PATH"
++  have(){ [ "$1" = nvidia-smi ]; }
++  club_container_re(){ return 1; }
++  # shellcheck source=/dev/null
++  source "$fn"
++  report_gpu_vram
++) > "$tmp/nodock" 2>&1
++out="$(cat "$tmp/nodock")"
++has "no docker -> generic warning" "$out" 'GPU 0 idle VRAM:** 18000 MiB ⚠ something is using this GPU (display, browser, container)'
++
++echo "test-report-gpu-vram: PASS $PASS, FAIL $FAIL"
++[[ "$FAIL" -eq 0 ]]

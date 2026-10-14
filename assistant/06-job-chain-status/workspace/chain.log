@@ -1,0 +1,16 @@
+2026-10-04T01:00:00Z [chain] boot: queue has 6 stages
+2026-10-04T01:00:03Z [chain] stage=fetch start
+2026-10-04T01:04:41Z [chain] stage=fetch done rc=0
+2026-10-04T01:04:45Z [chain] stage=quant start
+2026-10-04T01:04:50Z [gpu0] mem 1204MiB
+2026-10-04T01:09:12Z [chain] stage=quant FAILED rc=1 (disk full)
+2026-10-04T01:09:20Z [chain] stage=quant start (retry 1)
+2026-10-04T01:15:02Z [chain] stage=quant done rc=0
+2026-10-04T01:15:05Z [chain] stage=bench start
+2026-10-04T01:15:09Z [gpu1] mem 30114MiB
+2026-10-04T01:33:30Z [chain] stage=bench done rc=0
+2026-10-04T01:33:31Z [chain] stage=quality start
+2026-10-04T01:40:00Z [chain] stage=quality FAILED rc=137 (OOM)
+2026-10-04T01:40:02Z [chain] stage=report skipped (dependency quality failed)
+2026-10-04T01:40:03Z [chain] stage=publish skipped (dependency report not run)
+2026-10-04T01:40:04Z [chain] chain finished with failures

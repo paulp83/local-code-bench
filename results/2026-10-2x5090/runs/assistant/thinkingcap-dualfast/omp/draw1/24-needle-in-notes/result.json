@@ -1,0 +1,14 @@
+{
+ "task": "24-needle-in-notes",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 8.2,
+ "tool_calls": 5,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 4,
+ "checks_total": 4,
+ "partial": 1.0
+}

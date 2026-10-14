@@ -1,0 +1,22 @@
+{
+ "n": 1573,
+ "config": "thinkingcap-dualfast",
+ "draw": 2,
+ "exit_status": "Submitted",
+ "agent_s": 823.1,
+ "steps": 54,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 0.5,
+ "files_touched": [
+  "scripts/lib/thinking-budget.sh"
+ ],
+ "p2p_run": 1,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-quality-thinking-budget.sh": 1
+ }
+}

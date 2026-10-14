@@ -1,0 +1,26 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..5dbe92e 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -38,10 +38,19 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # recurrent / SSM state: DeepSeek logs it as `_comp_state: ... state buffer size`,
++    # GLM-family (and other hybrid) models log it as `llama_memory_recurrent: ... RS
++    # buffer size`. Match both, per device, summed (a drafter adds its own state).
++    state = {}
++    for _pat in (
++        r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB",
++        r"llama_memory_recurrent:\s+(CUDA\d).{0,60}?RS buffer size =\s+([\d.]+) MiB",
++    ):
++        for _dev, _val in _per_dev(text, _pat, agg=True).items():
++            state[_dev] = state.get(_dev, 0.0) + _val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

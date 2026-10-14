@@ -1,0 +1,22 @@
+{
+ "n": 1307,
+ "config": "glm-avar6-xhigh",
+ "draw": 1,
+ "exit_status": "TimeExceeded",
+ "agent_s": 3660.8,
+ "steps": 91,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 3,
+ "localization": 0.0,
+ "files_touched": [
+  "[]"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-preflight-model-path-extract.sh": 1
+ }
+}

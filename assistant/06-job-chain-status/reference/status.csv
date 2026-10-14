@@ -1,0 +1,7 @@
+stage,attempts,start,end,result,duration_s
+fetch,1,2026-10-04T01:00:03Z,2026-10-04T01:04:41Z,ok,278
+quant,2,2026-10-04T01:09:20Z,2026-10-04T01:15:02Z,ok,342
+bench,1,2026-10-04T01:15:05Z,2026-10-04T01:33:30Z,ok,1105
+quality,1,2026-10-04T01:33:31Z,2026-10-04T01:40:00Z,failed,389
+report,0,,,skipped,
+publish,0,,,skipped,

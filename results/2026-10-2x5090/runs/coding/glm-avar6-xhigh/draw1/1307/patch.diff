@@ -1,0 +1,126 @@
+diff --git a/[] b/[]
+new file mode 100644
+index 0000000..0c9d173
+--- /dev/null
++++ b/[]
+@@ -0,0 +1,2 @@
++3 var  -> [a\b]
++echo 4 %? - var on plain -
+diff --git "a/[a\\]\nv3='abc'; echo 5" "b/[a\\]\nv3='abc'; echo 5"
+new file mode 100644
+index 0000000..e69de29
+diff --git a/scripts/tests/test-preflight-compose-deps.sh b/scripts/tests/test-preflight-compose-deps.sh
+index 1a44e11..4ebe657 100755
+--- a/scripts/tests/test-preflight-compose-deps.sh
++++ b/scripts/tests/test-preflight-compose-deps.sh
+@@ -27,6 +27,55 @@ assert_not_contains() {
+   fi
+ }
+ 
++# --- #1305 guard: the general form of the bug -------------------------------
++# Run the in-container HF-path extractor over EVERY compose in the repo and
++# assert that no captured subdir contains a character that cannot appear in a
++# directory name (backslash, quote, brace). That is the shape of both the
++# trailing-backslash refusal (#1305) and the earlier `${MODEL_SUBDIR`
++# truncation that the extractor's char-class comment describes.
++guard_no_bad_subdirs() {
++  local out
++  out="$(_preflight_guard_bad_subdirs 2>&1)"
++  if [[ -n "$out" ]]; then
++    echo "ASSERTION FAILED: compose HF-subdir guard failed" >&2
++    echo "$out" >&2
++    exit 1
++  fi
++}
++
++# emits a "<compose>: <kind> [<value>]" line per offending capture
++_preflight_guard_bad_subdirs() {
++  local f tok sd c
++  # the extractor + resolver live in the sourced library
++  # shellcheck disable=SC1090
++  source "${ROOT_DIR}/scripts/preflight.sh"
++  local files=()
++  while IFS= read -r f; do
++    files+=("$f")
++  done < <(find "${ROOT_DIR}/models" -name '*.yml' -o -name '*.yaml' 2>/dev/null | sort)
++  for f in "${files[@]}"; do
++    while IFS= read -r tok; do
++      # (a) the RAW capture must stop at a real delimiter. A backslash in it
++      #     means the class ate the backslash of an escaped JSON quote (#1305);
++      #     a quote or comma means it ran past the end of the token.
++      for c in '\' '"' ','; do
++        if [[ "$tok" == *"$c"* ]]; then
++          printf '%s: greedy capture [%s]\n' "$f" "$tok"
++        fi
++      done
++      # (b) the RESOLVED subdir must be a plausible directory name: a brace
++      #     left over means the ${VAR:-default} resolver never ran.
++      sd="$(_preflight_compose_vllm_subdir "$tok")"
++      for c in '\' '"' '{' '}'; do
++        if [[ "$sd" == *"$c"* ]]; then
++          printf '%s: bad subdir [%s]\n' "$f" "$sd"
++        fi
++      done
++    done < <(_preflight_compose_hf_cache_tokens "$f")
++  done
++}
++
++
+ run_deps() {
+   local compose="$1"
+   local model_dir="$2"
+@@ -193,4 +242,54 @@ touch "${TMP_DIR}/bl-models/qwen3.6-27b-gguf/anbeeld-dflash-iq4xs/Qwen3.6-27B-DF
+ out="$(run_deps "$beellama_compose" "${TMP_DIR}/bl-models")"
+ [[ -z "$out" ]]
+ 
++# --- #1305: the extractor must not capture a trailing backslash -------------
++# JSON-escaped spec args write the drafter path inside escaped quotes, so the
++# closing `"` is preceded by a `\`. With `\` missing from the exclusion class
++# the match ran past the dir name and ate the `\`, producing subdir `<dir>\`
++# and a config.json probe for `<dir>\/config.json` -- a path that can never
++# exist, so preflight refused every gemma external-drafter slug unconditionally.
++esc_compose="${TMP_DIR}/esc.yml"
++cat > "$esc_compose" <<'YAML'
++services:
++  vllm:
++    image: vllm/vllm-openai:v0.21.0
++    command:
++      - --model
++      - /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit
++      - --speculative-config
++      - '{"model":"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant","num_speculative_tokens":4}'
++YAML
++out="$(expect_missing "$esc_compose" "${TMP_DIR}/empty-models")"
++assert_contains "$out" "gemma-4-26b-a4b-it-assistant/config.json"
++assert_not_contains "$out" "it-assistant\\/config.json"
++assert_not_contains "$out" "it-assistant\\\\"
++mkdir -p "${TMP_DIR}/empty-models/gemma-4-26b-a4b-awq-4bit" "${TMP_DIR}/empty-models/gemma-4-26b-a4b-it-assistant"
++touch "${TMP_DIR}/empty-models/gemma-4-26b-a4b-awq-4bit/config.json" "${TMP_DIR}/empty-models/gemma-4-26b-a4b-it-assistant/config.json"
++out="$(run_deps "$esc_compose" "${TMP_DIR}/empty-models")"
++[[ -z "$out" ]]
++
++# same shape, via the ${SPEC_MODEL_SUBDIR:-default} flavour the extractor must
++# still NOT truncate (the gemma-4-12b composes)
++esc_default="${TMP_DIR}/esc-default.yml"
++cat > "$esc_default" <<'YAML'
++services:
++  vllm:
++    image: vllm/vllm-openai:v0.21.0
++    command:
++      - --model
++      - /root/.cache/huggingface/${MODEL_SUBDIR:-gemma-4-12b-qat-w4a16}
++      - --speculative-config
++      - "{\"model\":\"/root/.cache/huggingface/${SPEC_MODEL_SUBDIR:-gemma-4-12b-it-assistant}\",\"num_speculative_tokens\":4}"
++YAML
++out="$(expect_missing "$esc_default" "${TMP_DIR}/empty-models")"
++assert_contains "$out" "gemma-4-12b-qat-w4a16/config.json"
++assert_contains "$out" "gemma-4-12b-it-assistant/config.json"
++assert_not_contains "$out" "it-assistant\\\\"
++mkdir -p "${TMP_DIR}/empty-models/gemma-4-12b-qat-w4a16" "${TMP_DIR}/empty-models/gemma-4-12b-it-assistant"
++touch "${TMP_DIR}/empty-models/gemma-4-12b-qat-w4a16/config.json" "${TMP_DIR}/empty-models/gemma-4-12b-it-assistant/config.json"
++out="$(run_deps "$esc_default" "${TMP_DIR}/empty-models")"
++[[ -z "$out" ]]
++
++guard_no_bad_subdirs
++
+ echo "test-preflight-compose-deps: ok"

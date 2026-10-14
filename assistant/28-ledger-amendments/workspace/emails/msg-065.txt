@@ -1,0 +1,8 @@
+From: vendor-help@example.net
+Date: 2026-07-19T03:35:00Z
+Subject: ledger amendment
+
+The amount on T-02613 should have been $126.59, not what is in the ledger.
+
+Thanks,
+vendor-help

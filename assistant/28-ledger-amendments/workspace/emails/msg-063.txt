@@ -1,0 +1,8 @@
+From: tess@example.net
+Date: 2026-07-04T19:42:00Z
+Subject: ledger amendment
+
+T-02797 was keyed wrong, set it to $463.98.
+
+Thanks,
+tess

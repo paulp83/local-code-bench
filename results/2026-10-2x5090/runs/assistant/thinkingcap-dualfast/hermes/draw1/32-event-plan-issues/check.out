@@ -1,0 +1,14 @@
+PASS issues-parses
+PASS issues-sorted-by-code
+PASS issue-found-CAPACITY
+PASS issue-found-CATERING_SHORT
+PASS issue-found-OVER_BUDGET
+PASS issue-found-TIME_MISMATCH
+PASS issue-found-WEEKDAY_MISMATCH
+PASS no-invented-issues
+PASS issue-count-exact
+PASS plan-date
+PASS plan-venue
+PASS plan-confirmed-guests
+PASS plan-open-issues
+PASS: 13 FAIL: 0

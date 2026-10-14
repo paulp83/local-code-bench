@@ -1,0 +1,24 @@
+{
+ "n": 1555,
+ "config": "glm-avar6-xhigh",
+ "draw": 1,
+ "exit_status": "LimitsExceeded",
+ "agent_s": 3642.5,
+ "steps": 100,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 15,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/concurrency-probe.sh",
+  "scripts/lib/concurrency_probe.py",
+  "scripts/lib/run_context.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-concurrency-probe.sh": 0
+ }
+}

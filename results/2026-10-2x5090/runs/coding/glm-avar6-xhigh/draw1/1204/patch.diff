@@ -1,0 +1,1310 @@
+diff --git a/scripts/lib/profiles/compose_registry.py b/scripts/lib/profiles/compose_registry.py
+index 31b69e8..319c05e 100644
+--- a/scripts/lib/profiles/compose_registry.py
++++ b/scripts/lib/profiles/compose_registry.py
+@@ -53,6 +53,37 @@ COMPOSE_STATUS_EMOJI = {
+ }
+ 
+ 
++
++# --- Catalog provenance: the `origin` field (#1202 P2) -----------------------
++#
++# Every registry entry now carries WHERE IT CAME FROM as a first-class field,
++# instead of every consumer re-deriving it from the slug prefix
++# (`slug.startswith("local/")`). That inference is load-bearing and scheduled to
++# DIE: P3 of #1202 retires the `local/` namespace so a slug stops being RENAMED
++# when its provenance changes. Publishing already renames today -- export_pr.py
++# strips `local/` and re-prefixes the compose-derived engine namespace -- and
++# after the hard-cut that arithmetic collapses to identity, so publish becomes a
++# pure VALUE flip and a user's scripts, notes and compose pins survive it.
++# promote.py, demote.py, export_pr.py and the cockpit are the prefix-dependent
++# consumers this field retires.
++#
++#   core  - a curated catalog row (scripts/lib/profiles/registry.yaml,
++#           git-tracked, edited by a maintainer PR).
++#   local - a community LOCAL-layer row (scripts/lib/profiles-local/
++#           registry.local.json, gitignored; written by promote.py --layer
++#           local).
++#
++# CORE WINS. `origin` defaults to the curated layer: a core row says nothing
++# because there is nothing else to say, and only a local row declares itself.
++# The merged view (get_registry) applies the same precedence whenever the two
++# layers could meet. Never re-infer provenance from a slug prefix again -- read
++# the field (entry_origin / slug_origin below).
++ORIGIN_CORE = "core"
++ORIGIN_LOCAL = "local"
++ORIGIN_VALUES = (ORIGIN_CORE, ORIGIN_LOCAL)
++
++
++
+ def _entry(
+     *,
+     model,
+@@ -190,11 +221,22 @@ def _entry(
+     spec_method=None,
+     category=None,
+     weights_companions=None,
++    # Catalog provenance (#1202 P2) -- the field this entry CAME FROM, replacing
++    # every `slug.startswith("local/")` inference. Defaults to the curated layer
++    # (CORE WINS): a registry.yaml row says nothing because there is nothing else
++    # to say, and only a LOCAL-layer row declares itself -- promote.py --layer
++    # local stamps ORIGIN_LOCAL and the local loader refuses anything else. Read
++    # it with entry_origin()/slug_origin(); never re-derive it from the slug.
++    origin=ORIGIN_CORE,
+ ):
+     if status not in STATUS_VALUES:
+         raise ValueError(
+             f"{compose_path}: status={status!r} not in {STATUS_VALUES}"
+         )
++    if origin not in ORIGIN_VALUES:
++        raise ValueError(
++            f"{compose_path}: origin={origin!r} not in {ORIGIN_VALUES}"
++        )
+     entry = {
+         "model": model,
+         "weights_variant": weights_variant,
+@@ -233,6 +275,9 @@ def _entry(
+         # .get() without shape forks between core and local entries.
+         "gateway": bool(gateway),
+         "serve_aliases": list(serve_aliases),
++        # Provenance (#1202 P2): always present, like gateway/serve_aliases, so
++        # a consumer never shape-forks between a core and a local row.
++        "origin": origin,
+     }
+     if recommended_engine_features:
+         entry["recommended_engine_features"] = list(recommended_engine_features)
+@@ -417,6 +462,10 @@ _REGISTRY_YAML_HEADER = """\
+ #   * Entry rows are `_entry(**kwargs)` argument maps — the same schema as
+ #     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` are
+ #     derived by _entry() and MUST NOT appear here.
++#   * `origin` IS a real field (#1202 P2): every curated row declares
++#     `origin: core`, and a LOCAL-layer row declares `origin: local`. Read it
++#     with entry_origin()/slug_origin() — never re-derive provenance from the
++#     slug prefix.
+ # ===========================================================================
+ """
+ 
+@@ -790,6 +839,11 @@ LOCAL_LAYER_DIR_REL = "scripts/lib/profiles-local"
+ LOCAL_REGISTRY_REL = "scripts/lib/profiles-local/registry.local.json"
+ # The slug namespace every LOCAL entry lives under (promote.py --layer local
+ # enforces it at write time; the loader refuses anything else).
++#
++# #1202 P2: the namespace is no longer how provenance is READ — that is the
++# first-class `origin` field (ORIGIN_LOCAL, stamped by load_local_registry).
++# The prefix stays a WRITE-TIME constraint only, until P3 retires it and a slug
++# stops being renamed when its provenance flips.
+ LOCAL_SLUG_PREFIX = "local/"
+ 
+ 
+@@ -814,9 +868,17 @@ def load_local_registry(root=None):
+     Plain-dict entries (the JSON form of _entry kwargs) are wrapped through
+     _entry(**kwargs) so a local row carries EXACTLY the same shape + defaults
+     as a core row. ANY problem — unreadable JSON, a non-object, an unknown
+-    kwarg, a bad status, a slug outside the `local/` namespace, or a slug /
+-    model-id colliding with a core row (or another local row) — raises
+-    LocalRegistryError. Loud, never a silent partial catalog."""
++    kwarg, a bad status, a slug outside the `local/` namespace, a row whose
++    `origin` disagrees with the layer it lives in, or a slug / model-id
++    colliding with a core row (or another local row) — raises
++    LocalRegistryError. Loud, never a silent partial catalog.
++
++    `origin` is STAMPED here (#1202 P2): the file's location decides
++    provenance, so every row this loader returns is unambiguously ORIGIN_LOCAL
++    whether or not promote.py wrote the field yet (pre-P2 rows omit it). A row
++    that explicitly claims the curated layer is a contradiction and is refused —
++    "core wins" is the merged view's precedence rule, not something a local row
++    can assert about itself."""
+     root = Path(root) if root is not None else local_layer_root()
+     path = root / LOCAL_REGISTRY_REL
+     if not path.exists():
+@@ -850,8 +912,17 @@ def load_local_registry(root=None):
+             )
+         if model in local_models:
+             raise LocalRegistryError(f"{path}: duplicate local model id {model!r}")
++        declared = kwargs.get("origin")
++        if declared is not None and declared != ORIGIN_LOCAL:
++            raise LocalRegistryError(
++                f"{path}: local entry {slug!r} declares origin={declared!r} — "
++                f"a row in this layer is {ORIGIN_LOCAL!r} by construction; say "
++                f"{ORIGIN_LOCAL!r} or omit the field"
++            )
+         try:
+-            entry = _entry(**kwargs)
++            wrapped = dict(kwargs)
++            wrapped["origin"] = ORIGIN_LOCAL
++            entry = _entry(**wrapped)
+         except TypeError as exc:
+             raise LocalRegistryError(
+                 f"{path}: local entry {slug!r} has bad _entry kwargs: {exc}"
+@@ -870,15 +941,42 @@ def get_registry(root=None):
+     — zero behavior change on a pristine checkout). Slug lookups at runtime
+     read THIS; DEFAULTS / ENGINE_PREFERENCE / RECOMMENDED_DEFAULT_MODELS stay
+     core-only. Raises LocalRegistryError when a present local layer is broken —
+-    a half-working catalog is worse than a loud failure."""
++    a half-working catalog is worse than a loud failure.
++
++    #1202 P2 — CORE WINS: a curated row is authoritative, so a local row can
++    never shadow one here. Unreachable while the loader still enforces the
++    `local/` namespace (a core slug is always `<engine>/<name>`), but it is the
++    merge rule the P3 hard-cut relies on once local slugs share that shape, and
++    it costs nothing to make the precedence explicit instead of accidental."""
+     local = load_local_registry(root)
+     if not local:
+         return COMPOSE_REGISTRY
+     merged = dict(COMPOSE_REGISTRY)
+-    merged.update(local)
++    for slug, entry in local.items():
++        if slug in merged:  # core wins (#1202 P2) — the curated row is authoritative
++            continue
++        merged[slug] = entry
+     return merged
+ 
+ 
++def entry_origin(entry):
++    """The provenance a registry entry declares: ORIGIN_CORE or ORIGIN_LOCAL.
++
++    Reads the first-class `origin` field (#1202 P2) — NEVER the slug prefix,
++    which P3 retires. An entry without the field (a raw kwargs dict, e.g. out of
++    parse_registry_text) resolves to the curated layer: core wins."""
++    if not isinstance(entry, dict):
++        return ORIGIN_CORE
++    return entry.get("origin") or ORIGIN_CORE
++
++
++def slug_origin(slug, root=None):
++    """The provenance of a registry slug: ORIGIN_CORE / ORIGIN_LOCAL, or None
++    when the slug is unknown to the merged catalog."""
++    entry = get_registry(root).get(slug)
++    return entry_origin(entry) if entry else None
++
++
+ # --- PR-B: model-default resolver knobs (maintainer-owned, design §13.3) ----
+ #
+ # RECOMMENDED_DEFAULT_MODELS and ENGINE_PREFERENCE are DATA now — they live in
+diff --git a/scripts/lib/profiles/demote.py b/scripts/lib/profiles/demote.py
+index 028c71e..19a05bd 100755
+--- a/scripts/lib/profiles/demote.py
++++ b/scripts/lib/profiles/demote.py
+@@ -47,6 +47,11 @@ _LOCAL_COMPOSES_REL = f"{_LOCAL_DIR_REL}/composes"
+ _LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
+ 
+ _LOCAL_NS = "local/"
++# The provenance every row in this layer declares (#1202 P2). Mirrored locally
++# (like _LOCAL_NS mirrors compose_registry.LOCAL_SLUG_PREFIX) because this tool
++# deliberately stays standalone: it works on the RAW registry.local.json and
++# never imports the loader that would re-derive the same fact.
++_LOCAL_ORIGIN = "local"
+ 
+ EXIT_COLLISION = 3
+ EXIT_INTERNAL = 2
+@@ -102,6 +107,17 @@ def plan_removal(root: Path, slug: str) -> dict:
+         raise Refusal(f"{slug} is not in {_LOCAL_REGISTRY_REL}. Registered: {known}")
+ 
+     entry = raw[slug] if isinstance(raw.get(slug), dict) else {}
++    # Provenance is first-class (#1202 P2) and it is the field a removal tool
++    # must TRUST, not the slug prefix: an entry whose row declares the curated
++    # layer is not this tool's to remove even if a hand-edited slug still says
++    # `local/`. Absent = a pre-P2 row, still unambiguously local.
++    declared = entry.get("origin")
++    if declared is not None and declared != _LOCAL_ORIGIN:
++        raise Refusal(
++            f"{slug} declares origin={declared!r} -- not a {_LOCAL_ORIGIN!r}-layer "
++            "row, so it is not removable here (a curated entry is git-tracked "
++            "and git is its removal tool)"
++        )
+     mid = _model_id_for(slug, entry)
+ 
+     profile = root / _LOCAL_MODELS_REL / f"{mid}.yml"
+diff --git a/scripts/lib/profiles/export_pr.py b/scripts/lib/profiles/export_pr.py
+index 4369d89..b896801 100755
+--- a/scripts/lib/profiles/export_pr.py
++++ b/scripts/lib/profiles/export_pr.py
+@@ -65,6 +65,17 @@ _MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+ EXIT_COLLISION = 3   # refusal — missing/incomplete local id, nothing written
+ EXIT_INTERNAL = 2
+ 
++# Catalog provenance (#1202 P2): the first-class `origin` field a registry row
++# carries. Mirrors compose_registry.ORIGIN_CORE (the loader is the single source
++# of truth) — duplicated here the same way _LOCAL_SLUG_PREFIX mirrors
++# compose_registry.LOCAL_SLUG_PREFIX, because this file deliberately imports the
++# loader through registry_module(root) (target-root resolved) rather than at
++# module load.
++ORIGIN_CORE = "core"
++# The LOCAL-layer value of the same field (compose_registry.ORIGIN_LOCAL) --
++# the provenance every row this tool READS must declare.
++_ORIGIN_LOCAL = "local"
++
+ 
+ class Refusal(Exception):
+     """A bad-shape / incomplete-id refusal → exit 3, nothing written."""
+@@ -140,6 +151,16 @@ def load_local_state(root: Path, mid: str) -> dict:
+                 f"registry slug {e['slug']!r} lacks the {_LOCAL_SLUG_PREFIX!r} "
+                 "namespace — not a LOCAL-layer entry"
+             )
++        # Provenance is first-class (#1202 P2): a row that DECLARES the curated
++        # layer cannot be exported as one. Absent = a pre-P2 row, still
++        # unambiguously local by its `local/` slug.
++        declared = e["kwargs"].get("origin")
++        if declared is not None and declared != _ORIGIN_LOCAL:
++            raise Refusal(
++                f"{e['slug']}: declares origin={declared!r} -- not a "
++                f"{_ORIGIN_LOCAL!r}-layer entry, so there is nothing to export "
++                "to the curated catalog"
++            )
+     return {
+         "model_id": mid,
+         "profile_path": profile_path,
+@@ -271,7 +292,16 @@ def core_compose_rel(mid: str, local_compose_rel: str) -> str:
+ 
+ def translated_entry(state: dict, entry: dict) -> dict:
+     """One LOCAL registry entry → its CORE ``_entry(...)`` kwargs (pure copy —
+-    the local JSON is never mutated)."""
++    the local JSON is never mutated).
++
++    Provenance is part of the translation (#1202 P2): the exported row declares
++    ``origin="core"`` — the curated catalog it is headed for — instead of
++    inheriting anything from the slug. Today the slug itself is still RENAMED
++    here (``local/`` stripped, the compose-derived engine namespace prefixed:
++    the ``<engine>/<name>`` shape P3 gives local slugs), so publishing is a
++    rename plus an origin flip. After the P3 hard-cut the slug arithmetic below
++    collapses to identity and this becomes a pure value flip, which is the whole
++    point: a user's scripts, notes and compose pins survive publish."""
+     mid = state["model_id"]
+     kw = dict(entry["kwargs"])
+     cpath = str(kw["compose_path"])
+@@ -280,6 +310,7 @@ def translated_entry(state: dict, entry: dict) -> dict:
+     if not kw.get("kvcalc_key"):
+         kw["kvcalc_key"] = "SKIP"  # llama.cpp family default; vLLM was gated above
+     core_slug = f"{ns}/{str(entry['slug'])[len(_LOCAL_SLUG_PREFIX):]}"
++    kw["origin"] = ORIGIN_CORE
+     return {"slug": core_slug, "kwargs": kw}
+ 
+ 
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index bea1bd7..935d5e1 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -20,10 +20,15 @@ The spec is the JSON dict the c3 scaffold computed (``compute_promote_scaffold``
+       "compatible_drafters": [...],             # optional
+       "vision_capable": true|false|null,        # null → omitted
+       "compose": {"path": "...", "content": "<yaml text>"},
+-      "registry_entry": {"slug": "<engine>/...", "kwargs": {...}},
++      "registry_entry": {"slug": "<engine>/...", "kwargs": {...}},   # see origin below
+       "setup": {...}                            # optional C1 `setup:` block
+     }
+ 
++`kwargs.origin` (#1202 P2) is the row's provenance, declared IN THE DATA instead
++of being re-derived from the slug prefix: `"local"` for a LOCAL-layer row,
++`"core"` for a curated one. It is FORCED here to match ``--layer`` — a spec
++claiming the other layer is refused, never silently corrected — so publishing a
++local model upstream later is a VALUE flip, not a slug rename.
+ TWO write targets (--layer, DEFAULT **local**):
+ 
+ **local** (the community path — C4-rev).  Writes ONLY inside the gitignored
+@@ -35,7 +40,9 @@ TWO write targets (--layer, DEFAULT **local**):
+      (plain-dict ``_entry`` kwargs — never a python-source edit).
+ The slug MUST carry the ``local/`` namespace prefix and the entry is written
+ with ``status="incubating"`` (hidden from ``switch.sh --list``, ``--force`` to
+-launch — see compose_registry.STATUS_VALUES).
++launch — see compose_registry.STATUS_VALUES) and ``origin="local"``
++(#1202 P2 — provenance is a first-class field; the loader refuses a row that
++claims ``core`` while living in this layer).
+ 
+ **core** (maintainer-only).  Today's curated-catalog behavior:
+   1. ``scripts/lib/profiles/models/<model_id>.yml``
+@@ -240,6 +247,43 @@ def _import_compose_registry(root: Path, *, merged: bool):
+         raise Refusal(f"compose_registry.py does not import: {exc}")
+ 
+ 
++def _origin_for_layer(root: Path, layer: str) -> str:
++    """The `origin` provenance a registry row must declare for `layer` (#1202 P2).
++
++    ONE source of truth — compose_registry's ORIGIN_CORE / ORIGIN_LOCAL — so the
++    executor, the loader and the export translator can never disagree about what
++    a row's provenance is. Imported the same (root-resolved, lazy) way every
++    other compose_registry surface in this file is imported."""
++    sys.path.insert(0, str(root))
++    try:
++        from scripts.lib.profiles.compose_registry import (  # noqa: E402
++            ORIGIN_CORE,
++            ORIGIN_LOCAL,
++        )
++    except Exception as exc:
++        raise Refusal(f"compose_registry.py does not import: {exc}")
++    return ORIGIN_LOCAL if layer == "local" else ORIGIN_CORE
++
++
++def _stamp_origin(root: Path, layer: str, kwargs: dict) -> None:
++    """Declare the row's provenance IN THE DATA it is written as (#1202 P2).
++
++    Provenance is a first-class `origin` field now, not something consumers
++    re-derive from the slug prefix — so the executor writes it. The layer is the
++    authority (promote.py chose it via --layer), so the field is FORCED to
++    match and a spec claiming the other layer is refused rather than silently
++    corrected: a row that says `core` while living in the gitignored layer is
++    exactly the lie the field exists to prevent."""
++    want = _origin_for_layer(root, layer)
++    declared = kwargs.get("origin")
++    if declared is not None and declared != want:
++        raise Refusal(
++            f"registry kwargs.origin {declared!r} contradicts the {layer!r} layer "
++            f"this run writes — provenance is {want!r} by construction"
++        )
++    kwargs["origin"] = want
++
++
+ def _load_local_raw(root: Path) -> dict:
+     """The RAW registry.local.json dict ({} when absent). Bad JSON is a
+     refusal — we never overwrite a file we cannot parse."""
+@@ -426,6 +470,9 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+             )
+         # Force the incubating rung — a local entry never ships functional.
+         kwargs["status"] = _LOCAL_FORCED_STATUS
++        # ...and declare provenance in the row itself (#1202 P2) — the field a
++        # consumer reads instead of the slug prefix P3 retires.
++        _stamp_origin(root, "local", kwargs)
+ 
+         profile_path = root / _LOCAL_MODELS_REL / f"{mid}.yml"
+         if profile_path.exists():
+@@ -502,6 +549,9 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+             f"the {_LOCAL_SLUG_PREFIX!r} namespace belongs to the LOCAL layer — "
+             "core slugs are <engine>/<name>"
+         )
++    # Declare provenance in the row itself (#1202 P2): a curated row is
++    # `origin: core`, the value publishing a local model FLIPS to.
++    _stamp_origin(root, "core", kwargs)
+     profile_path = root / _MODELS_DIR_REL / f"{mid}.yml"
+     if profile_path.exists():
+         raise Refusal(f"model profile already exists: {profile_path}")
+diff --git a/scripts/lib/profiles/registry.yaml b/scripts/lib/profiles/registry.yaml
+index 5ed92b9..10201e6 100644
+--- a/scripts/lib/profiles/registry.yaml
++++ b/scripts/lib/profiles/registry.yaml
+@@ -15,6 +15,10 @@
+ #   * Entry rows are `_entry(**kwargs)` argument maps — the same schema as
+ #     profiles-local/registry.local.json. `pp` / `gpu_assignment_mode` are
+ #     derived by _entry() and MUST NOT appear here.
++#   * `origin` IS a real field (#1202 P2): every curated row declares
++#     `origin: core`, and a LOCAL-layer row declares `origin: local`. Read it
++#     with entry_origin()/slug_origin() — never re-derive provenance from the
++#     slug prefix.
+ # ===========================================================================
+ 
+ schema: 1
+@@ -49,6 +53,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/dual:
+     model: qwen3.6-27b
+     weights_variant: autoround-int4
+@@ -78,6 +83,7 @@ entries:
+     weights_companions: []
+     gateway: true
+     serve_aliases: []
++    origin: core
+   vllm/qwen-27b-dual-fast:
+     model: qwen3.6-27b
+     weights_variant: autoround-int4
+@@ -107,6 +113,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-27b-dual-max:
+     model: qwen3.6-27b
+     weights_variant: fp8
+@@ -136,6 +143,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-27b-dual-lmcache:
+     model: qwen3.6-27b
+     weights_variant: fp8
+@@ -165,6 +173,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-27b-dual-balanced:
+     model: qwen3.6-27b
+     weights_variant: awq-bf16-int4
+@@ -194,6 +203,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-27b-multi-fast:
+     model: qwen3.6-27b
+     weights_variant: autoround-int4
+@@ -223,6 +233,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-27b-multi-max:
+     model: qwen3.6-27b
+     weights_variant: fp8
+@@ -252,6 +263,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-27b-single-nvfp4:
+     model: qwen3.6-27b
+     weights_variant: nvfp4
+@@ -281,6 +293,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+     fallback_sm: 7.5
+   vllm/qwen-27b-dual-nvfp4:
+@@ -312,6 +325,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+     fallback_sm: 7.5
+   llamacpp/default:
+@@ -343,6 +357,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/mtp:
+     model: qwen3.6-27b
+     weights_variant: unsloth-q4km
+@@ -372,6 +387,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/bounded-thinking:
+     model: qwen3.6-27b
+     weights_variant: unsloth-q4km
+@@ -401,6 +417,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/mtp-vision:
+     model: qwen3.6-27b
+     weights_variant: unsloth-q4km
+@@ -431,6 +448,7 @@ entries:
+       - gguf_mmproj_f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/iq4ks-mtp:
+     model: qwen3.6-27b
+     weights_variant: ubergarm-iq4ks
+@@ -460,6 +478,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/iq4ks-mtp-vision:
+     model: qwen3.6-27b
+     weights_variant: ubergarm-iq4ks
+@@ -490,6 +509,7 @@ entries:
+       - gguf_mmproj_f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/iq4ks-two-stage:
+     model: qwen3.6-27b
+     weights_variant: ubergarm-iq4ks
+@@ -519,6 +539,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/dflash:
+     model: qwen3.6-27b
+     weights_variant: beellama-q5ks-dflash
+@@ -549,6 +570,7 @@ entries:
+       - anbeeld-dflash-iq4xs
+     gateway: false
+     serve_aliases: []
++    origin: core
+     default_arch_allow:
+       - "8.6"
+   beellama/qwopus-coder:
+@@ -580,6 +602,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/carnice-v2-single-q5km-mtp:
+     model: qwen3.6-27b
+     weights_variant: carnice-v2-q5km
+@@ -609,6 +632,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/carnice-v2-dual-q8-mtp:
+     model: qwen3.6-27b
+     weights_variant: carnice-v2-q8
+@@ -638,6 +662,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/qwen27b-pi-reasoning-single:
+     model: qwen3.6-27b
+     weights_variant: pi-reasoning-q4km
+@@ -667,6 +692,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/prism-pro-dq-mtp:
+     model: qwen3.6-27b
+     weights_variant: ex0bit-prism-pro-dq
+@@ -696,6 +722,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/prism-pro-dq-long:
+     model: qwen3.6-27b
+     weights_variant: ex0bit-prism-pro-dq
+@@ -725,6 +752,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/prism-pro-dq-two-stage:
+     model: qwen3.6-27b
+     weights_variant: ex0bit-prism-pro-dq
+@@ -754,6 +782,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/prism-pro-dq-dual:
+     model: qwen3.6-27b
+     weights_variant: ex0bit-prism-pro-dq
+@@ -783,6 +812,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/prism-pro-dq-dual-vision:
+     model: qwen3.6-27b
+     weights_variant: ex0bit-prism-pro-dq
+@@ -813,6 +843,7 @@ entries:
+       - gguf_mmproj_f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/apex-mtp-compact:
+     model: qwen3.6-35b-a3b
+     weights_variant: mudler-apex-compact
+@@ -842,6 +873,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/byteshape-iq4xs-mtp:
+     model: qwen3.6-35b-a3b
+     weights_variant: byteshape-iq4xs
+@@ -871,6 +903,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/apex-mtp-compact-long:
+     model: qwen3.6-35b-a3b
+     weights_variant: mudler-apex-compact
+@@ -900,6 +933,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/apex-fit-q8q5:
+     model: qwen3.6-35b-a3b
+     weights_variant: mudler-apex-compact
+@@ -929,6 +963,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/apex-mtp-quality-dual:
+     model: qwen3.6-35b-a3b
+     weights_variant: mudler-apex-quality
+@@ -958,6 +993,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/hauhaucs-35ba3b-dual:
+     model: qwen3.6-35b-a3b
+     weights_variant: morikomorizz-q6kp
+@@ -987,6 +1023,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-mtp-tp1:
+     model: gemma-4-31b
+     weights_variant: autoround-int4
+@@ -1016,6 +1053,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+   vllm/gemma-bf16-mtp:
+     model: gemma-4-31b
+@@ -1046,6 +1084,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-int8-mtp:
+     model: gemma-4-31b
+     weights_variant: autoround-int4
+@@ -1076,6 +1115,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-31b-dual:
+     model: gemma-4-31b
+     weights_variant: qat-awq-int4
+@@ -1106,6 +1146,7 @@ entries:
+     gateway: true
+     serve_aliases:
+       - gemma-4-31b-autoround
++    origin: core
+   vllm/gemma-31b-multi-google-qat-w4a16:
+     model: gemma-4-31b
+     weights_variant: google-qat-w4a16
+@@ -1135,6 +1176,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-31b-qat-w4a16-dual:
+     model: gemma-4-31b
+     weights_variant: qat-w4a16
+@@ -1165,6 +1207,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-12b-dual-bf16-mtp:
+     model: gemma-4-12b
+     weights_variant: bf16
+@@ -1194,6 +1237,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-12b-single-int8-mtp:
+     model: gemma-4-12b
+     weights_variant: autoround-int8
+@@ -1223,6 +1267,7 @@ entries:
+     weights_companions: []
+     gateway: true
+     serve_aliases: []
++    origin: core
+   vllm/gemma-12b-qat-w4a16-single:
+     model: gemma-4-12b
+     weights_variant: qat-w4a16
+@@ -1252,6 +1297,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/gemma-12b-single-q8kxl:
+     model: gemma-4-12b
+     weights_variant: beellama-q8kxl
+@@ -1281,6 +1327,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/gemma-12b-single-q8kxl:
+     model: gemma-4-12b
+     weights_variant: unsloth-q8kxl
+@@ -1310,6 +1357,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/gemma-dflash:
+     model: gemma-4-31b
+     weights_variant: beellama-q4ks-dflash
+@@ -1340,6 +1388,7 @@ entries:
+       - anbeeld-dflash-iq4xs
+     gateway: false
+     serve_aliases: []
++    origin: core
+     default_arch_allow:
+       - "8.6"
+   beellama/gemma-dflash-dual:
+@@ -1372,6 +1421,7 @@ entries:
+       - anbeeld-dflash-iq4xs
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/qwen-mtp-dual:
+     model: qwen3.6-27b
+     weights_variant: beellama-q8kxl-mtp
+@@ -1401,6 +1451,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/qwen-dflash-dual:
+     model: qwen3.6-27b
+     weights_variant: beellama-q8kxl-dflash
+@@ -1431,6 +1482,7 @@ entries:
+       - anbeeld-dflash-iq4xs
+     gateway: false
+     serve_aliases: []
++    origin: core
+   beellama/gemma-q8-dflash-dual:
+     model: gemma-4-31b
+     weights_variant: beellama-q8kxl-dflash
+@@ -1461,6 +1513,7 @@ entries:
+       - anbeeld-dflash-iq4xs
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-26ba4b-single:
+     model: gemma-4-26b-a4b
+     weights_variant: awq
+@@ -1490,6 +1543,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/gemma-26ba4b-dual:
+     model: gemma-4-26b-a4b
+     weights_variant: awq
+@@ -1519,6 +1573,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/diffusiongemma-dual:
+     model: diffusiongemma-26b-a4b
+     weights_variant: fp8
+@@ -1548,6 +1603,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-a3b-preview-single:
+     model: qwen3.6-35b-a3b
+     weights_variant: autoround-int4
+@@ -1577,6 +1633,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/qwen-35b-a3b-dual:
+     model: qwen3.6-35b-a3b
+     weights_variant: autoround-int4
+@@ -1606,6 +1663,7 @@ entries:
+     weights_companions: []
+     gateway: true
+     serve_aliases: []
++    origin: core
+   vllm/qwen-35b-a3b-single-nvfp4:
+     model: qwen3.6-35b-a3b
+     weights_variant: nvfp4
+@@ -1635,6 +1693,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+     fallback_sm: 7.5
+   vllm/qwen-35b-a3b-dual-nvfp4:
+@@ -1666,6 +1725,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+     fallback_sm: 7.5
+   vllm/qwen-35b-a3b-dual-nvfp4-fast:
+@@ -1697,6 +1757,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+     fallback_sm: 7.5
+   vllm/qwen-agentworld-35b-a3b-dual-awq-int4:
+@@ -1728,6 +1789,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/agents-a1-dual:
+     model: agents-a1
+     weights_variant: fp8-dynamic
+@@ -1757,6 +1819,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/deckard40B-dual-mtp:
+     model: qwen3.6-40b-deckard
+     weights_variant: piehsoft-q6k
+@@ -1786,6 +1849,7 @@ entries:
+     weights_companions: []
+     gateway: true
+     serve_aliases: []
++    origin: core
+     category: uncensored
+   llamacpp-club3090/inkling-small-dual-iq4xs-moecache:
+     model: inkling-small
+@@ -1816,6 +1880,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/inkling-small-dual-iq4xs-residency:
+@@ -1847,6 +1912,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/inkling-small-multi4-iq4xs-moecache:
+@@ -1878,6 +1944,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/glm53-flash-dual-iq4xs-moecache:
+@@ -1911,6 +1978,7 @@ entries:
+       - mmproj-f16
+     gateway: true
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi4-iq4xs-moecache:
+@@ -1944,6 +2012,7 @@ entries:
+       - mmproj-f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi8-iq4xs-moecache:
+@@ -1977,6 +2046,7 @@ entries:
+       - mmproj-f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/glm53-flash-dual-iq3xxs-moecache:
+@@ -2010,6 +2080,7 @@ entries:
+       - mmproj-f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi4-iq3xxs-moecache:
+@@ -2043,6 +2114,7 @@ entries:
+       - mmproj-f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/glm53-flash-multi8-iq3xxs-moecache:
+@@ -2076,6 +2148,7 @@ entries:
+       - mmproj-f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/qwen38-flash-next-dual-q4kxl-moecache:
+@@ -2108,6 +2181,7 @@ entries:
+       - mmproj-f16
+     gateway: true
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+     sampler_profiles:
+@@ -2156,6 +2230,7 @@ entries:
+       - mmproj-f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+     sampler_profiles:
+@@ -2204,6 +2279,7 @@ entries:
+       - mmproj-f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+     sampler_profiles:
+@@ -2252,6 +2328,7 @@ entries:
+       - dspark
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/deepseek-flash-vision-dual-q8-moecache:
+@@ -2283,6 +2360,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/deepseek-flash-vision-multi4-q8-moecache:
+@@ -2314,6 +2392,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp-club3090/deepseek-flash-dual-q8-moecache:
+@@ -2346,6 +2425,7 @@ entries:
+       - dspark
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp/deepseek-flash-dual-q8:
+@@ -2378,6 +2458,7 @@ entries:
+       - dspark
+     gateway: true
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp/deepseek-flash-dual-iq2:
+@@ -2410,6 +2491,7 @@ entries:
+       - dspark
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp/deepseek-flash-multi4-q8:
+@@ -2442,6 +2524,7 @@ entries:
+       - dspark
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 8.6
+     category: frontier
+   llamacpp/tess-dual-mtp:
+@@ -2473,6 +2556,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/tess-dual-nvfp4:
+     model: tess-4-27b
+     weights_variant: nvfp4
+@@ -2502,6 +2586,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+     fallback_sm: 7.5
+   vllm/tess-dual-w4a16:
+@@ -2533,6 +2618,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     fallback_sm: 7.5
+   vllm/thinkingcap-dual-w4a8:
+     model: thinkingcap-27b
+@@ -2563,6 +2649,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     fallback_sm: 7.5
+   vllm/nemotron-75b-multi-mtp:
+     model: nemotron-3-puzzle-75b
+@@ -2593,6 +2680,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 9.0
+     fallback_sm: 7.5
+   vllm/nemotron-75b-dual-w4a16:
+@@ -2624,6 +2712,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     required_sm: 7.5
+     fallback_sm: 7.5
+   ik-llama/ornith9b-single:
+@@ -2655,6 +2744,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   ik-llama/ornith35b-dual:
+     model: ornith-1.0-35b
+     weights_variant: deepreinforce-q8
+@@ -2684,6 +2774,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   vllm/vibethinker-3b-single:
+     model: vibethinker-3b
+     weights_variant: bf16
+@@ -2713,6 +2804,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/vibethinker-3b-single:
+     model: vibethinker-3b
+     weights_variant: prithivmlmods-q8
+@@ -2742,6 +2834,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+   llamacpp/qwen38-27b-single-iq4xs:
+     model: qwen3.8-27b
+     weights_variant: unsloth-iq4xs
+@@ -2772,6 +2865,7 @@ entries:
+       - gguf_mmproj_f16
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -2817,6 +2911,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -2862,6 +2957,7 @@ entries:
+     weights_companions: []
+     gateway: true
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -2907,6 +3003,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -2952,6 +3049,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -2997,6 +3095,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3042,6 +3141,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3087,6 +3187,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3132,6 +3233,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3177,6 +3279,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3222,6 +3325,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3267,6 +3371,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3312,6 +3417,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3357,6 +3463,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3402,6 +3509,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3447,6 +3555,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3492,6 +3601,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3537,6 +3647,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3582,6 +3693,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3627,6 +3739,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3672,6 +3785,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+@@ -3717,6 +3831,7 @@ entries:
+     weights_companions: []
+     gateway: false
+     serve_aliases: []
++    origin: core
+     sampler_profiles:
+       instruct:
+         temperature: 0.7
+diff --git a/tools/serve-cockpit/club3090_cockpit/data.py b/tools/serve-cockpit/club3090_cockpit/data.py
+index af68047..b392c04 100644
+--- a/tools/serve-cockpit/club3090_cockpit/data.py
++++ b/tools/serve-cockpit/club3090_cockpit/data.py
+@@ -2814,6 +2814,12 @@ def compute_promote_scaffold(
+         "kvcalc_key": f"{mid}:dual",
+         "status": "incubating",
+         "status_note": status_note,
++        # Provenance declared IN THE ROW (#1202 P2) — the field consumers read
++        # instead of re-deriving it from the slug prefix (which P3 retires). The
++        # scaffold targets one layer, so it declares that layer's origin; the
++        # cockpit is one of the four prefix-dependent consumers this field
++        # retires, alongside promote.py / demote.py / export_pr.py.
++        "origin": "local" if layer == "local" else "core",
+     }
+ 
+     weights_meta: dict[str, Any] = {
+@@ -3023,6 +3029,11 @@ def rebase_spec_to_core(spec: dict) -> dict:
+     out["registry_entry"]["slug"] = f"vllm/{short}-dual-{quant}"
+     out["compose"]["path"] = f"models/{mid}/vllm/compose/dual/{quant}/base.yml"
+     out["registry_entry"]["kwargs"]["compose_path"] = out["compose"]["path"]
++    # ...and FLIP the provenance (#1202 P2): the row is now a curated one, so it
++    # declares `origin: core` — the value publishing a local model flips to.
++    # promote.py refuses a row that claims the other layer, so a stale `local`
++    # here would hard-fail the maintainer's write instead of being corrected.
++    out["registry_entry"]["kwargs"]["origin"] = "core"
+     return out
+ 
+ 

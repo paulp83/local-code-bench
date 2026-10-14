@@ -1,0 +1,361 @@
+[
+ {
+  "n": 1172,
+  "merged": "2026-09-05",
+  "base": "0b3d425f20891be99e8a99765638494c14430a4f",
+  "merge": "e6bf6e52a7729c33b9249b1ce795ce0edd9fd6be",
+  "tests": [
+   "scripts/tests/test-vram-breakdown.sh"
+  ],
+  "files": [
+   "scripts/lib/vram_breakdown.py",
+   "scripts/tests/test-vram-breakdown.sh"
+  ],
+  "area": "lib",
+  "size": 107,
+  "source": "issue #1171",
+  "problem": "bench.sh VRAM breakdown: drafter overwrites `model=`, and recurrent/drafter buffers fall into `unaccounted` (84% of the gap)\n\n## Summary\n\n`scripts/lib/vram_breakdown.py` reports the **drafter's** weights as `model=` on any\nslug that pins a drafter to a GPU, because `_per_dev()` defaults to *last match wins*\nand the drafter emits the same log line shape as the target model. Two further\nbuffers are never matched at all. The result is that `unaccounted` absorbs several\nGiB of perfectly identifiable memory, which is exactly the figure #1118 wants to put\nin front of users.\n\nMeasured on `glm53-flash-dual-iq3xxs-moecache` (GLM-5.3-Flash + DFlash2 drafter on CUDA1).\n\n## Evidence\n\nThe boot log emits, in this order:\n\n```\nload_tensors:   CUDA1 model buffer size   = 3313.42 MiB   <- target model\n...\nload_tensors:   CUDA1 model buffer size   =  655.73 MiB   <- DFlash2 drafter\nllama_kv_cache: CUDA1 KV buffer size      =   80.00 MiB   <- drafter KV\nsched_reserve:  CUDA1 compute buffer size = 1606.48 MiB   <- drafter compute\n```\n\nThe parser prints:\n\n```\nCUDA1: model=656  kv=1361  compute=5240  pool=9653  total=22992/24576MiB(94%)  unaccounted=6082\n```\n\n`model=656` is the drafter. The target model's **3,313 MiB is silently gone**.\n\n## Three defects\n\n| # | defect | location |\n|---|---|---|\n| 1 | `model` uses `agg=False` \u2192 last-wins \u2192 drafter **overwrites** target | `vram_breakdown.py:41` |\n| 2 | `llama_memory_recurrent: \u2026 RS buffer size` matched by nothing. The `state` regex targets `_comp_state:` (DeepSeek), so GLM's recurrent state is dropped | `vram_breakdown.py:44` |\n| 3 | drafter's **compute** buffer is dropped \u2014 `compute` is also `agg=False`, and the target re-reserves *after* the drafter loads, so the drafter's reservation is overwritten | `vram_breakdown.py:42` |\n\n`kv` is correct \u2014 it already passes `agg=True`.\n\n## Impact\n\nCUDA1, same boot, `used=22,992 MiB`:\n\n| accounting | `unaccounted` |\n|---|---:|\n| as reported today | **6,082** |\n| + `model` summed (target + drafter) | 2,768 |\n| + recurrent state counted | 2,563 |\n| + drafter compute counted | **956** |\n\n**84% of `unaccounted` is under-attribution, not genuine overhead.** The asymmetry that\nmade this visible \u2014 CUDA1 `unaccounted` 6,082 vs CUDA0 1,136 \u2014 is not routing entropy;\nit is the drafter living on CUDA1 and being partly counted, partly not.\n\n## Note for the fix \u2014 defect 3 is not a one-liner\n\nFlipping `model` to `agg=True` is straightforward: two models, two buffers, they add.\n\n`compute` is harder. The CUDA1 reservations are `5208.35` (target), `1606.48` (drafter),\nthen `5240.16` (target **re**-reserve, after the drafter loaded). The first and third are\nthe *same* buffer re-reserved and must not be summed; the second is additive. The log does\nnot label which context a `sched_reserve` line belongs to, so a purely positional rule\n(\"lines after the drafter's `load_tensors` are the drafter's\") is wrong here. Options worth\nweighing: label the reservation in the engine log, or track re-reservations per device and\ntreat a strictly-smaller interleaved value as a distinct context.\n\nSuggest fixing 1 and 2 first (unambiguous, ~3.5 GiB of the gap) and treating 3 separately.\n\n## Repro\n\n```\ndocker logs <serving-container> > boot.log\npython3 scripts/lib/vram_breakdown.py boot.log\n```\nCompare `model=` against the **first** `load_tensors: CUDA<n> model buffer size` line.\nAny slug with `-devd CUDA<n>` and a drafter reproduces it; a no-drafter boot does not.\n\n## Related\n\nBlocks the per-GPU drill-down in #1118 \u2014 the panel would render the drafter's weights as\nthe model's, and the target's weights as \"other\".\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1174,
+  "merged": "2026-09-05",
+  "base": "96425ec8ded2a22e3bafc9269539ac1905c4dabc",
+  "merge": "dee0133306e1d5fca09164da83b3921894821a84",
+  "tests": [
+   "scripts/tests/test-pull-download-ladder.sh"
+  ],
+  "files": [
+   "scripts/lib/profiles/hf_fetch.py",
+   "scripts/tests/test-pull-download-ladder.sh"
+  ],
+  "area": "lib/profiles",
+  "size": 110,
+  "source": "issue #1132",
+  "problem": "[bug] hf_fetch.py CLI swallows rung-1 failure detail (bare exit 1); missing `hf` binary never falls through to rung 3\n\n### What happened?\n\nOn a rig without the `hf` CLI installed, `hf_fetch.py` prints its starting announcement and then exits 1 with no diagnostics at all \u2014 no failure token, no detail, nothing on stderr. Two separate problems: (1) `_main()` discards `LadderResult.failure`/`detail` on the non-ok path and returns a bare 1, which contradicts the module's own #804/#812 contract (\"every rung announces which rung ran\", \"logs are auditable\") exactly at the moment it matters most; (2) `escalate()` (rungs 2/3) only engages when `is_xet_refusal(blob)` matches, so a rung-1 failure of the \"tool unavailable\" kind (`hf` missing, rc=127) kills the ladder \u2014 even though rung 3 (raw resolve + curl + sha256 gate) has no dependency on `hf` and would have served the pull fine. Expected: failure token + detail printed to stderr before exit, and command-not-found treated as fallback-eligible. Workaround: `pipx install \"huggingface_hub[cli]\"` \u2192 rung 1 completes normally (\"DONE via rung 1 (classic LFS)\").\n\n### Steps to reproduce\n\n```bash\nOn a host where `hf` is not in PATH (stdlib-only python3):\n\n    python3 scripts/lib/profiles/hf_fetch.py unsloth/Qwen3.6-27B-MTP-GGUF \\\n      --local-dir /models/gguf/qwen3.6-27b-gguf/unsloth-mtp-q4km \\\n      --include \"Qwen3.6-27B-Q4_K_M.gguf\"; echo \"EXIT=$?\"\n\nOutput \u2014 the entirety of it:\n\n    [hf-fetch] starting: unsloth/Qwen3.6-27B-MTP-GGUF -> /models/gguf/qwen3.6-27b-gguf/unsloth-mtp-q4km (1 file(s) to fetch)\n    EXIT=1\n\nThe same invocation after `pipx install \"huggingface_hub[cli]\"` downloads and verifies fine via rung 1.\n```\n\n### Rig report \u2014 paste contents of `bash scripts/report.sh [--verify | --soak | --bench | --studio | --full]`\n\n```markdown\nNot applicable \u2014 pre-boot model-fetch path, no container started and no GPU on this host yet; see \"Anything else?\".\n```\n\n### Anything else?\n\nHEAD 8abac569 (2026-09-01), Debian 13 (Proxmox VE 9), python3 3.13. No rig report: this is the model-fetch path, pre-boot \u2014 no container involved; host is being staged before its GPU arrives, so `report.sh` isn't runnable here. Related: the setup.sh `WEIGHT_SIZE_GB=variable` crash is filed as #1131 \u2014 we hit this one while working around that one.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1203,
+  "merged": "2026-09-07",
+  "base": "c2746c9f52d935ed00341f3aea84ccfcbcc1f35d",
+  "merge": "d854c5df94cee3861f04b572f04a6ac37e192e12",
+  "tests": [
+   "scripts/tests/test-compose-facts-shared.sh"
+  ],
+  "files": [
+   "scripts/lib/profiles/compose_facts.py",
+   "scripts/tests/test-compose-facts-shared.sh",
+   "tools/serve-cockpit/club3090_cockpit/data.py"
+  ],
+  "area": "lib/profiles",
+  "size": 354,
+  "source": "PR problem section",
+  "problem": "refactor(profiles): lift derive_compose_facts out of the cockpit into shared profiles (#1202 P1)\n\n`derive_compose_facts` lived inside `club3090_cockpit.data`, and nothing outside the cockpit could import it. That is *why* the local model layer was write-only from the UI (#1153): **the UI owned the only implementation** of compose\u2192spec derivation, so a user with an existing working compose had a door in c3 and no door at all from the CLI. Everything else in #1202 depends on this being shared.\n\n`ComposeFacts`, `_ENGINE_BY_IMAGE` and `derive_compose_facts` move to `scripts/lib/profiles/compose_facts.py` (stdlib-only, matching `serve_override_defaults`, which must stay importable on the launcher's no-PyYAML path). `club3090_cockpit.data` delegates and re-exports `ComposeFacts` via module `__getattr__`, so **every existing caller and test is unchanged** \u2014 the 25 pinning tests in `test_compose_facts.py` / `test_compose_viewer.py` passed without edits.\n\nPure relocation. No behaviour change.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1204,
+  "merged": "2026-09-07",
+  "base": "d854c5df94cee3861f04b572f04a6ac37e192e12",
+  "merge": "3e2d591fe582704da194eaf6b3085550d8be5984",
+  "tests": [
+   "scripts/tests/test-registry-origin-field.sh"
+  ],
+  "files": [
+   "scripts/lib/profiles/compose_registry.py",
+   "scripts/tests/test-registry-origin-field.sh"
+  ],
+  "area": "lib/profiles",
+  "size": 131,
+  "source": "PR problem section",
+  "problem": "feat(profiles): make catalog provenance a first-class `origin` field; core wins (#1202 P2)\n\nPublishing later must flip a value and leave the slug alone. That isn't speculative: **`export_pr.py` already renames on publish today**:\n\n```python\ncore_slug = f\"{ns}/{str(entry['slug'])[len(_LOCAL_SLUG_PREFIX):]}\"\n```\n\nIt strips `local/` and prefixes the engine namespace derived from the compose path \u2014 producing exactly the `<engine>/<name>` shape P3 gives local slugs. **After the hard-cut that arithmetic collapses to identity and publish stops being a rename**, so a user's scripts, notes and compose pins survive it. (It's also a fourth prefix-dependent consumer for P3, alongside `promote.py`, `demote.py` and the cockpit.)\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1209,
+  "merged": "2026-09-07",
+  "base": "9b2b046e20424639eb484b016f8ff09c96ccabbe",
+  "merge": "02caaeedd522ed4b43a5048c48327f14ccb7f9cc",
+  "tests": [
+   "scripts/tests/test-catalog-amend.sh"
+  ],
+  "files": [
+   "docs/BRING_YOUR_OWN.md",
+   "scripts/catalog.sh",
+   "scripts/lib/profiles/amend.py",
+   "scripts/tests/test-catalog-amend.sh"
+  ],
+  "area": "docs",
+  "size": 392,
+  "source": "PR problem section",
+  "problem": "feat(catalog): rename + update for local entries \u2014 the shadowing remedy we owed (#1202 P7)\n\nThe local layer was **create-and-delete only**: `promote.py` refuses every \"already exists\" case, `demote.py` only removes. Changing one field meant demoting and re-promoting.\n\nThat mattered more than ergonomics. #1204 decided a local slug colliding with a newly-shipped curated one is **shadowed** \u2014 kept and *marked* \"so the user can rename it\" \u2014 and no rename existed. **We advertised a remedy that could not be reached.**\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1307,
+  "merged": "2026-09-13",
+  "base": "928360efffd47388468832bcc1f392e13f62b67b",
+  "merge": "0cbf3bdb57a67afd911871372104afa8f291d3d2",
+  "tests": [
+   "scripts/tests/test-preflight-model-path-extract.sh"
+  ],
+  "files": [
+   "scripts/preflight.sh",
+   "scripts/tests/test-preflight-model-path-extract.sh"
+  ],
+  "area": "preflight",
+  "size": 77,
+  "source": "issue #1306",
+  "problem": "[bug] preflight refuses every gemma external-drafter slug: the path extractor captures a trailing backslash from escaped JSON\n\n### The defect\n\n`preflight.sh` refuses to boot **every gemma slug that uses an external assistant\ndrafter**, reporting a model file as missing when it is present on disk.\n\n```\n[preflight] ERROR: compose '.../gemma-4-26b-a4b/vllm/compose/single/awq/int8.yml'\n            expects model files that aren't on host.\n[preflight]   missing: /mnt/models/huggingface/gemma-4-26b-a4b-it-assistant\\/config.json (HF model)\n```\n\nNote `assistant\\/config.json`. The file exists:\n\n```\n-rw-rw-r-- 1 ... 2315 /mnt/models/huggingface/gemma-4-26b-a4b-it-assistant/config.json\n```\n\nPreflight exits 1, so the boot never starts. There is no way for a user to\nsatisfy this check, because the path it wants cannot exist.\n\n### Mechanism\n\nThe in-container path extractor (`preflight.sh`, the vLLM branch feeding\n`_preflight_compose_vllm_subdir`):\n\n```\ncommand grep -oE '/root/\\.cache/huggingface/[^\"'\\''[:space:],]+'\n```\n\nThe character class excludes `\"`, `'`, whitespace and `,` \u2014 **but not backslash**.\nThese composes write the drafter path inside escaped JSON:\n\n```\nSPEC_ARGS=(--speculative-config \"{\\\"model\\\":\\\"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\\\",\\\"num_speculative_tokens\\\":$$_spec_n}\")\n```\n\nso the match runs past the directory name, consumes the trailing `\\`, and stops\nat the `\"`. The captured subdir is `gemma-4-26b-a4b-it-assistant\\`, and the\nexistence check becomes `${model_dir}/gemma-4-26b-a4b-it-assistant\\/config.json`.\n\nThe comment directly above that line explains why the class was deliberately\nnarrowed \u2014 to stop `${MODEL_SUBDIR:-default}` being truncated before the\n`:-default` resolver ran. That fix is correct; the backslash simply was not\nconsidered at the same time.\n\n### Scope \u2014 8 composes, all gemma\n\nEvery compose whose cache path is immediately followed by a backslash:\n\n| model | composes |\n|---|---|\n| gemma-4-12b | `single/qat-w4a16/mtp.yml`, `single/autoround-int8/mtp.yml` |\n| gemma-4-26b-a4b | `single/awq/int8.yml` |\n| gemma-4-31b | `multi4/google-qat-w4a16/base.yml`, `single/autoround-int4/fp8-mtp.yml`, `dual/qat-w4a16/int8.yml`, `dual/autoround-int4/int8.yml`, `dual/autoround-int4/bf16-mtp.yml` |\n\n**qwen3.8-27b is unaffected** \u2014 its MTP drafter is built-in, so no external model\npath appears in the speculative config. Verified by booting\n`vllm/qwen38-27b-dual-fast` successfully on the same rig the same day.\n\nThe 12b composes capture `${SPEC_MODEL_SUBDIR:-gemma-4-12b-it-assistant}\\`, which\nresolves to `gemma-4-12b-it-assistant\\` \u2014 this is why a Discord report of a\nmissing **12b** assistant appeared while the user believed they were launching the\n26b slug.\n\n### Fix, and proof\n\nAdd `\\\\` to the exclusion class:\n\n```diff\n-  command grep -oE '/root/\\.cache/huggingface/[^\"'\\''[:space:],]+'\n+  command grep -oE '/root/\\.cache/huggingface/[^\"'\\''\\\\[:space:],]+'\n```\n\nCaptured paths before / after, on the 26b compose:\n\n```\nbefore:  /root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\\      <- unusable\nafter:   /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit\n         /root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\n```\n\n**Boot-verified on 2x3090.** With the fix applied, `vllm/gemma-26ba4b-single`\nreaches `Application startup complete` in 180 s, engages the drafter, and serves:\n\n```\n[spec] drafter ON - draft-model gemma-4-26b-a4b-it-assistant n=4\n[speculative.py:882] Overriding draft model max model len from 262144 to 176000\nrequest -> \"Paris\"   (20 prompt / 2 completion tokens)\n```\n\n### Suggested guard\n\nA test that runs the extractor against every compose and asserts no captured\nsubdir contains a character that cannot appear in a directory name (backslash,\nquote, brace). That is the general form of this bug, and it would also have caught\nthe `${MODEL_SUBDIR` truncation the current comment describes.\n\n### Related\n\nFound while reproducing a Discord report. The same user also hits #1303 (setup\ndownloads a variant no slug uses) and #1304 (the drafter is opt-in behind an\nundocumented flag). This issue is the third of three, and it would block them even\nafter the other two are solved.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1464,
+  "merged": "2026-09-28",
+  "base": "4c2ad2260d068282fa65741bb65889cef43f30e1",
+  "merge": "5ab88a5dbf533faca08187689ceea5dee8fc557f",
+  "tests": [
+   "scripts/tests/test-switch-refuse-before-teardown.sh"
+  ],
+  "files": [
+   "scripts/switch.sh",
+   "scripts/tests/test-switch-refuse-before-teardown.sh"
+  ],
+  "area": "switch",
+  "size": 135,
+  "source": "PR problem section",
+  "problem": "fix(switch): refuse a launch before tearing down the running slug\n\n`switch.sh` brought the running slug down **first** and only then ran the checks that can refuse a launch. So a refused launch left the rig serving nothing. We hit it twice on the reference rig in one day:\n- an experimental slug run without `--force`;\n- a worktree whose model files weren't on the host (no `MODEL_DIR`).\n\nA mistyped slug did the same.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1470,
+  "merged": "2026-09-28",
+  "base": "aab4ae43bf621cd72d87d0c4797bb0df2be18e57",
+  "merge": "21ae0e9e00cd5500f83c80af4e92bdbdce6d6c14",
+  "tests": [
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "files": [
+   "scripts/lib/p2p-state.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-p2p-state.sh"
+  ],
+  "area": "lib",
+  "size": 46,
+  "source": "PR problem section",
+  "problem": "fix(p2p): score SGLang's V1 custom all-reduce as on (PCIe rigs)\n\nOn a PCIe rig, a live SGLang custom all-reduce scores **`unknown`** in `report.sh` and on the bench card (\"no P2P engagement signal\"). It can never score `on`.\n\n- SGLang admits `CustomAllReduceV2` only on full NVLink (`can_use_custom_all_reduce_v2` \u2192 `full_nvlink is True`), so every PCIe rig runs the **V1** `CustomAllreduce`.\n- V1 logs nothing when it initializes. Its only success signal is `Registering N cuda graph addresses` after CUDA-graph capture, on rank 0.\n- The classifier knew only V2's success line, `All Reduce config:`.\n\n\nI found this while testing SGLang custom all-reduce as an opt-in on our P2P rig (follow-up to #1462). That boot registered its graph buffers (4352 \u2192 258/68/18/6) and passed verify-full and a continuous soak. `report.sh` and the bench card still called it unknown.\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1510,
+  "merged": "2026-10-01",
+  "base": "f600655fc11b127a68b6b1531cb202a7da630f26",
+  "merge": "6f8251e7e3a4cf32b628095ab8cf4dd62e96dad3",
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "area": "concurrency-probe",
+  "size": 199,
+  "source": "issue #1502",
+  "problem": "[bug] concurency-probe\n\n### What happened?\n\nIssue 1: concurrency-probe.sh --sweep crashes at the first skipped cell\n\nA --sweep run exits with rc=1 as soon as it reaches a cell it decides to skip. A cell is skipped when it doesn't fit the KV pool, when the wall budget is exhausted, or on early-stop. Measured cells before that point print fine. The run never writes the concurrency card, the === recommend === block, or the results/concurrency-*.md/json files. On small cards some cell almost always overflows the pool, so in practice the sweep never finishes there.\n\n- Root cause (scripts/concurrency-probe.sh:462): emit_row runs python3 - <<'PY'. python3 - reads its program from stdin, and the heredoc is stdin. So the JSON row the caller pipes in (printf \u2026 | emit_row) is replaced by the heredoc, sys.stdin.read() returns an empty string, and json.loads(\"\") raises. Because the script uses set -e, that kills the sweep.\n- Affected callers: all three skip paths go through emit_row \u2014 budget (:476), clipped (:481) and early-stop (:486). Measured cells are unaffected because they pass their data via argv.\n- Repro: a standalone snippet that needs no GPU or server gives JSONDecodeError, rc=1, 0 bytes written.\n- Suggested fix: pass the row as an argument (emit_row \"$json\", read with sys.argv[2]) instead of on stdin, and add a GPU-free regression test with a stubbed run_probe.\n- Workaround: pick N_LIST/CTX_SWEEP so that no cell is skipped, e.g. run the 32K rung on its own.\n\nIssue 2: VRAM and the GPU label are rig-wide, not the probed container's card(s)\n\nOn a multi-GPU rig, the probe reports memory and GPU names for the whole machine. It attributes both to the service under test.\n\n- Evidence from our run: the container was pinned to the RTX 3060 only, and an unrelated SGLang service was running on GPUs 0\u20131. The probe reported 55319 MB and 4\u00d7 GeForce RTX 3090. The real figure from nvidia-smi -i 3 was 10,381 MiB on 1\u00d7 RTX 3060, flat for the whole run.\n- Root causes:\n  a. vram_used_mb() (scripts/lib/concurrency_probe.py:346) queries nvidia-smi without -i and sums memory.used across every GPU on the host.\n  b. _gpu_fp() (scripts/concurrency-probe.sh:227) counts all GPUs and labels them all with GPU 0's name.\n- Why it matters beyond cosmetics:\n  - The VRAM-leak / 0-growth gate (vram_ok()) is judged on the rig-wide sum. Another service changing its memory use can fail a clean run, or hide a real leak.\n  - The vram_peak_gb written to the envelope row and results JSON is wrong (54.0 GB for a 12 GB card).\n- Suggested fix: resolve the GPUs behind CONTAINER (docker inspect \u2192 DeviceRequests or NVIDIA_VISIBLE_DEVICES). Scope both the VRAM query and the label to those cards, and record per-card peaks as the bench protocol requires. When no container can be resolved, fall back to rig-wide and say so.\n\n### Steps to reproduce\n\n```bash\n-\n```\n\n### Rig report \u2014 paste contents of `bash scripts/report.sh [--verify | --soak | --bench | --studio | --full]`\n\n```markdown\n-\n```\n\n### Anything else?\n\n_No response_\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1518,
+  "merged": "2026-10-01",
+  "base": "2ed821fb44e4421ae3e3c0f955b17af4502594c1",
+  "merge": "7c451a5f629ae490cd85e85ed6028e13e12b4e2b",
+  "tests": [
+   "scripts/tests/test-switch-orphan-teardown.sh"
+  ],
+  "files": [
+   "scripts/lib/bench-row-formatter.sh",
+   "scripts/switch.sh",
+   "scripts/tests/test-switch-orphan-teardown.sh"
+  ],
+  "area": "lib",
+  "size": 65,
+  "source": "issue #1515",
+  "problem": "[bug] switch.sh teardown fails since #1498: config_files label is comma-joined, passed as one -f\n\n### What happened?\n\nSince #1498 (`club3090.slug` label), every container that `switch.sh` / `launch.sh` / c3 starts is brought up with **two** compose files: the slug's compose plus the label override in `<data dir>/compose-labels/<container>.yml`. Docker Compose records both in the container label `com.docker.compose.project.config_files` as a **comma-joined** string.\n\n`down_running()` in `scripts/switch.sh` passes that label to `-f` as a single path:\n\n```bash\n# scripts/switch.sh:1027-1031 (master @ 5cbb1db2)\nlbl_file=$(docker inspect --format '{{ index .Config.Labels \"com.docker.compose.project.config_files\"}}' \"$c\" 2>/dev/null || true)\nif [[ -n \"$lbl_dir\" && -n \"$lbl_file\" ]]; then\n  (cd \"$lbl_dir\" && ${COMPOSE_BIN} -f \"$lbl_file\" down --remove-orphans) || docker stop \"$c\" >/dev/null\n```\n\nso every teardown now fails and quietly falls back to `docker stop`:\n\n```\n[switch] bringing down: vllm-qwen38-flash-next-multi3-mtp\ncompose file \"~/club-3090/scripts/lib/profiles-local/composes/\u2026/mtp.yml,~/.local/share/club-3090/compose-labels/vllm-qwen38-flash-next-multi3-int4mix-mtp.yml\" is invalid: open ~/club-3090/\u2026/mtp.yml,~/.local/share/club-3090/compose-labels/vllm-qwen38-flash-next-multi3-int4mix-mtp.yml: no such file or directory\n```\n\n(Seen on a local-layer slug here, but nothing in the path is local-specific: `slug_label.py` emits the override for every registry slug whose compose matches, so this should hit core slugs the same way.)\n\n**Effect**\n\n- `docker compose down --remove-orphans` never runs on a switch or on `switch.sh --down`. The old container is only **stopped, not removed**, and its compose network and any orphans stay behind. Switching between slugs leaves exited containers piling up.\n- It doesn't show as a failure: relaunching the *same* slug still works because `up` recreates the stopped container, and a *different* slug comes up next to the stopped one. The only visible sign is the `compose file \"\u2026,\u2026\" is invalid` line in the middle of a switch, which reads like a broken compose.\n- Same root cause, cosmetic only: `scripts/lib/bench-row-formatter.sh:403` passes the joined string to `rel()`, so a bench record's `compose` field holds `\"/abs/a.yml,/abs/b.yml\"` (not relativised, two paths) instead of the slug's compose.\n\nThe other readers of this label already split on `,`, so the fix is to do the same here:\n\n| reader | handles the comma list? |\n|---|---|\n| `scripts/litellm-log.sh:62` | \u2705 `IFS=',' read -ra cfgs` \u2192 one `-f` per file |\n| `scripts/lib/resolved_config.py:449` | \u2705 `raw.split(\",\")` |\n| `tools/serve-cockpit/\u2026/launch_settings_store.py` (`containers_for`) | \u2705 `files.split(\",\")` |\n| `scripts/switch.sh:1028` (`down_running`) | \u274c single `-f` |\n| `scripts/lib/bench-row-formatter.sh:403` | \u274c whole string to `rel()` |\n\n### Steps to reproduce\n\nRead-only. It runs `config`, not `down`, so it doesn't touch the running container:\n\n```bash\nC=<any container started by switch.sh after #1498>\nd=$(docker inspect -f '{{ index .Config.Labels \"com.docker.compose.project.working_dir\"}}' \"$C\")\nl=$(docker inspect -f '{{ index .Config.Labels \"com.docker.compose.project.config_files\"}}' \"$C\")\necho \"$l\"                                          # two paths, comma-joined\n(cd \"$d\" && docker compose -f \"$l\" config >/dev/null)   # -> \"compose file \u2026 is invalid: \u2026 no such file or directory\"\n\n# Splitting it works:\n(cd \"$d\" && IFS=',' read -ra a <<<\"$l\"; args=(); for x in \"${a[@]}\"; do args+=(-f \"$x\"); done\n f=\"$(bash scripts/settings.sh compose-env-file)\"; docker compose --env-file \"$f\" \"${args[@]}\" config --services; rm -f \"$f\")\n```\n\nEnd-to-end: launch any slug with `bash scripts/switch.sh <slug>`, then run `bash scripts/switch.sh <slug>` again (or `--down`) and watch the `bringing down:` line.\n\n### Suggested fix\n\nIn `down_running()`, mirror `litellm-log.sh`:\n\n```bash\nif [[ -n \"$lbl_dir\" && -n \"$lbl_file\" ]]; then\n  local -a cfg_args=() _cfgs\n  IFS=',' read -ra _cfgs <<< \"$lbl_file\"\n  local f; for f in \"${_cfgs[@]}\"; do [[ -n \"$f\" ]] && cfg_args+=(-f \"$f\"); done\n  (cd \"$lbl_dir\" && ${COMPOSE_BIN} \"${cfg_args[@]}\" down --remove-orphans) || docker stop \"$c\" >/dev/null\n```\n\nTwo related points:\n\n- The label override can be gone by teardown time (for example after the data dir moved). Dropping `-f` entries that no longer exist, or falling back to only the first file, would keep the `down` path working. The label file adds labels and nothing else, so `down` doesn't need it.\n- `bench-row-formatter.sh:403` should take the first entry (`.split(\",\")[0]`) before `rel()`.\n\nA regression guard could start a fake container with a two-file label (the docker shims `test-slug-label` already uses would do) and assert that `down_running` calls compose with two `-f` arguments.\n\n### Environment\n\n- master @ `5cbb1db2`, Docker Compose 5.5.1\n- Introduced by e62eb703 (#1498)\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1555,
+  "merged": "2026-10-05",
+  "base": "9c04839d1728696ab3975baef6a6484e130b2d46",
+  "merge": "5221ad8e4c740b0885234be6d2dbef09ad0b040b",
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/lib/run_context.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "area": "concurrency-probe",
+  "size": 219,
+  "source": "PR problem section",
+  "problem": "fix(concurrency-probe): card names the right container, GPUs and drafter (#1537)\n\nThe concurrency cards @xtj7 posted on #1537 were mislabelled, and both bugs reproduce on the reference rig:\n\n- **vLLM said \"spec off\" with MTP n=4 running.** `_spec_fp` greps the container's `Cmd` for `--speculative-config`, but the Qwen3.8 vLLM composes build that flag inside their entrypoint script from `SPEC_N`, so it never appears in `Cmd`.\n- **SGLang said \"spec ?\", listed every GPU on the host and measured VRAM rig-wide.** `CONTAINER` came from a `vllm-(qwen|gemma)` name heuristic, so an SGLang container was never found.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1556,
+  "merged": "2026-10-05",
+  "base": "5221ad8e4c740b0885234be6d2dbef09ad0b040b",
+  "merge": "2c2be9f29ffa0748f6fd89e1fc50dbed01788e4a",
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "files": [
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "area": "concurrency-probe",
+  "size": 124,
+  "source": "PR problem section",
+  "problem": "fix(concurrency-probe): card's KV pool, slot source and SGLang knob names (#1537)\n\nFollow-up to #1555. Three more labels on @xtj7's #1537 cards were wrong:\n\n- **\"KV ?\" on both engines.** `--detect-kv` only parsed vLLM's `GPU KV cache size` line, and only from the last 2,500 log lines. A container that has been serving for a while has scrolled past it.\n- **`slots=4 (undetected)`, with the count right.** The source label skipped the two SGLang paths `_detect_slots` uses: `max-running-requests` in the container command, and `max_running_requests` on the server info.\n- **The SGLang recommendation said `MAX_NUM_SEQS` / `MAX_MODEL_LEN`.** SGLang composes ignore both.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1564,
+  "merged": "2026-10-06",
+  "base": "ef3c2134c42ab057bd7d4cf649b632ff53f156aa",
+  "merge": "dceb9c796a05aeda852a140e3474486b7915f582",
+  "tests": [
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test_promote.py"
+  ],
+  "files": [
+   "scripts/catalog.sh",
+   "scripts/lib/profiles/promote.py",
+   "scripts/tests/test-catalog-cli.sh",
+   "scripts/tests/test_promote.py"
+  ],
+  "area": "catalog",
+  "size": 141,
+  "source": "PR problem section",
+  "problem": "fix(catalog): register --dry-run no longer writes the engine profile\n\n`catalog.sh` wrote the engine profile itself, in its own Python, *before* handing the spec to `promote.py`, which owns the plan, the `--dry-run` exit and the confirm. Nothing downstream could stop a write that had already happened.\n\nIt also hid itself in the tests: `test-catalog-cli.sh` runs several `--dry-run` registers with the same engine before its real round trip. So the round trip's \"engine profile written\" check passed on the file the dry runs had leaked.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1571,
+  "merged": "2026-10-06",
+  "base": "7b30f005afea612d0c6a3e81b5ba9fd25662614e",
+  "merge": "185111a25de5575f0ed3afa923741f8240825f16",
+  "tests": [
+   "scripts/tests/test-report-gpu-attribution.sh"
+  ],
+  "files": [
+   "scripts/lib/gpu-select.sh",
+   "scripts/report.sh",
+   "scripts/tests/test-report-gpu-attribution.sh"
+  ],
+  "area": "lib",
+  "size": 166,
+  "source": "PR problem section",
+  "problem": "fix(report): attribute each GPU's VRAM to the process that holds it (#1537)\n\n`report.sh` \u2192 \"Display / desktop state\" found **one** running club container and credited it with **every** card that had more than 100 MiB in use. #1537's report said GPUs 0 and 2 were \"held by running `sglang-cmp170hx`\", but that container could only see GPU 1, and `nvidia-smi` showed another container's `VLLM::Worker_TP0/1` on GPUs 0 and 2.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1573,
+  "merged": "2026-10-07",
+  "base": "185111a25de5575f0ed3afa923741f8240825f16",
+  "merge": "3fd0fab3de78d860723bf2a90bd4084b6abbd344",
+  "tests": [
+   "scripts/tests/test-quality-thinking-budget.sh"
+  ],
+  "files": [
+   "docs/QUALITY_TEST.md",
+   "scripts/lib/thinking-budget.sh",
+   "scripts/tests/test-quality-thinking-budget.sh"
+  ],
+  "area": "docs",
+  "size": 38,
+  "source": "PR problem section",
+  "problem": "fix(quality-test): read vLLM's boot log when the parser isn't in the container argv\n\n`quality-test.sh --thinking-budget N` on vLLM checks that the server has a reasoning parser, because vLLM rejects `thinking_token_budget` per request without one. The check only looked at the container's argv (`docker inspect`).\n\nAn image that starts vLLM **through its own launcher** adds `--reasoning-parser` inside that script, so the argv shows none. The wrapper then refused with \"booted WITHOUT --reasoning-parser\", which counts as positive evidence and so can't be overridden with `THINKING_BUDGET_UNVERIFIED=1`.\n\nSeen on bucko's official image. Its `qwen38-serve` adds `--reasoning-parser qwen3`, and the server's boot log shows `'reasoning_parser': 'qwen3'` in `non-default args`. Sending the budget directly worked: `thinking_token_budget: 200` cut reasoning from 1,343 to 548 characters, and the answer was still produced.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1588,
+  "merged": "2026-10-09",
+  "base": "727f05dedeea7e99141e32e97c0cbf4b1b70bd80",
+  "merge": "216eae6a998ac68b6f64d143393533f20d51f9fb",
+  "tests": [
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "files": [
+   "AGENTS.md",
+   "scripts/concurrency-probe.sh",
+   "scripts/lib/concurrency_probe.py",
+   "scripts/tests/test-concurrency-probe.sh"
+  ],
+  "area": "AGENTS.md",
+  "size": 126,
+  "source": "PR problem section",
+  "problem": "fix(concurrency-probe): pick the container that serves the URL (#1584 follow-up)\n\n`concurrency-probe.sh` picked its container in two ways, and both are wrong for a URL on another machine:\n\n1. **Port-only match.** The Python `container_for_url` (#1537) compared the port and ignored the host, so `URL=http://<other host>:8020` bound the local container on :8020.\n2. **Name fallback.** When nothing matched, the `vllm-(qwen|gemma)` heuristic bound one anyway.\n\nThat container supplies the slot count (`served-slots.sh` reads its `--max-num-seqs` first), the GPU label, the spec label and the KV pool. A remote run therefore reported the local server's values as its own. Reproduced: with a local vLLM on :8020 at `--max-num-seqs 4`, `URL=http://10.9.9.9:8020` announced `CONCURRENCY=4 (detected: container max-num-seqs)`.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1608,
+  "merged": "2026-10-10",
+  "base": "71ff56758591b3a6bd3169ba72dfc2ef4c0a1700",
+  "merge": "70b2e5939ee2ca7ff77e6ce7ad33a56761aca150",
+  "tests": [
+   "scripts/tests/test-compose-args-array-scope.sh"
+  ],
+  "files": [
+   "models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml",
+   "scripts/tests/test-compose-args-array-scope.sh"
+  ],
+  "area": "models",
+  "size": 5,
+  "source": "issue #1599",
+  "problem": "test-compose-args-array-scope: false failure on vllm single-fast \u2014 assignments inside case arms aren't seen\n\n## What fails (on `master`, 6305d83a)\n\n```\nFAIL: models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml: exec uses ${LM_ONLY_ARGS[@]} but it is never assigned\n```\n\n## Why it's the test, not the compose\n\n`LM_ONLY_ARGS` is assigned on every path that reaches the `exec`. The `case` has an arm for each valid value, and its default arm exits:\n\n```sh\ncase \"$$VISION\" in\n  on) LM_ONLY_ARGS=() ;;\n  off) LM_ONLY_ARGS=(--language-model-only) ;;\n  *) echo \"[size] VISION='$$VISION' must be on or off\" >&2; exit 1 ;;\nesac\n```\n\n(`models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml` ~l.255\u2013259, from #1540.) The guard has two blind spots here, in `scripts/tests/test-compose-args-array-scope.sh`:\n\n1. It only counts an assignment at the start of a line: `re.match(rf'^\\s*{arr}=\\(', l)` (~l.84). `on) LM_ONLY_ARGS=() ;;` starts with the case pattern, so it reads \"never assigned\".\n2. Its scope model treats `case`/`esac` as one nested scope and only `else`/`elif` as alternatives. So even a matched assignment inside an arm would not count as dominating the `exec`, though an exhaustive case (every arm assigns or exits) does dominate.\n\n## Suggested fix\n\nPick one:\n- **Compose (smallest):** initialise `LM_ONLY_ARGS=()` before the `case`. That's harmless and makes the dominance obvious to readers and to the guard.\n- **Guard:** recognise `pattern) NAME=(` assignments, and treat a `case` whose every arm assigns `NAME` or exits as dominating. Add a fixture for both.\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1610,
+  "merged": "2026-10-10",
+  "base": "70b2e5939ee2ca7ff77e6ce7ad33a56761aca150",
+  "merge": "9a72acf2c8d8199f3d1d1fc3f3514ebdbaa496d2",
+  "tests": [
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "files": [
+   "scripts/lib/profiles/patch_attribution.py",
+   "scripts/lib/profiles/patches.yml",
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "area": "lib/profiles",
+  "size": 112,
+  "source": "issue #1597",
+  "problem": "patch_attribution.reaches(): the legacy fallback reports install-script patches as wired after their mount and invoke are removed\n\n## What happens\n\nFor any `patches.yml` entry with `delivery.entrypoint_invoke: true`, `patch_attribution.reaches()` returns **True** even when the compose no longer mounts or invokes the patch. So `test-patch-attribution` (and every other consumer of `reaches()`) cannot detect an install-script patch that has been unwired from a compose.\n\n## Repro\n\nStrip a patch's mount and invoke lines from a copy of a compose that carries it, then ask `reaches()` and the sound check `_spec_wiring_present()`:\n\n| patch | compose | `reaches()` on the real compose | `reaches()` with the patch's mount + invoke removed | `_spec_wiring_present()` on the stripped copy |\n|---|---|---|---|---|\n| `vllm-flashinfer-decode-pin` | `qwen3.8-27b/vllm/compose/dual/autoround-int4/mtp.yml` | True | **True** | False |\n| `qwen38-sglang-autoround-w4a8-v0519` | `qwen3.8-27b/sglang/compose/dual/fp8/mtp.yml` | True | **True** | False |\n| `vllm-effort-budget` * | `qwen3.8-27b/vllm/compose/dual/autoround-int4/mtp.yml` | True | **True** | False |\n| `qwen38-sglang-effort-thinking-budget` * | `qwen3.8-27b/sglang/compose/dual/autoround-int4/mtp.yml` | True | **True** | False |\n\n\\* new entries on the upcoming effort-budget branch; the first two are on `master` today.\n\nThe stripped copies had no line left mentioning the patch in the service body; the sound path correctly says False, the fallback overrides it.\n\n## Cause\n\n`scripts/lib/profiles/patch_attribution.py`, the legacy `delivery:` fallback in `reaches()` (from `if delivery.get(\"entrypoint_invoke\"):`, ~line 546):\n\n```python\nfor rel in patch.get(\"files\") or []:\n    target = root / rel\n    markers = [Path(rel).name]\n    if target.is_dir():\n        markers.append(Path(rel).parent.name)   # \u2190 \"patches\"\n    if any(marker in body for marker in markers):\n        return True\n```\n\n- A **directory** entry adds its parent's name \u2014 always `patches` \u2014 as a marker, and every compose that mounts *any* `\u2026/patches/\u2026` dir contains that string.\n- A **file** entry uses the bare filename \u2014 e.g. `install.sh` \u2014 which every compose that runs *any* install script contains.\n\nSo for these entries the fallback is effectively always True, and the sound `delivery_spec` check (`_spec_wiring_present`) never gets the final say.\n\n## Suggested fix\n\n- When an entry has a `delivery_spec` (all four above do), let `_spec_wiring_present()` decide and skip the legacy fallback.\n- Where the fallback must stay (entries with only the `delivery:` block), drop the parent-dir marker and treat generic filenames (`install.sh`, `apply.py`, \u2026) as non-identifying; match the patch dir's own name or its declared mount target instead.\n- Add a negative control to `test-patch-attribution.sh`: a fixture compose with a patch's mount + invoke removed must report not-reached.\n\nFound while wiring the effort-budget patches (vLLM + SGLang); the wiring there is verified separately by per-service `docker compose config` checks, not by this test.\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1612,
+  "merged": "2026-10-10",
+  "base": "9a72acf2c8d8199f3d1d1fc3f3514ebdbaa496d2",
+  "merge": "f5695eaf80b7518bcfcf71e4795895c40d628ae1",
+  "tests": [
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "files": [
+   "scripts/lib/profiles/patch_attribution.py",
+   "scripts/tests/test-patch-attribution.sh"
+  ],
+  "area": "lib/profiles",
+  "size": 242,
+  "source": "issue #1611",
+  "problem": "patch_attribution: chat-template patches 'reach' composes that use a different template (qwen38 109 vs 62, apex 91 vs 4, glm53 91 vs 0)\n\n## What happens\n\n`patch_attribution.reaches()` still over-reports for `delivery_mechanism: chat_template` patches. #1610 fixed the install-script class; chat templates go through their own branch (`compose_effective_text` + `_spec_wiring_present`) and weren't part of that change. Measured on `master` (9a72acf2), counting `models/*/*/compose/*/*/*.yml`:\n\n| patch | reaches | load-bearing | composes it \"reaches\" without being declared for them |\n|---|--:|--:|---|\n| `qwen38-reasoning-effort-template` | **109** | 62 | 47: Gemma 4 (31B/26B/12B), qwen3.6-27b, qwen3.6-35b-a3b, tess-4, GLM-5.3 llama.cpp, plus 2 Qwen3.8 SGLang |\n| `apex-qwen-chat-template` | **91** | 4 | 87: every vLLM compose that passes `--chat-template`, plus GLM / Inkling llama.cpp |\n| `glm53-minja-numeric-index` | **91** | 0 | 91 |\n| `gemma-google-canonical-chat-template` | 12 | 12 | 0 \u2705 |\n| `qwen-froggeric-chat-template` | 15 | 16 | 0 \u2705 |\n\nExample: `reaches(qwen38-reasoning-effort-template, models/gemma-4-31b/vllm/compose/dual/qat-awq-int4/base.yml)` \u2192 **True**.\n\nSo `test-patch-attribution` can't tell whether these templates are actually wired into their load-bearing composes. Any compose that mounts *some* template passes for all three.\n\n## Causes (`scripts/lib/profiles/patch_attribution.py`)\n\n1. **The bare `--chat-template` flag counts as an invoke marker.** For chat-template specs whose `invoke` mentions it, `_spec_wiring_markers` appends `\"--chat-template\"` and `mounted_at` as separate invoke markers, and `inv_ok` is an `any(...)`. The flag alone therefore satisfies the invoke check. It is also a substring of `--chat-template-file`. The code comment says the explicit style should \"require BOTH tokens in the merged body\"; the implementation requires either one.\n2. **`wired_at: [volumes, command]` isn't a recognised combination.** apex and glm53 declare `command`, while the code only knows `volumes` / `entrypoint`. So they fall to the \"unknown: any declared marker\" branch, where the bare flag above decides alone.\n3. **`qwen38-reasoning-effort-template` has `mounted_at: /chat_template.jinja`**, a suffix, because it's mounted over each model dir's own `chat_template.jinja`. Any compose that mounts any template over a model directory matches it.\n\n## Suggested fix\n\n- **Never use the bare `--chat-template` flag as a marker on its own.** For the explicit-flag style, require the flag *and* the mount path, as the comment intends: both present, or adjacent list items in the merged body.\n- **Treat `command` like `entrypoint`** in `wired_at` (both are the launch-command insertion point), or normalise one to the other in `patches.yml`.\n- **Make the chat-template volume marker source-aware**, the way #1610 did for install scripts: the vendored template's own directory or filename (`qwen38-reasoning-effort-template/\u2026`, `apex-qwen-chat-template.jinja`, `glm53-minja-numeric-index/\u2026`) must be on the same line as the mount target.\n- **Add negative controls to `test-patch-attribution`:** the Qwen3.8 template must not reach a Gemma compose, and apex / glm53 must not reach a vLLM compose that only passes `--chat-template` for its own template. Like #1610's controls, they should fail on the current code.\n\nFollow-up to #1597 / #1610.\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ },
+ {
+  "n": 1621,
+  "merged": "2026-10-10",
+  "base": "7dea58c3beb62003ecf21267308f5303d46ad00b",
+  "merge": "3a8a5950f991df4e1890e00e2111e9eb8dfcb3c5",
+  "tests": [
+   "scripts/tests/test-quality-server-budget.sh"
+  ],
+  "files": [
+   "docs/QUALITY_TEST.md",
+   "scripts/lib/quality_line.py",
+   "scripts/quality-test.sh",
+   "scripts/tests/test-quality-server-budget.sh"
+  ],
+  "area": "docs",
+  "size": 148,
+  "source": "PR problem section",
+  "problem": "fix(quality-test): read a llama.cpp server's reasoning budget back too\n\n`quality-test.sh` reads the server's reasoning budget back, so it can size the client thinking cap and record the budget. It only understood the vLLM / SGLang `[effort-budget] v1` boot line. On a llama.cpp slug it reported **\"server budget: unknown\"**, so:\n\n- **The answer could be cut off.** The thinking cap stayed at **16384** while the server's budget is **32768** (the qwen3.8 llama.cpp default since #1617). Reasoning past 16384 was cut by the client cap (`token_limit`) instead of the server closing it gracefully with room for the answer.\n- **The budget went unrecorded.** The `Quality:` line and benchlocal's `server_thinking_budget` never recorded it.\n\nWork in /testbed (the club-3090 repository). Make the change in the source files. The repository's test suite for this behaviour will be checked after you submit; you may add or run tests, but your test edits are not graded."
+ }
+]

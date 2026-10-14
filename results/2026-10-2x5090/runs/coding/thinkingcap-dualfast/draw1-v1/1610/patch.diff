@@ -1,0 +1,201 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..5d2d058 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -29,10 +29,14 @@ The extracted :func:`reaches` instead:
+   absolute path to a compose file.
+ 
+ The deprecated ``delivery:`` boolean block is still consulted (read-only,
+-the test still asserts on it) but every text probe it performs now runs
+-against the comment-stripped service body, never the header — so the
+-result is identical to the legacy behaviour on the shipped composes
+-while being immune to header/comment false positives on generated ones.
++the test still asserts on it) but only when a patch's ``delivery_spec`` is
++*not* decisive, and every text probe it performs now (a) runs against the
++comment-stripped service body, never the header, and (b) matches
++*identifying* markers (the patch's own dir name / declared mount target)
++rather than the old non-identifying ones (a bare ``install.sh`` or the
++shared ``patches/`` parent dir). A decisive ``delivery_spec`` is the final
++word, so a now-unwired install-script patch is no longer reported as
++reached (#147) while the shipped composes keep identical results.
+ """
+ 
+ from __future__ import annotations
+@@ -100,6 +104,32 @@ VALID_DELIVERY_MECHANISM = {
+ # orphan vendored template with no patches.yml entry is caught).
+ CHAT_TEMPLATE_ARTIFACT_SUFFIXES = {".jinja", ".jinja2", ".j2"}
+ 
++# Basenames that identify NO particular patch: every install-script patch
++# ships an ``install.sh``, a site-package overlay an ``apply.py`` /
++# ``install.py``, etc. Keying reachability on a *bare artifact filename*
++# therefore matched *any* compose that ran/mounted *any* such script — the
++# non-identifying false-positive the legacy ``delivery:`` fallback produced
++# (#147: an install-script patch reported as "wired" after its own mount +
++# invoke were removed). Identifying markers come from the patch's own dir
++# name and its declared mount target instead.
++GENERIC_ARTIFACT_BASENAMES = {
++    "install.sh",
++    "install.py",
++    "apply.sh",
++    "apply.py",
++    "run.sh",
++    "entrypoint.sh",
++    "patch.sh",
++    "patch.py",
++}
++
++# Shared artifact-container dir names that identify NO particular patch: every
++# model's patch tree lives under a top-level ``patches/`` dir, so a marker of
++# ``patches`` matched any compose that mounted any patch at all. The old
++# fallback used a directory entry's *parent* name (always ``patches``) for
++# exactly this reason; we drop it.
++GENERIC_CONTAINER_DIR_NAMES = {"patches"}
++
+ SEED_REQUIRED_KEYS = {
+     "model",
+     "arch_family",
+@@ -496,6 +526,90 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     return (bool(vol_markers) and vol_ok) or (bool(inv_markers) and inv_ok)
+ 
+ 
++def _spec_wired_at_dimensions(patch: dict) -> set:
++    """The insertion-point dimensions a ``delivery_spec`` declares (from
++    ``wired_at``), normalized to a set (e.g. ``{"volumes", "entrypoint"}``)."""
++    spec = patch.get("delivery_spec") or {}
++    wired_at = spec.get("wired_at")
++    if isinstance(wired_at, str):
++        wired_at = [wired_at]
++    return set(wired_at or [])
++
++
++def _spec_is_decisive(patch: dict) -> bool:
++    """True iff the ``delivery_spec`` can actually verify its declared wiring.
++
++    A spec is *decisive* when it declares a non-empty ``wired_at`` AND carries
++    at least one concrete marker (a mount target / an invoke string) for
++    EVERY dimension it declares. For such a spec, :func:`_spec_wiring_present`
++    returning False means the patch is genuinely unwired, so that result is
++    the final word and the legacy ``delivery:`` fallback must NOT override it.
++
++    A spec that declares e.g. ``wired_at: [volumes, ...]`` but carries no
++    ``mounted_at`` (hence no volume marker) is *incomplete*: it cannot confirm
++    or deny the volume dimension on its own, so the identifying-marker fallback
++    below still has the last look for it.
++    """
++    if not patch.get("delivery_spec"):
++        return False
++    dims = _spec_wired_at_dimensions(patch)
++    if not dims:
++        return False
++    vol_markers, inv_markers = _spec_wiring_markers(patch)
++    if "volumes" in dims and not vol_markers:
++        return False
++    if "entrypoint" in dims and not inv_markers:
++        return False
++    return True
++
++
++def _fallback_markers(patch: dict, root: Path) -> list[str]:
++    """Identifying text markers for the legacy ``delivery:`` fallback.
++
++    The legacy code keyed on the *bare artifact filename* (e.g. ``install.sh``,
++    present in every compose that runs any install script) and, for a directory
++    entry, its *parent dir name* (always ``patches``, present in every compose
++    that mounts any patch dir). Both are non-identifying, so the fallback
++    reported a patch as reached in a compose whose own mount + invoke for it
++    had been removed (#147).
++
++    Instead we match strings that appear only where THIS patch is actually
++    wired: the patch's own directory name (the repo dir holding its artifacts)
++    and its declared mount target (the container path basename from
++    ``delivery_spec.mounted_at`` / ``overlay_files[].dest`` — present in both
++    the volume line and, for install scripts, the invoke line). The patch id
++    (often == the dir name) is included for parity. Non-identifying basenames
++    are dropped defensively.
++    """
++    markers: list[str] = []
++    for rel in patch.get("files") or []:
++        p = Path(rel)
++        # A dir entry: its own name. A file entry: its containing dir's name —
++        # but a file that sits directly in the shared ``patches/`` container
++        # has no patch-specific dir, so its parent name (``patches``) is
++        # non-identifying and is dropped (the patch id / mount target below
++        # remain identifying).
++        dir_name = p.name if (root / rel).is_dir() else p.parent.name
++        if dir_name and dir_name not in GENERIC_CONTAINER_DIR_NAMES:
++            markers.append(dir_name)
++    spec = patch.get("delivery_spec") or {}
++    if spec.get("mounted_at"):
++        markers.append(Path(spec["mounted_at"]).name)
++    for of in spec.get("overlay_files") or []:
++        if of.get("dest"):
++            markers.append(Path(of["dest"]).name)
++    if patch.get("id"):
++        markers.append(patch["id"])
++    seen: set[str] = set()
++    out: list[str] = []
++    for m in markers:
++        if not m or m in seen or m in GENERIC_ARTIFACT_BASENAMES:
++            continue
++        seen.add(m)
++        out.append(m)
++    return out
++
++
+ # --------------------------------------------------------------------------
+ # gap_declared / reaches.
+ # --------------------------------------------------------------------------
+@@ -517,10 +631,15 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     ``name_or_path`` may be a COMPOSE_REGISTRY profile name OR an
+     arbitrary absolute path to a compose file.
+ 
+-    The deprecated ``delivery:`` boolean block is still honoured as a
+-    fallback for parity with the existing contract, but every probe runs
+-    against the service body so it cannot be tripped by a header/comment
+-    mention of the patch ID or a PR number.
++    When the patch's ``delivery_spec`` is *decisive* (declares ``wired_at``
++    plus a marker for every declared dimension), that check is the final
++    word: a missing mount/invoke means not reached. Only then does the
++    deprecated ``delivery:`` block get consulted — and it matches
++    *identifying* markers (the patch's own dir name / declared mount target),
++    never the non-identifying ones (a bare ``install.sh`` or the shared
++    ``patches/`` parent dir) that once reported any install-script compose as
++    reached after the patch's own wiring was removed. All probes run against
++    the service body so a header/comment mention of the ID can't trip them.
+     """
+     # CONTRACT-2b-i: a `chat_template` patch's effective coverage MUST be
+     # computed from the REAL merged compose graph (`extends:` resolved with
+@@ -540,18 +659,24 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     if _spec_wiring_present(patch, body):
+         return True
+ 
++    # A DECISIVE delivery_spec (declares wired_at + a marker for every
++    # declared dimension) is the arbiter: it just said the wiring is absent,
++    # so the patch is not reached — skip the legacy fallback entirely, whose
++    # generic markers would otherwise override the sound result and report a
++    # now-unwired install-script patch as reached (#147). An INCOMPLETE spec
++    # (e.g. wired_at: [volumes, ...] with no mounted_at) cannot confirm/deny
++    # on its own, so it defers to the identifying-marker fallback below.
++    if _spec_is_decisive(patch):
++        return False
++
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
++    # service body, so header/comment ID mentions never match. It matches
++    # IDENTIFYING markers only (the patch's own dir name / its declared mount
++    # target), never the old non-identifying ones (a bare filename like
++    # `install.sh` or the shared `patches/` parent dir).
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
+-        if patch["id"] in body:
++        if any(marker in body for marker in _fallback_markers(patch, root)):
+             return True
+     if (
+         delivery.get("genesis")

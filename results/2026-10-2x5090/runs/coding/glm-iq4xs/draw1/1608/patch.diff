@@ -1,0 +1,137 @@
+diff --git a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+index 81a4f45..4b38d66 100644
+--- a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
++++ b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+@@ -275,6 +275,10 @@ services:
+         _gmu="$${GPU_MEMORY_UTILIZATION:-$$_gmu_tier}"; _seqs="$${MAX_NUM_SEQS:-$$_seqs_tier}"
+         _mnbt="$${MAX_NUM_BATCHED_TOKENS:-$$_mnbt_tier}"; _lptt="$${LONG_PREFILL_TOKEN_THRESHOLD:-$$_lptt_tier}"
+         _mml="$${MAX_MODEL_LEN:-$$_mml_tier}"
++        # Pre-seed so the array is defined on every path: the case below assigns
++        # it in each valid arm and exits in the default one, but a reader (and the
++        # array-scope gate) should not have to prove exhaustiveness to see that.
++        LM_ONLY_ARGS=()
+         case "$$VISION" in
+           on) LM_ONLY_ARGS=() ;;
+           off) LM_ONLY_ARGS=(--language-model-only) ;;
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..16c10c0 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -51,21 +51,85 @@ OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
+ CLOSE = re.compile(r'^\s*(fi|done|esac)\b')
+ ALT   = re.compile(r'^\s*(else|elif)\b')
+ ONELINE = re.compile(r'\b(fi|done|esac)\s*;?\s*$')
++# A `case` arm: `on) ...`, `full|lean) ...`, `*) ...`.  Must NOT match command
++# substitutions (`foo=$(...)` carries parens), arithmetic, or `case ... in` itself.
++ARM   = re.compile(r'^\s*([^()\s][^()]*?)\)\s*')
++ARM_IGNORE = re.compile(r'^(\s*#|\s*(case|if|for|while|until|fi|esac|else|elif)\b)')
+ 
+ def scope_paths(lines):
+     """Path of enclosing BRANCH ids per line.  `else`/`elif` starts a NEW id at the
+     same depth, so an assignment in the then-branch does not dominate the
+-    else-branch -- which plain depth counting cannot express."""
++    else-branch -- which plain depth counting cannot express.
++
++    `case` arms get the same treatment (each arm is its own branch id), but the
++    arm ids are also *recorded*: a case whose every arm either assigns NAME or
++    exits covers every value of the selector, so an assignment in ANY arm
++    dominates code after the `esac`.  Without that, an exhaustive case --
++    the idiomatic way to map a knob onto flags -- reads as a hole.
++    """
+     paths, stack, nxt = [], [], [0]
++    cases = {}    # case block id -> list of (first_line, last_line) per arm
++    arm_of = {}   # line index -> (case block id, arm id, depth of arm id in path)
++    open_cases = []  # stack of [case block id, current arm id, depth]
+     def fresh():
+         nxt[0] += 1
+         return nxt[0]
+-    for ln in lines:
+-        if CLOSE.match(ln) and stack: stack.pop()
+-        elif ALT.match(ln) and stack: stack[-1] = fresh()
++    for idx, ln in enumerate(lines):
++        if CLOSE.match(ln) and stack:
++            b = stack.pop()
++            if open_cases and open_cases[-1][1] == b:
++                # an `esac` closes the current arm AND the case itself
++                cid = open_cases[-1][0]
++                if cases.get(cid):
++                    cases[cid][-1] = (cases[cid][-1][0], idx)
++                open_cases.pop()
++                if stack and stack[-1] == cid: stack.pop()
++        elif ALT.match(ln) and stack:
++            stack[-1] = fresh()
++        elif open_cases and not ARM_IGNORE.match(ln):
++            m = ARM.match(ln)
++            if m and not ONELINE.search(ln):
++                cid, arm, depth = open_cases[-1]
++                if arm is not None:
++                    cases[cid][-1] = (cases[cid][-1][0], idx)
++                    stack.pop()
++                arm = fresh()
++                cases.setdefault(cid, []).append((idx, len(lines)))
++                open_cases[-1] = [cid, arm, depth]
++                arm_of[idx] = (cid, arm, len(stack))
++                stack.append(arm)
+         paths.append(tuple(stack))
+-        if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+-    return paths
++        if OPEN.match(ln) and not ONELINE.search(ln):
++            b = fresh()
++            stack.append(b)
++            if re.match(r'^\s*case\b', ln):
++                open_cases.append([b, None, len(stack)])
++    return paths, cases, arm_of
++
++def case_exhaustive(cid, cases, lines, arr):
++    """True when every arm of the case assigns `arr` or exits -- i.e. no value of
++    the selector reaches past the `esac` with `arr` unset."""
++    asg = re.compile(rf'\b{arr}=\(')
++    for start, end in cases[cid]:
++        body = "\n".join(lines[start:end])
++        if not (asg.search(body) or re.search(r'\bexit\b', body)):
++            return False
++    return True
++
++def allowed_paths(j, paths, cases, arm_of, lines, arr):
++    """Every branch path an assignment on line j may be credited to: its own, plus
++    -- for each enclosing case that is exhaustive for `arr` -- the path with that
++    arm id dropped (the case as a whole, not one arm of it)."""
++    out = {paths[j]}
++    anc = [arm_of[j]] if j in arm_of else []
++    for cid, arm, depth in anc:
++        nxt = set()
++        for p in out:
++            nxt.add(p)
++            if len(p) == depth and p[depth - 1] == arm and case_exhaustive(cid, cases, lines, arr):
++                nxt.add(p[:depth - 1])
++        out = nxt
++    return out
+ 
+ checked = refs = 0
+ problems = []
+@@ -76,17 +140,22 @@ for p in sorted(pathlib.Path("models").rglob("*.yml")):
+     if not s: continue
+     checked += 1
+     lines = s.splitlines()
+-    paths = scope_paths(lines)
++    paths, cases, arm_of = scope_paths(lines)
+     for i, ln in enumerate(lines):
+         if not re.match(r'^\s*exec\b', ln): continue
+         for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+             refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
++            # an assignment may sit at the start of a line OR inside a `case` arm
++            # (`on) LM_ONLY_ARGS=() ;;`), where the line starts with the pattern.
++            asg = [j for j, l in enumerate(lines)
++                   if re.match(rf'^\s*{arr}=\(', l)
++                   or (j in arm_of and re.search(rf'\b{arr}=\(', l))]
+             if not asg:
+                 problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
+             # an assignment dominates the exec iff it comes first AND its branch
+             # path is a prefix of the exec's (same scope, or an enclosing one)
+-            ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
++            ok = any(j < i and any(paths[i][:len(pj)] == pj for pj in allowed_paths(j, paths, cases, arm_of, lines, arr))
++                     for j in asg)
+             if not ok:
+                 problems.append(
+                     f"{p}: {arr} is assigned only inside a branch that the exec on line "

@@ -1,0 +1,26 @@
+{
+ "n": 1573,
+ "config": "glm-avar6-omp-xhigh",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 1961.1,
+ "steps": 75,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 1.0,
+ "files_touched": [
+  "docs/QUALITY_TEST.md",
+  "scripts/lib/thinking-budget.sh",
+  "scripts/quality-test.sh"
+ ],
+ "p2p_run": 1,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-quality-thinking-budget.sh": 1
+ },
+ "effort_note": "ran as low but omp sent no reasoning_effort; server default max (relabelled 2026-10-12)"
+}

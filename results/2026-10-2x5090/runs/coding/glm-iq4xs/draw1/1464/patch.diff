@@ -1,0 +1,182 @@
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..ca98537 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -1224,7 +1224,16 @@ status_gate() {
+   esac
+ }
+ 
+-up_variant() {
++# --- Refusable checks (MUST run before any teardown) -------------------------
++# Everything that can REFUSE a launch lives in validate_variant(), and
++# switch.sh's main path calls it BEFORE down_running(). History: the checks used
++# to live inline in up_variant(), which ran AFTER down_running() — so a refused
++# launch (an experimental slug without --force, a compose whose model files
++# aren't on this host, a typo'd slug) had already brought the running slug down
++# and left the rig serving NOTHING. Validate first, tear down second.
++# Idempotent per slug: the main path validates up front, and up_variant()
++# re-invokes it only when that hasn't already happened.
++validate_variant() {
+   local v="$1"
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+     echo "ERROR: unknown variant '${v}'." >&2
+@@ -1252,11 +1261,6 @@ up_variant() {
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+-      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+@@ -1282,13 +1286,27 @@ up_variant() {
+     # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+     preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
+-  gpu_preflight
+-  # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+-  # container stop leaves them resident — 65 GB on the reference rig 2026-09-25, incl. two 32 GiB
+-  # KV-offload regions, vllm#57303). Only old, root-owned, engine-named, unmapped files; never fails
+-  # the boot. CLUB3090_SHM_CLEANUP=0 disables.
+-  bash "$(dirname "$0")/lib/shm-cleanup.sh" || true
++}
+ 
++up_variant() {
++  local v="$1"
++  # Refusable checks first (skipped when the main path already ran them, so the
++  # caveats/forcing notices aren't printed twice).
++  if [[ "${_SWITCH_VALIDATED_VARIANT:-}" != "$v" ]]; then
++    validate_variant "$v"
++  fi
++  IFS='|' read -r eng dir file <<< "${VARIANTS[$v]}"
++  local full_dir="${ROOT_DIR}/${dir}"
++
++  # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
++  # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
++  # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
++  # so its settle-retry also covers the just-torn-down container's VRAM lag —
++  # which is why it lives here and not in validate_variant().
++  if [[ "$eng" == "vllm" && -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
++  fi
++  gpu_preflight
+   echo "[switch] bringing up: ${v}  (${dir}/${file})"
+   export_variant_engine_pin "$v"
+   preflight_ik_llama_image "$v"   # #633 — cu12 fallback on <13.2 drivers (unless pinned)
+@@ -1617,6 +1635,10 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
+ resolve_ready_url "${VARIANT}"
++# Refuse BEFORE tearing the running slug down — a refused launch must leave the
++# rig serving whatever it was serving.
++validate_variant "${VARIANT}"
++_SWITCH_VALIDATED_VARIANT="${VARIANT}"
+ down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready
+diff --git a/scripts/tests/test-switch-refuses-before-teardown.sh b/scripts/tests/test-switch-refuses-before-teardown.sh
+new file mode 100755
+index 0000000..b27a1b5
+--- /dev/null
++++ b/scripts/tests/test-switch-refuses-before-teardown.sh
+@@ -0,0 +1,97 @@
++#!/usr/bin/env bash
++# Test for switch.sh launch-refusal ordering.
++#
++# Bug: switch.sh brought the running slug down FIRST and only then ran the
++# checks that can refuse a launch — so a refused launch left the rig serving
++# nothing. Hit twice on the reference rig in one day: an experimental slug run
++# without --force, and a worktree whose model files weren't on the host (no
++# MODEL_DIR). A mistyped slug did the same.
++#
++# Contract: EVERY refusable check runs BEFORE down_running(). A refused launch
++# must leave the running slug untouched (no `compose down`, no `docker stop`).
++#
++# Harness: mock `docker` / `compose` / `nvidia-smi` on PATH and run switch.sh
++# end-to-end, recording every call. Fully offline — no docker, no GPU.
++set -uo pipefail
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++
++PASS=0
++FAIL=0
++ok()   { PASS=$((PASS + 1)); }
++fail() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
++
++tmp_dir="$(mktemp -d)"
++cleanup() { rm -rf "$tmp_dir"; }
++trap cleanup EXIT
++
++# --- mocks: record everything, answer benignly --------------------------------
++cat > "${tmp_dir}/docker" <<'MOCK_DOCKER'
++#!/usr/bin/env bash
++printf 'docker %s\n' "$*" >> "$DOCKER_MOCK_LOG"
++case "${1:-}" in
++  ps) for n in ${DOCKER_MOCK_RUNNING:-}; do printf '%s\n' "$n"; done ;;
++  inspect) printf '%s\n' "${DOCKER_MOCK_INSPECT:-}" ;;
++esac
++exit 0
++MOCK_DOCKER
++cat > "${tmp_dir}/nvidia-smi" <<'MOCK_NVIDIA'
++#!/usr/bin/env bash
++q="$*"
++case "$q" in
++  *memory.free*)  printf '0, 24000, 24576\n' ;;
++  *uuid*)         printf '0, GPU-0000\n' ;;
++  *memory.total*) printf '0, 24000\n' ;;
++  *compute-apps*) : ;;
++  *)              printf '0\n' ;;
++esac
++exit 0
++MOCK_NVIDIA
++chmod +x "${tmp_dir}/docker" "${tmp_dir}/nvidia-smi"
++touch "${tmp_dir}/insp"
++export PATH="${tmp_dir}:$PATH"
++export DOCKER_MOCK_INSPECT="${tmp_dir}/insp"
++export DOCKER_MOCK_RUNNING="vllm-qwen36-27b-lmcache"
++export DOCKER_MOCK_LOG="${tmp_dir}/calls.log"
++export OWUI_REGISTER=0 READY_PROBE=0 READY_TIMEOUT=1
++export READY_URL="http://localhost:1/v1/models"
++# Keep the fixture hermetic: the ordering under test doesn't need the
++# compose-dependency walk (it needs real model files on disk).
++export PREFLIGHT_NO_COMPOSE_DEPS=1
++
++# One switch.sh run; echoes the recorded docker/compose call log.
++run_switch() {
++  : > "${DOCKER_MOCK_LOG}"
++  local out rc
++  out="$(COMPOSE_BIN=: bash scripts/switch.sh "$@" 2>&1)"; rc=$?
++  printf '%s\n' "$out" > "${tmp_dir}/out"
++  printf 'rc=%s\n' "$rc"
++  cat "${DOCKER_MOCK_LOG}"
++}
++
++# 1. Mistyped slug -> refused BEFORE any teardown.
++log="$(run_switch nosuchslug-xyz)"
++if [[ "$log" != *stop* && "$log" != *" down"* ]]; then ok; else fail "mistyped slug tore the running slug down"; fi
++if grep -q "unknown variant" "${tmp_dir}/out"; then ok; else fail "mistyped slug didn't report 'unknown variant'"; fi
++
++# 2. (NA) slug without --force -> refused BEFORE any teardown.
++log="$(run_switch vllm/qwen-27b-dual-lmcache --no-wait)"
++if [[ "$log" != *stop* && "$log" != *" down"* ]]; then ok; else fail "experimental slug without --force tore the running slug down"; fi
++if grep -q "(NA: incubating)" "${tmp_dir}/out"; then ok; else fail "experimental slug didn't report its (NA) status"; fi
++
++# 3. Model files missing on the host -> refused BEFORE any teardown.
++log="$(PREFLIGHT_NO_COMPOSE_DEPS=0 MODEL_DIR="${tmp_dir}/no-such-models" run_switch vllm/minimal --no-wait)"
++if [[ "$log" != *stop* && "$log" != *" down"* ]]; then ok; else fail "missing-model-dir slug tore the running slug down"; fi
++if grep -q "preflight" "${tmp_dir}/out"; then ok; else fail "missing-model-dir slug didn't run the compose-deps preflight"; fi
++
++# 4. POSITIVE CONTROL: an accepted launch still tears down then brings up, in
++#    that order — the reorder must not have dropped the teardown.
++: > "${DOCKER_MOCK_LOG}"
++out="$(COMPOSE_BIN=: FORCE=1 bash scripts/switch.sh vllm/qwen-27b-dual-lmcache --no-wait 2>&1)"
++if grep -q "bringing up:" <<<"$out"; then ok; else fail "accepted launch never reached 'bringing up' (mock env drift?): ${out}"; fi
++if grep -q "docker stop" "${DOCKER_MOCK_LOG}"; then ok; else fail "accepted launch no longer tears the previous slug down"; fi
++
++echo "PASS: ${PASS}  FAIL: ${FAIL}"
++if [[ "$FAIL" -eq 0 ]]; then echo "OK: switch.sh refuses a launch before tearing down the running slug"; fi
++exit "$(( FAIL > 0 ? 1 : 0 ))"

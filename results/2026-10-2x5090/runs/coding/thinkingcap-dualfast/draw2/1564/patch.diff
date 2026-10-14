@@ -1,0 +1,78 @@
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 06b4696..b3c15bc 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -464,13 +464,17 @@ spec = {
+         "max_ctx": max_ctx, "max_num_seqs": 1, "mem_util": 0.9,
+         "compose_path": cpath, "default_port": port, "kvcalc_key": "SKIP"}},
+ }
+-Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++# The engine profile is NOT written here: it is carried in the spec as
++# `local_engine_profile` so it goes through promote's plan, --dry-run exit and
++# confirm with the rest of the write. Writing it here (before handing the spec
++# to promote.py) meant --dry-run leaked it — nothing downstream could stop a
++# write that had already happened.
+ if engine_yaml:
+-    d = Path(wroot) / "scripts/lib/profiles-local/engines.d"
+-    d.mkdir(parents=True, exist_ok=True)
+-    (d / f"{engine}.yml").write_text(engine_yaml, encoding="utf-8")
+-    print(f"[catalog] wrote a local ENGINE profile: profiles-local/engines.d/{engine}.yml "
+-          f"(type={etype}, capabilities evidenced from the compose)")
++    spec["local_engine_profile"] = engine_yaml
++    print(f"[catalog] will write a local ENGINE profile: "
++          f"profiles-local/engines.d/{engine}.yml (type={etype}, capabilities "
++          f"evidenced from the compose)")
++Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
+ 
+ def mark(v, given):  # show the user which values THEY chose vs which we guessed
+     return "given" if given else "derived"
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index 1e903c2..83f5d93 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -542,7 +542,7 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+     mid = spec["model_id"]
+     slug = spec["registry_entry"]["slug"]
+     if spec["_layer"] == "local":
+-        return [
++        lines = [
+             f"plan (layer LOCAL — gitignored {_LOCAL_DIR_REL}/, root {root}):",
+             f"  write {_LOCAL_MODELS_REL}/{mid}.yml",
+             f"  write {spec['compose']['path']}",
+@@ -552,6 +552,13 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+             "  then: get_registry() import-sanity + registry-emit.sh --json re-check",
+             "  NO core file is touched. Rollback: delete the written files.",
+         ]
++        # A local registration can carry a NEW engine profile (catalog.sh's
++        # front door for an engine the catalog does not know). It goes through
++        # the same plan / --dry-run / confirm as the rest of the write.
++        if spec.get("local_engine_profile"):
++            engine = slug.split("/", 1)[0]
++            lines.insert(3, f"  write engines.d/{engine}.yml (new local ENGINE profile)")
++        return lines
+     return [
+         f"plan (layer CORE — maintainer, root {root}):",
+         f"  write {_MODELS_DIR_REL}/{mid}.yml",
+@@ -597,6 +604,22 @@ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+         _info(f"merged entry into {reg_path}")
+     except OSError as exc:
+         raise InternalError(f"could not rewrite {reg_path}: {exc}")
++
++    # ── Optional 4th artifact: a NEW local ENGINE profile ───────────────────
++    # Carried in the spec (from catalog.sh) so it is subject to the same
++    # plan / --dry-run / confirm as the model + compose + registry writes above.
++    # Without this it was written by catalog.sh before the executor ever ran,
++    # so a --dry-run leaked it.
++    local_engine_profile = spec.get("local_engine_profile")
++    if local_engine_profile:
++        engine = spec["registry_entry"]["slug"].split("/", 1)[0]
++        engine_path = root / _LOCAL_DIR_REL / "engines.d" / f"{engine}.yml"
++        try:
++            engine_path.parent.mkdir(parents=True, exist_ok=True)
++            engine_path.write_text(local_engine_profile, encoding="utf-8")
++            _info(f"wrote {engine_path}")
++        except OSError as exc:
++            raise InternalError(f"could not write {engine_path}: {exc}")
+     return profile_path, compose_abs
+ 
+ 

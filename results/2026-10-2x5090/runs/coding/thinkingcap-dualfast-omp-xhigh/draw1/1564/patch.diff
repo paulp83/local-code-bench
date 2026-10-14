@@ -1,0 +1,417 @@
+diff --git a/docs/BRING_YOUR_OWN.md b/docs/BRING_YOUR_OWN.md
+index 7fa2e3d..7465a35 100644
+--- a/docs/BRING_YOUR_OWN.md
++++ b/docs/BRING_YOUR_OWN.md
+@@ -280,8 +280,10 @@ Three things it will **refuse** rather than guess, because guessing wrong is sil
+ **Running your own engine build is expected, not exceptional.** If `--engine` names an
+ engine the catalog does not know, a profile is written for it under
+ `profiles-local/engines.d/` from evidence only: your image, the KV format your compose
+-actually uses, and the compute capability of the card it demonstrably runs on. Capability
+-blocks it cannot verify are left **empty** — the stack makes no promises on your behalf.
++actually uses, and the compute capability of the card it demonstrably runs on. The
++write goes through the promotion executor's plan, `--dry-run` and confirm with the
++rest of the registration — a `register --dry-run` writes nothing. Capability blocks
++it cannot verify are left **empty** — the stack makes no promises on your behalf.
+ Widen them once you have measured. This is exactly how our own fork is registered:
+ `llamacpp-club3090` is a distinct `id` with `type: llama.cpp`.
+ 
+@@ -305,7 +307,10 @@ python3 scripts/lib/profiles/promote.py --spec-file <spec>.json     # --layer lo
+ </details>
+ 
+ That writes `scripts/lib/profiles-local/` — `models.d/<id>.yml`, `composes/<id>/…`
+-and `registry.local.json`. Slugs use the **same `<engine>/<name>` shape as curated
++and `registry.local.json`, plus `engines.d/<engine>.yml` when the spec carries a
++`local_engine_profile` (a hand-authored spec for an engine the catalog does not know
++must include one — the executor refuses to write a registration whose engine cannot
++resolve). Slugs use the **same `<engine>/<name>` shape as curated
+ ones** — the layer decides where the *files* go, not what the slug is *called*, and
+ provenance lives in the entry's `origin` field rather than in the name. That is what
+ lets you name the engine you actually run (`my-llamacpp/my-model`, not just ours),
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 06b4696..95fc080 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -464,13 +464,19 @@ spec = {
+         "max_ctx": max_ctx, "max_num_seqs": 1, "mem_util": 0.9,
+         "compose_path": cpath, "default_port": port, "kvcalc_key": "SKIP"}},
+ }
+-Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++# The engine profile is the FOURTH local artifact — written by promote.py, not
++# here. Writing it before the executor ran meant a `register --dry-run` left a
++# permanent engines.d/<engine>.yml behind, and the real run's "engine profile
++# written" check passed against the dry run's leak. Carried in the spec as
++# local_engine_profile, it goes through promote's plan, --dry-run exit and
++# confirm with the rest (a core-known engine is refused there instead of
++# silently shadowed).
+ if engine_yaml:
+-    d = Path(wroot) / "scripts/lib/profiles-local/engines.d"
+-    d.mkdir(parents=True, exist_ok=True)
+-    (d / f"{engine}.yml").write_text(engine_yaml, encoding="utf-8")
+-    print(f"[catalog] wrote a local ENGINE profile: profiles-local/engines.d/{engine}.yml "
++    spec["local_engine_profile"] = {"engine": engine, "content": engine_yaml}
++    print(f"[catalog] will write a local ENGINE profile via promote: "
++          f"profiles-local/engines.d/{engine}.yml "
+           f"(type={etype}, capabilities evidenced from the compose)")
++Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
+ 
+ def mark(v, given):  # show the user which values THEY chose vs which we guessed
+     return "given" if given else "derived"
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index 1e903c2..1d3c046 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -21,7 +21,10 @@ The spec is the JSON dict the c3 scaffold computed (``compute_promote_scaffold``
+       "vision_capable": true|false|null,        # null → omitted
+       "compose": {"path": "...", "content": "<yaml text>"},
+       "registry_entry": {"slug": "<engine>/...", "kwargs": {...}},
+-      "setup": {...}                            # optional C1 `setup:` block
++      "setup": {...},                           # optional C1 `setup:` block
++      "local_engine_profile":                   # optional, LOCAL layer only — the
++        {"engine": "...", "content": "<yaml>"},   # engines.d/<engine>.yml profile for an
++                                               # engine the catalog does not know
+     }
+ 
+ TWO write targets (--layer, DEFAULT **local**):
+@@ -32,7 +35,11 @@ TWO write targets (--layer, DEFAULT **local**):
+   2. the compose file at ``spec.compose.path`` (MUST live under
+      ``scripts/lib/profiles-local/composes/``)
+   3. a JSON MERGE into ``scripts/lib/profiles-local/registry.local.json``
+-     (plain-dict ``_entry`` kwargs — never a python-source edit).
++     (plain-dict ``_entry`` kwargs — never a python-source edit)
++  4. (only when the spec carries ``local_engine_profile``) the local engine
++     profile ``scripts/lib/profiles-local/engines.d/<engine>.yml`` — written
++     HERE, not by the caller, so a ``--dry-run`` never leaks it
++
+ The slug MUST carry the ``local/`` namespace prefix and the entry is written
+ with ``status="incubating"`` (hidden from ``switch.sh --list``, ``--force`` to
+ launch — see compose_registry.STATUS_VALUES).
+@@ -48,10 +55,12 @@ reach the core catalog through this tool.
+ 
+ Refuses (exit 3, writes NOTHING) on any collision: existing model yml, existing
+ compose path, existing registry slug (core OR local), a bad model-id/slug shape,
+-or a namespace violation. Internal failures AFTER a write started exit 2 — there
+-is NO rollback; git is the rollback for core writes and "delete the file(s)" for
+-local ones (stated in every run's output). ``--dry-run`` prints the plan and
+-writes nothing.
++a namespace violation, or an engine the catalog does not know that the spec
++does not carry a ``local_engine_profile`` for (an unknown engine cannot resolve
++in the cross-reference check — writing first would leave the layer broken).
++Internal failures AFTER a write started exit 2 — there is NO rollback; git is
++the rollback for core writes and "delete the file(s)" for local ones (stated
++in every run's output). ``--dry-run`` prints the plan and writes nothing.
+ 
+ Success marker (the c3 parser hook)::
+ 
+@@ -83,6 +92,11 @@ _LOCAL_DIR_REL = "scripts/lib/profiles-local"
+ _LOCAL_MODELS_REL = f"{_LOCAL_DIR_REL}/models.d"
+ _LOCAL_COMPOSES_REL = f"{_LOCAL_DIR_REL}/composes"
+ _LOCAL_REGISTRY_REL = f"{_LOCAL_DIR_REL}/registry.local.json"
++_LOCAL_ENGINES_REL = f"{_LOCAL_DIR_REL}/engines.d"
++# Curated engine profiles. The LOCAL layer cannot redefine one: core wins a
++# collision (compat._load_local_engines), so a local file named after a
++# shipped engine would be silently shadowed — refuse instead.
++_CORE_ENGINES_REL = "scripts/lib/profiles/engines"
+ _LOCAL_SLUG_PREFIX = "local/"
+ # Local entries ALWAYS land here (the enum's pre-experimental rung: hidden from
+ # switch.sh --list, --force to launch). Not user-selectable — promote up the
+@@ -257,6 +271,31 @@ def _load_local_raw(root: Path) -> dict:
+     return raw
+ 
+ 
++def _engine_ids_in(root: Path, rel: str) -> set[str]:
++    """The engine ids defined by the ``*.yml`` files under <root>/<rel>.
++
++    compat keys engine profiles by the YAML ``id`` field, NOT the file name
++    (``llama-cpp-mainline.yml`` carries id ``llama-cpp-local``), so scan for
++    the top-level ``id:`` line rather than matching stems. A file whose id
++    line is missing or unparseable contributes nothing — it cannot prove its
++    id is taken."""
++    ids: set[str] = set()
++    d = root / rel
++    if not d.is_dir():
++        return ids
++    for path in sorted(d.glob("*.yml")):
++        try:
++            for line in path.read_text(encoding="utf-8").splitlines():
++                if line.startswith("id:"):
++                    val = line[3:].strip().strip("\"'")
++                    if val:
++                        ids.add(val)
++                    break
++        except OSError:
++            continue
++    return ids
++
++
+ def _append_registry_entry(root: Path, slug: str, kwargs: dict) -> None:
+     """Merge the new entry into <root>'s registry.yaml (canonical rewrite).
+ 
+@@ -493,6 +532,66 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+                     f"${{PORT:-NNNN}} to match"
+                 )
+ 
++        # ── The local engine profile (spec-carried; written HERE, not by the caller) ──
++        # The cross-reference check resolves the entry's `engine` kwarg, and an
++        # engine the catalog does not know resolves ONLY via
++        # engines.d/<engine>.yml. The slug's PREFIX is not that reference (c3's
++        # `vllm/…` slugs run on the `vllm-stable` engine). catalog.sh used to
++        # write that file itself, BEFORE handing the spec to this executor — so
++        # a `register --dry-run` left a permanent profile behind, and the real
++        # run's "engine profile written" check could pass against the dry run's
++        # leak. Carried in the spec as local_engine_profile, it goes through the
++        # plan, --dry-run exit and confirm with the rest.
++        lep = spec.get("local_engine_profile")
++        eng = kwargs.get("engine")
++        if not isinstance(eng, str) or not eng:
++            raise Refusal(
++                f"registry kwargs.engine {eng!r} must be a non-empty engine id — "
++                "the entry's cross-reference needs it to resolve"
++            )
++        if lep is not None:
++            if (
++                not isinstance(lep, dict)
++                or not isinstance(lep.get("engine"), str)
++                or not lep["engine"]
++                or not isinstance(lep.get("content"), str)
++                or not lep["content"].strip()
++            ):
++                raise Refusal(
++                    "spec.local_engine_profile must be "
++                    "{'engine': <id>, 'content': <engine-profile yaml text>}"
++                )
++            if lep["engine"] != eng:
++                raise Refusal(
++                    f"local_engine_profile.engine {lep['engine']!r} != the "
++                    f"entry's engine {eng!r}"
++                )
++            if lep["engine"] in _engine_ids_in(root, _CORE_ENGINES_REL):
++                raise Refusal(
++                    f"{lep['engine']!r} is a curated engine — the local layer "
++                    "cannot redefine one (core wins a collision, so the written "
++                    "profile would be silently shadowed). Register the model "
++                    "under its own engine id."
++                )
++            if (root / _LOCAL_ENGINES_REL / f"{lep['engine']}.yml").is_file():
++                raise Refusal(
++                    f"local engine profile already exists: "
++                    f"{_LOCAL_ENGINES_REL}/{lep['engine']}.yml — unregister the "
++                    "last model on that engine (or delete the file) first"
++                )
++        elif (
++            eng not in _engine_ids_in(root, _CORE_ENGINES_REL)
++            and eng not in _engine_ids_in(root, _LOCAL_ENGINES_REL)
++        ):
++            raise Refusal(
++                f"the entry's engine {eng!r} is not a known engine and the spec "
++                "carries no local_engine_profile — the cross-reference check "
++                "needs it to resolve BEFORE the write, or the layer lands "
++                "written and broken. catalog.sh derives one automatically; a "
++                "raw spec must carry it: 'local_engine_profile': "
++                "{'engine': <id>, 'content': <yaml text>}"
++            )
++
+         return spec
+ 
+     # ── layer == "core": maintainer-gated curated-catalog write ──────────────
+@@ -508,6 +607,16 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+             f"the {_LOCAL_SLUG_PREFIX!r} namespace belongs to the LOCAL layer — "
+             "core slugs are <engine>/<name>"
+         )
++    if spec.get("local_engine_profile") is not None:
++        # The engine profile is a LOCAL-layer artifact (engines.d/). Core ships
++        # its own engine profiles under scripts/lib/profiles/engines/, added
++        # directly — a spec-carried one here would be a silent no-op.
++        raise Refusal(
++            "spec.local_engine_profile is a LOCAL-layer artifact — the core "
++            "catalog ships its own engine profiles under "
++            f"{_CORE_ENGINES_REL}/ (add the file directly), and this spec "
++            "would leave the profile unwritten"
++        )
+     # ── Symmetric to the LOCAL containment check above (#1205 follow-up) ─────
+     # LOCAL writes may not leave the layer; CORE writes may not reach INTO it.
+     # `profiles-local/` is GITIGNORED, so a curated row whose compose_path points
+@@ -542,16 +651,25 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+     mid = spec["model_id"]
+     slug = spec["registry_entry"]["slug"]
+     if spec["_layer"] == "local":
+-        return [
++        lines = [
+             f"plan (layer LOCAL — gitignored {_LOCAL_DIR_REL}/, root {root}):",
+             f"  write {_LOCAL_MODELS_REL}/{mid}.yml",
+             f"  write {spec['compose']['path']}",
+             f"  merge entry into {_LOCAL_REGISTRY_REL} (JSON — no source edit)",
++        ]
++        lep = spec.get("local_engine_profile")
++        if lep is not None:
++            lines.append(
++                f"  write {_LOCAL_ENGINES_REL}/{lep['engine']}.yml "
++                f"(new local ENGINE profile)"
++            )
++        lines += [
+             f"  slug: {slug}  model: {mid}  variant: {spec['default_weight_variant']}"
+             f"  status: {_LOCAL_FORCED_STATUS}",
+             "  then: get_registry() import-sanity + registry-emit.sh --json re-check",
+             "  NO core file is touched. Rollback: delete the written files.",
+         ]
++        return lines
+     return [
+         f"plan (layer CORE — maintainer, root {root}):",
+         f"  write {_MODELS_DIR_REL}/{mid}.yml",
+@@ -564,11 +682,26 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+ 
+ 
+ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+-    """The THREE local-layer artifacts. Returns (profile_path, compose_path)."""
++    """The local-layer artifacts — three, plus the spec-carried ENGINE profile
++    when the spec has one (written FIRST: the entry's cross-reference points
++    at it). Returns (profile_path, compose_path)."""
+     mid = spec["model_id"]
+     profile_path = root / _LOCAL_MODELS_REL / f"{mid}.yml"
+     compose_abs = root / spec["compose"]["path"]
+ 
++    # ── The spec-carried local engine profile (written HERE, not by the caller) ──
++    # Without it an unknown engine cannot resolve and the post-write
++    # cross-reference check fails — the layer written and broken.
++    lep = spec.get("local_engine_profile")
++    if lep is not None:
++        eng_path = root / _LOCAL_ENGINES_REL / f"{lep['engine']}.yml"
++        try:
++            eng_path.parent.mkdir(parents=True, exist_ok=True)
++            eng_path.write_text(lep["content"], encoding="utf-8")
++            _info(f"wrote {eng_path} (local ENGINE profile)")
++        except OSError as exc:
++            raise InternalError(f"could not write {eng_path}: {exc}")
++
+     # ── Write 1/3: the ModelProfile ─────────────────────────────────────────
+     try:
+         profile_path.parent.mkdir(parents=True, exist_ok=True)
+diff --git a/scripts/tests/test-catalog-cli.sh b/scripts/tests/test-catalog-cli.sh
+index 9e49c84..fa46ba9 100755
+--- a/scripts/tests/test-catalog-cli.sh
++++ b/scripts/tests/test-catalog-cli.sh
+@@ -62,6 +62,13 @@ else
+   echo "  ok   derived values printed for confirmation"
+ fi
+ [[ "$out" == *"dry-run"* ]] || { echo "  FAIL --dry-run did not reach the executor"; rc=1; }
++# 2a. THE LEAK GUARD: the dry runs above must have written NOTHING — the old
++# caller-side engine-profile write leaked engines.d/their-engine.yml on every
++# --dry-run, and the round trip's "engine profile written" check below used to
++# pass on that leak rather than on the real write.
++if [[ -f "$TMP/scripts/lib/profiles-local/engines.d/their-engine.yml" ]]; then
++  echo "  FAIL --dry-run register wrote an engine profile (leak)"; rc=1
++fi
+ 
+ # 2b. arch is REQUIRED and must be refused BEFORE the write — promote reads it
+ # with .get, so a missing arch passes its validation and then dies in the
+diff --git a/scripts/tests/test_promote.py b/scripts/tests/test_promote.py
+index b395a69..b288eab 100755
+--- a/scripts/tests/test_promote.py
++++ b/scripts/tests/test_promote.py
+@@ -254,6 +254,107 @@ class TestLocalLayer:
+             assert not (root / rel).exists(), rel
+         assert not (root / "scripts/lib/profiles-local/models.d").exists()
+ 
++    # ── The spec-carried local engine profile (engines.d/<engine>.yml) ─────
++    # The executor writes it, not the caller: a caller-side write (the old
++    # catalog.sh) leaked the file on --dry-run runs.
++    _ENG = "their-engine"
++    _ENG_YAML = (
++        "schema_version: 1\n"
++        f"id: {_ENG}\n"
++        "display_name: their-engine (local)\n"
++        "type: llama.cpp\n"
++        "stability: experimental\n"
++        "min_sm: 7.5\n"
++        "supported_kv_formats:\n"
++        "  - q8_0\n"
++    )
++
++    @staticmethod
++    def _eng_spec():
++        """A local spec whose entry references an engine the catalog does not
++        know (slug + entry engine), carrying its profile."""
++        spec = _spec()
++        spec["registry_entry"]["slug"] = f"{TestLocalLayer._ENG}/my-model-dual-x"
++        spec["registry_entry"]["kwargs"]["engine"] = TestLocalLayer._ENG
++        spec["local_engine_profile"] = {
++            "engine": TestLocalLayer._ENG,
++            "content": TestLocalLayer._ENG_YAML,
++        }
++        return spec
++
++    def test_dry_run_with_engine_profile_writes_nothing(self, root):
++        eng_rel = (
++            f"scripts/lib/profiles-local/engines.d/{self._ENG}.yml"
++        )
++        res = _run_cli(
++            root, self._eng_spec(), "--layer", "local", "--dry-run"
++        )
++        assert res.returncode == 0, res.stderr + res.stdout
++        assert "dry-run" in res.stdout
++        for rel in LOCAL_ARTIFACTS:
++            assert not (root / rel).exists(), rel
++        assert not (root / eng_rel).exists()
++        assert not (root / "scripts/lib/profiles-local/engines.d").exists()
++        # The plan names the engine profile explicitly.
++        assert f"engines.d/{self._ENG}.yml (new local ENGINE profile)" in res.stdout
++
++    def test_engine_profile_written_by_executor(self, root):
++        eng_rel = f"scripts/lib/profiles-local/engines.d/{self._ENG}.yml"
++        res = _run_cli(root, self._eng_spec(), "--layer", "local")
++        assert res.returncode == 0, res.stderr + res.stdout
++        assert f"PROMOTE_OK {self._ENG}/my-model-dual-x" in res.stdout
++        for rel in LOCAL_ARTIFACTS:
++            assert (root / rel).exists(), rel
++        eng = root / eng_rel
++        assert eng.is_file()
++        assert eng.read_text() == self._ENG_YAML
++
++    def test_unknown_engine_without_profile_refused_before_write(self, root):
++        spec = self._eng_spec()
++        del spec["local_engine_profile"]
++        res = _run_cli(root, spec, "--layer", "local")
++        assert res.returncode == promote.EXIT_COLLISION
++        assert "local_engine_profile" in res.stderr
++        for rel in LOCAL_ARTIFACTS:
++            assert not (root / rel).exists(), rel
++        assert not (
++            root / "scripts/lib/profiles-local/engines.d"
++        ).exists()
++
++    def test_profile_for_curated_engine_refused(self, root):
++        spec = self._eng_spec()
++        # vllm-stable is a curated engine: redefining it from the local layer
++        # would be silently shadowed (core wins a collision) — refuse.
++        spec["registry_entry"]["slug"] = "vllm-stable/my-model-dual-x"
++        spec["registry_entry"]["kwargs"]["engine"] = "vllm-stable"
++        spec["local_engine_profile"] = {
++            "engine": "vllm-stable",
++            "content": self._ENG_YAML,
++        }
++        res = _run_cli(root, spec, "--layer", "local")
++        assert res.returncode == promote.EXIT_COLLISION
++        assert "curated engine" in res.stderr
++        assert not (
++            root / "scripts/lib/profiles-local/engines.d/vllm-stable.yml"
++        ).exists()
++
++    def test_profile_engine_must_match_entry_engine(self, root):
++        spec = self._eng_spec()
++        spec["local_engine_profile"]["engine"] = "some-other-engine"
++        res = _run_cli(root, spec, "--layer", "local")
++        assert res.returncode == promote.EXIT_COLLISION
++        assert "some-other-engine" in res.stderr
++
++    def test_existing_local_engine_profile_refused(self, root):
++        d = root / "scripts/lib/profiles-local/engines.d"
++        d.mkdir(parents=True)
++        (d / f"{self._ENG}.yml").write_text(self._ENG_YAML, encoding="utf-8")
++        res = _run_cli(root, self._eng_spec(), "--layer", "local")
++        assert res.returncode == promote.EXIT_COLLISION
++        assert "already exists" in res.stderr
++        for rel in LOCAL_ARTIFACTS:
++            assert not (root / rel).exists(), rel
++
+     def test_status_forced_incubating(self, root):
+         spec = _spec()
+         spec["registry_entry"]["kwargs"]["status"] = "production"  # attempted bump

@@ -1,0 +1,14 @@
+{
+ "task": "30-room-booking-queue",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 46.0,
+ "tool_calls": 7,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 28,
+ "checks_total": 28,
+ "partial": 1.0
+}

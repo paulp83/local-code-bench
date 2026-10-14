@@ -1,0 +1,22 @@
+{
+ "n": 1608,
+ "config": "strata-iq4xs-xhigh",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 2955.4,
+ "steps": 65,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 0,
+ "localization": 1.0,
+ "files_touched": [
+  "models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-compose-args-array-scope.sh": 0
+ }
+}

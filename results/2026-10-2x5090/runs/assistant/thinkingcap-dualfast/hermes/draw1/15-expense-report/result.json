@@ -1,0 +1,14 @@
+{
+ "task": "15-expense-report",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 53.3,
+ "tool_calls": 5,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 13,
+ "checks_total": 13,
+ "partial": 1.0
+}

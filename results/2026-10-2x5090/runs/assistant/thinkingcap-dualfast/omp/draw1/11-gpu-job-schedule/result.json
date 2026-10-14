@@ -1,0 +1,14 @@
+{
+ "task": "11-gpu-job-schedule",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 52.6,
+ "tool_calls": 3,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 6,
+ "checks_total": 6,
+ "partial": 1.0
+}

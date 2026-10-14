@@ -1,0 +1,9 @@
+PASS summary-exists
+PASS header-exact
+FAIL row-order: ['tp2-awq', 'single-q4', 'pp2-q6', 'offload-q8']
+FAIL row-tp2-fp8
+PASS row-tp2-awq
+PASS row-single-q4
+PASS row-pp2-q6
+PASS row-offload-q8
+PASS: 6 FAIL: 2

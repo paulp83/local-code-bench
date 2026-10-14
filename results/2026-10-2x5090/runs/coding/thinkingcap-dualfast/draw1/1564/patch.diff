@@ -1,0 +1,79 @@
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 06b4696..4ddc026 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -464,14 +464,22 @@ spec = {
+         "max_ctx": max_ctx, "max_num_seqs": 1, "mem_util": 0.9,
+         "compose_path": cpath, "default_port": port, "kvcalc_key": "SKIP"}},
+ }
+-Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++# The engine profile is carried in the spec, NOT written here: catalog.sh writes
++# nothing before handing off. promote.py owns the plan, the --dry-run exit and
++# the confirm — so a `--dry-run` register leaks no engine profile to disk and the
++# round-trip test cannot pass on a file a dry run left behind.
+ if engine_yaml:
+-    d = Path(wroot) / "scripts/lib/profiles-local/engines.d"
+-    d.mkdir(parents=True, exist_ok=True)
+-    (d / f"{engine}.yml").write_text(engine_yaml, encoding="utf-8")
+-    print(f"[catalog] wrote a local ENGINE profile: profiles-local/engines.d/{engine}.yml "
++    spec["local_engine_profile"] = {
++        "engine": engine,
++        "path": f"scripts/lib/profiles-local/engines.d/{engine}.yml",
++        "content": engine_yaml,
++    }
++    print(f"[catalog] will write a local ENGINE profile: "
++          f"profiles-local/engines.d/{engine}.yml "
+           f"(type={etype}, capabilities evidenced from the compose)")
+ 
++Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++
+ def mark(v, given):  # show the user which values THEY chose vs which we guessed
+     return "given" if given else "derived"
+ 
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index 1e903c2..6b9ab40 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -542,7 +542,7 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+     mid = spec["model_id"]
+     slug = spec["registry_entry"]["slug"]
+     if spec["_layer"] == "local":
+-        return [
++        lines = [
+             f"plan (layer LOCAL — gitignored {_LOCAL_DIR_REL}/, root {root}):",
+             f"  write {_LOCAL_MODELS_REL}/{mid}.yml",
+             f"  write {spec['compose']['path']}",
+@@ -552,6 +552,12 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+             "  then: get_registry() import-sanity + registry-emit.sh --json re-check",
+             "  NO core file is touched. Rollback: delete the written files.",
+         ]
++        if spec.get("local_engine_profile"):
++            ep = spec["local_engine_profile"]
++            lines.append(
++                f"  write engines.d/{ep['engine']}.yml (new local ENGINE profile)"
++            )
++        return lines
+     return [
+         f"plan (layer CORE — maintainer, root {root}):",
+         f"  write {_MODELS_DIR_REL}/{mid}.yml",
+@@ -597,6 +603,20 @@ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+         _info(f"merged entry into {reg_path}")
+     except OSError as exc:
+         raise InternalError(f"could not rewrite {reg_path}: {exc}")
++
++    # ── Write 4/4 (optional): the LOCAL ENGINE profile ──────────────────────
++    # catalog.sh carries it in the spec (``local_engine_profile``) rather than
++    # writing it itself, so it goes through the plan, the --dry-run exit and the
++    # confirm with the rest — a dry-run register leaks nothing to disk.
++    ep = spec.get("local_engine_profile")
++    if ep:
++        ep_path = root / ep["path"]
++        try:
++            ep_path.parent.mkdir(parents=True, exist_ok=True)
++            ep_path.write_text(ep["content"], encoding="utf-8")
++            _info(f"wrote {ep_path}")
++        except OSError as exc:
++            raise InternalError(f"could not write {ep_path}: {exc}")
+     return profile_path, compose_abs
+ 
+ 

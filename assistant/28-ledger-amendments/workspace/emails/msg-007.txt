@@ -1,0 +1,8 @@
+From: sol@example.net
+Date: 2026-07-17T03:43:00Z
+Subject: ledger amendment
+
+Please split T-02606: 65% to ACC-05, the rest to ACC-04.
+
+Thanks,
+sol

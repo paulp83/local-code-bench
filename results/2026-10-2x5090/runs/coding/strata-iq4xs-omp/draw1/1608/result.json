@@ -1,0 +1,21 @@
+{
+ "n": 1608,
+ "config": "strata-iq4xs-omp",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 483.5,
+ "steps": 26,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.0,
+ "checks_passed": 0,
+ "localization": 0.0,
+ "files_touched": [],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-compose-args-array-scope.sh": 1
+ }
+}

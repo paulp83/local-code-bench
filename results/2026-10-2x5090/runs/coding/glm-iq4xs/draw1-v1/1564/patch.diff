@@ -1,0 +1,88 @@
+diff --git a/scripts/catalog.sh b/scripts/catalog.sh
+index 06b4696..437ffb9 100755
+--- a/scripts/catalog.sh
++++ b/scripts/catalog.sh
+@@ -464,13 +464,16 @@ spec = {
+         "max_ctx": max_ctx, "max_num_seqs": 1, "mem_util": 0.9,
+         "compose_path": cpath, "default_port": port, "kvcalc_key": "SKIP"}},
+ }
+-Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
++# The engine profile is NOT written here. It rides in the spec and promote.py
++# writes it — promote owns the plan, the --dry-run exit and the confirm, so a
++# write this script performs first cannot be stopped by anything downstream
++# (a --dry-run used to leak it onto disk before the plan was even printed).
+ if engine_yaml:
+-    d = Path(wroot) / "scripts/lib/profiles-local/engines.d"
+-    d.mkdir(parents=True, exist_ok=True)
+-    (d / f"{engine}.yml").write_text(engine_yaml, encoding="utf-8")
+-    print(f"[catalog] wrote a local ENGINE profile: profiles-local/engines.d/{engine}.yml "
+-          f"(type={etype}, capabilities evidenced from the compose)")
++    spec["engine_profile"] = {
++        "path": f"scripts/lib/profiles-local/engines.d/{engine}.yml",
++        "content": engine_yaml,
++    }
++Path(out).write_text(json.dumps(spec, indent=1), encoding="utf-8")
+ 
+ def mark(v, given):  # show the user which values THEY chose vs which we guessed
+     return "given" if given else "derived"
+diff --git a/scripts/lib/profiles/promote.py b/scripts/lib/profiles/promote.py
+index 1e903c2..59cf040 100755
+--- a/scripts/lib/profiles/promote.py
++++ b/scripts/lib/profiles/promote.py
+@@ -20,6 +20,9 @@ The spec is the JSON dict the c3 scaffold computed (``compute_promote_scaffold``
+       "compatible_drafters": [...],             # optional
+       "vision_capable": true|false|null,        # null → omitted
+       "compose": {"path": "...", "content": "<yaml text>"},
++      "engine_profile": {"path": "...", "content": "<yaml text>"},  # optional
++                    # local layer only: written by THIS script, inside the plan
++                    # (so --dry-run writes nothing) â never by the caller.
+       "registry_entry": {"slug": "<engine>/...", "kwargs": {...}},
+       "setup": {...}                            # optional C1 `setup:` block
+     }
+@@ -468,6 +471,19 @@ def validate_spec(spec: Any, root: Path, layer: str) -> dict:
+             raise Refusal(f"registry kwargs are not valid _entry kwargs: {exc}")
+         except ValueError as exc:
+             raise Refusal(f"registry kwargs rejected by _entry: {exc}")
++        # An OPTIONAL fourth artifact: the engine profile the CLI derived for an
++        # engine the catalog does not know. It is written HERE, inside the same
++        # plan/dry-run/confirm gate as everything else - the CLI used to write it
++        # itself, before this script could refuse or dry-run, so `--dry-run`
++        # leaked it onto disk.
++        ep = spec.get("engine_profile")
++        if ep is not None:
++            if not isinstance(ep, dict) or not isinstance(ep.get("path"), str) \
++                    or not isinstance(ep.get("content"), str) or not ep["content"].strip():
++                raise Refusal("spec.engine_profile must be {path, content} strings")
++            _refuse_if_path_escapes(ep["path"], f"{_LOCAL_DIR_REL}/engines.d",
++                                    "spec.engine_profile.path")
++
+         # ── LOCAL: keep BYOM ports out of the curated band (#1142 follow-up) ──
+         # The curated catalog occupies 8010-8199. A local slug landing on one of
+         # those ports turns the repo's OWN test-compose-port-conflicts guard red
+@@ -549,6 +565,8 @@ def plan_lines(root: Path, spec: dict) -> list[str]:
+             f"  merge entry into {_LOCAL_REGISTRY_REL} (JSON — no source edit)",
+             f"  slug: {slug}  model: {mid}  variant: {spec['default_weight_variant']}"
+             f"  status: {_LOCAL_FORCED_STATUS}",
++            *([f"  write {spec['engine_profile']['path']}"]
++              if spec.get("engine_profile") else []),
+             "  then: get_registry() import-sanity + registry-emit.sh --json re-check",
+             "  NO core file is touched. Rollback: delete the written files.",
+         ]
+@@ -597,6 +615,17 @@ def _write_local(root: Path, spec: dict) -> tuple[Path, Path]:
+         _info(f"merged entry into {reg_path}")
+     except OSError as exc:
+         raise InternalError(f"could not rewrite {reg_path}: {exc}")
++
++    # -- Optional write 4/4: the engine profile --
++    ep = spec.get("engine_profile")
++    if ep:
++        ep_path = root / ep["path"]
++        try:
++            ep_path.parent.mkdir(parents=True, exist_ok=True)
++            ep_path.write_text(ep["content"], encoding="utf-8")
++            _info(f"wrote {ep_path}")
++        except OSError as exc:
++            raise InternalError(f"could not write {ep_path}: {exc}")
+     return profile_path, compose_abs
+ 
+ 

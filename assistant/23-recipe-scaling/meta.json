@@ -1,0 +1,9 @@
+{
+  "id": "23-recipe-scaling",
+  "source": "novel",
+  "category": "documents",
+  "difficulty": "easy",
+  "est_minutes": 6,
+  "needs_web": false,
+  "notes": "Novel: unit conversion and scaling."
+}

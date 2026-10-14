@@ -1,0 +1,10 @@
+{
+  "number": 384,
+  "title": "compose healthcheck too strict",
+  "labels": [
+    "question"
+  ],
+  "files_touched": 5,
+  "has_repro": false,
+  "needs_gpu": true
+}

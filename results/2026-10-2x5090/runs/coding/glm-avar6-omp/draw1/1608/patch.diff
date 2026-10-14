@@ -1,0 +1,208 @@
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..40d8df2 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -16,6 +16,14 @@
+ # ⚠️ Indentation is NOT a sufficient proxy: in these composes the branch execs sit
+ # at the same column as a block nudged inside the branch. Depth is tracked from the
+ # shell keywords instead.
++#
++# CASE arms (2026-10-14, #1540 follow-up): an exhaustive case -- every arm assigns
++# the array or terminates (`exit`/`exec`) -- DOES dominate an exec after the `esac`,
++# even though no single arm's path is a prefix of the exec's path. The scanner
++# recognises `pattern) NAME=(...) ;;` arm assignments (which do not start a line)
++# and treats each arm as an alternative; a case only dominates if EVERY arm assigns
++# the array (before any exec inside that arm) or terminates. A case with an arm
++# that does neither still fails, exactly like a lopsided if/else.
+ set -uo pipefail
+ export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
+ # #779: this gate parses compose YAML through python3; without PYTHONUTF8 a
+@@ -47,25 +55,116 @@ def script_of(path):
+         if cand: return max(cand, key=len)
+     return None
+ 
+-OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
+-CLOSE = re.compile(r'^\s*(fi|done|esac)\b')
+-ALT   = re.compile(r'^\s*(else|elif)\b')
++OPEN    = re.compile(r'^\s*(if|for|while|until)\b')
++CASE    = re.compile(r'^\s*case\b')
++ARM     = re.compile(r'^\s*([a-zA-Z0-9_?*\[\]\'"@.|*-]+)\s*\)\s*')
++CLOSE   = re.compile(r'^\s*(fi|done|esac)\b')
++ESACANY = re.compile(r'\besac\b')
++ALT     = re.compile(r'^\s*(else|elif)\b')
+ ONELINE = re.compile(r'\b(fi|done|esac)\s*;?\s*$')
++ASG     = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)(?:\+?=)\(')
++TERM    = re.compile(r'\b(exit|exec)\b')
+ 
+-def scope_paths(lines):
+-    """Path of enclosing BRANCH ids per line.  `else`/`elif` starts a NEW id at the
+-    same depth, so an assignment in the then-branch does not dominate the
+-    else-branch -- which plain depth counting cannot express."""
+-    paths, stack, nxt = [], [], [0]
++def scan(lines):
++    """(paths, cases): per-line enclosing-branch path tuples, and completed case
++    records. `else`/`elif` starts a NEW id at the same depth, so an assignment in
++    the then-branch does not dominate the else-branch. Inside a `case`, each
++    `pattern)` starts an alternative arm and `;;` closes it; arms are collected so
++    an exhaustive case can be recognised as dominating."""
++    paths, stack, nxt, cases = [], [], [0], []
+     def fresh():
+         nxt[0] += 1
+         return nxt[0]
+-    for ln in lines:
+-        if CLOSE.match(ln) and stack: stack.pop()
+-        elif ALT.match(ln) and stack: stack[-1] = fresh()
+-        paths.append(tuple(stack))
+-        if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+-    return paths
++    def close_arm(c):
++        if c["arm"] is not None:
++            c["arms"].append(c["arm"])
++        c["arm"] = None
++    for i, ln in enumerate(lines):
++        m = CLOSE.match(ln)
++        if m and stack:
++            top = stack[-1]
++            if top["type"] == "case" and m.group(1) == "esac":
++                close_arm(top); top["opath"] = paths[top["open"]]; top["close"] = i; cases.append(top)
++            stack.pop()
++        elif stack and stack[-1]["type"] == "case":
++            c = stack[-1]
++            if ARM.match(ln) and not m:
++                close_arm(c)
++                c["arm"] = {"assigns": {}, "term": False, "exec_refs": {}}
++                c["arms"].append(c["arm"]); c["seen"] = True
++            if c["seen"] and c["arm"] is not None:
++                for a in ASG.finditer(ln):
++                    c["arm"]["assigns"].setdefault(a.group(1), i)
++                if TERM.search(ln):
++                    c["arm"]["term"] = True
++                if re.search(r'\bexec\b', ln):
++                    for r in re.findall(r'\$\{?([A-Za-z_]+_ARGS)\[@\]', ln):
++                        c["arm"]["exec_refs"].setdefault(r, i)
++            if ";;" in ln: close_arm(c)
++            if not m and ESACANY.search(ln):
++                close_arm(c); c["opath"] = paths[c["open"]]; c["close"] = i; cases.append(c); stack.pop()
++        elif ALT.match(ln) and stack:
++            stack[-1]["path"] = fresh()
++        paths.append(tuple(b["path"] for b in stack))
++        om = OPEN.match(ln)
++        if om and not ONELINE.search(ln):
++            stack.append({"type": om.group(1), "path": fresh()})
++        elif CASE.match(ln):
++            if ONELINE.search(ln):
++                # one-liner case: arms separated by `;;` on the same line
++                body = re.split(r'\bin\b', ln, maxsplit=1)[-1]
++                arms = []
++                for seg in body.split(";;")[1:]:
++                    seg = seg.strip()
++                    if not seg or re.match(r'^(esac|fi|done)\b', seg): continue
++                    arm = {"assigns": {}, "term": False, "exec_refs": {}}
++                    if ARM.match(seg):
++                        for a in ASG.finditer(seg): arm["assigns"].setdefault(a.group(1), i)
++                        if TERM.search(seg): arm["term"] = True
++                    arms.append(arm)
++                cases.append({"opath": paths[-1], "close": i, "arms": arms, "open": i})
++            else:
++                stack.append({"type": "case", "path": fresh(), "arm": None,
++                              "seen": False, "arms": [], "open": i, "close": None})
++    return paths, cases
++
++def dominates(asg, i, paths, cases, arr):
++    # (a) plain assignment: comes first AND its branch path is a prefix of the
++    # exec's (same scope, or an enclosing one)
++    if any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg):
++        return True
++    # (b) exhaustive case: completed before the exec, in an enclosing scope, with
++    # EVERY arm either assigning the array (before any in-arm exec that uses it)
++    # or terminating
++    for c in cases:
++        if c["close"] is None or c["close"] >= i: continue
++        if paths[i][:len(c["opath"])] != c["opath"]: continue
++        if not c["arms"]: continue
++        if all(a["term"] or (arr in a["assigns"] and
++                (arr not in a["exec_refs"] or a["assigns"][arr] < a["exec_refs"][arr]))
++               for a in c["arms"]):
++            return True
++    return False
++
++def analyze(script):
++    """(problems, refcount): problems carry line numbers relative to `script`."""
++    lines = script.splitlines()
++    paths, cases = scan(lines)
++    out = []; refs = [0]
++    for i, ln in enumerate(lines):
++        if not re.match(r'^\s*exec\b', ln): continue
++        for arr in set(re.findall(r'\$\{?([A-Za-z_]+_ARGS)\[@\]', ln)):
++            refs[0] += 1
++            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}\+?=\(', l)]
++            if not asg and not dominates([], i, paths, cases, arr):
++                out.append((i + 1, arr,
++                    f"exec uses ${{{arr}[@]}} but it is never assigned")); continue
++            if asg and not dominates(asg, i, paths, cases, arr):
++                out.append((i + 1, arr,
++                    f"{arr} is assigned only inside a branch that the exec on line "
++                    f"{i+1} does not share -- that path expands an unset array, silently "
++                    f"dropping the feature"))
++    return out, refs[0]
+ 
+ checked = refs = 0
+ problems = []
+@@ -75,28 +174,39 @@ for p in sorted(pathlib.Path("models").rglob("*.yml")):
+     s = script_of(p)
+     if not s: continue
+     checked += 1
+-    lines = s.splitlines()
+-    paths = scope_paths(lines)
+-    for i, ln in enumerate(lines):
+-        if not re.match(r'^\s*exec\b', ln): continue
+-        for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+-            refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
+-            if not asg:
+-                problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
+-            # an assignment dominates the exec iff it comes first AND its branch
+-            # path is a prefix of the exec's (same scope, or an enclosing one)
+-            ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
+-            if not ok:
+-                problems.append(
+-                    f"{p}: {arr} is assigned only inside a branch that the exec on line "
+-                    f"{i+1} does not share -- that path expands an unset array, silently "
+-                    f"dropping the feature")
++    probs, nrefs = analyze(s)
++    refs += nrefs
++    for ln, arr, msg in probs:
++        problems.append(f"{p}: {msg}")
++
++# --- embedded fixtures: both #1540 blind spots + the original if/else shapes ---
++FIXTURES = [
++    # exhaustive case, single-line arms (the #1540 shape): must PASS
++    ('case "$V" in\n  on) A_ARGS=() ;;\n  off) A_ARGS=(--x) ;;\n  *) echo x >&2; exit 1 ;;\nesac\nexec foo "${A_ARGS[@]}"\n', True),
++    # multi-line exhaustive case: must PASS
++    ('case "$V" in\n  on)\n    A_ARGS=()\n    ;;\n  off)\n    A_ARGS=(--x)\n    ;;\n  *) exit 1 ;;\nesac\nexec foo "${A_ARGS[@]}"\n', True),
++    # case with a non-assigning, non-terminating arm: must FAIL
++    ('case "$V" in\n  on) A_ARGS=() ;;\n  off) echo x >&2 ;;\nesac\nexec foo "${A_ARGS[@]}"\n', False),
++    # assignment only inside an if-then the exec may skip: must FAIL
++    ('if true; then A_ARGS=(); fi\nexec foo "${A_ARGS[@]}"\n', False),
++    # one-liner exhaustive case: must PASS
++    ('case "$V" in a) A_ARGS=() ;; b) A_ARGS=(--x) ;; *) exit 1 ;; esac\nexec foo "${A_ARGS[@]}"\n', True),
++    # lopsided if/else (the original caught-real shape): must FAIL
++    ('if true; then\n  A_ARGS=()\nelse\n  exec foo "${A_ARGS[@]}"\nfi\n', False),
++    # plain assignment before the exec: must PASS
++    ('A_ARGS=()\nexec foo "${A_ARGS[@]}"\n', True),
++]
++for k, (script, want_pass) in enumerate(FIXTURES):
++    got = analyze(script)[0]
++    if want_pass and got:
++        print(f"FAIL: fixture {k} should pass but: {got}", file=sys.stderr); sys.exit(1)
++    if not want_pass and not got:
++        print(f"FAIL: fixture {k} should be flagged but passed", file=sys.stderr); sys.exit(1)
+ 
+ if checked == 0 or refs == 0:
+     print(f"FAIL: vacuous run (checked={checked}, refs={refs}) -- extraction is broken", file=sys.stderr); sys.exit(1)
+ for m in problems: print("FAIL: " + m, file=sys.stderr)
+ if problems: sys.exit(1)
+-print(f"  checked {checked} entrypoints, {refs} array reference(s) -- each assigned before, and no deeper than, every exec that uses it")
++print(f"  checked {checked} entrypoints, {refs} array reference(s) -- each assigned before, and no deeper than, every exec that uses it ({len(FIXTURES)} case/if fixtures)")
+ PY
+ echo "test-compose-args-array-scope.sh OK"

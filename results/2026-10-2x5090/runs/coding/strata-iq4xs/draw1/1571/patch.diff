@@ -1,0 +1,194 @@
+diff --git a/scripts/lib/gpu-select.sh b/scripts/lib/gpu-select.sh
+index ed69318..4392a1b 100644
+--- a/scripts/lib/gpu-select.sh
++++ b/scripts/lib/gpu-select.sh
+@@ -109,3 +109,153 @@ gpu_select_assert_placement() {
+   fi
+   return 0
+ }
++
++# gpu_vram_report_lines "<our_container>"  (OUR_CONTAINER may be empty)
++#   Per-GPU "who holds this VRAM" lines for scripts/report.sh's Display section
++#   (club-3090#1537). The old block credited the ONE running club container with
++#   EVERY card that had >100 MiB in use — wrong whenever another container (or a
++#   desktop process) actually held the card. This attributes each card to the
++#   process nvidia-smi reports ON it.
++#
++#   Mechanism:
++#     - per-card usage + UUID:  nvidia-smi --query-gpu=index,uuid,memory.used
++#     - per-card process:       nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name
++#     - pid → container:        <proc>/<pid>/cgroup (".../docker-<id>.scope"; the
++#                               proc root is $GPU_ATTR_PROC, default /proc), then
++#                               id → name via `docker ps`.
++#   When the HOST lists no compute processes at all (the engine runs in another
++#   namespace the host cannot enumerate), fall back to OUR container's own view:
++#   `docker exec <ours> nvidia-smi --query-compute-apps=gpu_uuid` — the card's
++#   UUID is global, so the container's UUIDs map straight back to host indices.
++#
++#   Line text (one per GPU):
++#     our container .... held by running `<ours>`
++#     another container . held by `<other>`            (+ "not `<ours>`" when set)
++#     host process ...... held by `<process_name>`
++#     in use, no owner .. ⚠ something is using this GPU  (+ "not `<ours>`" when set)
++#     idle card ......... <N> MiB ✓
++#
++#   Silent (no output) when nvidia-smi is unavailable or reports no GPUs, so it
++#   degrades cleanly on a GPU-less rig. Functions-only file: sourcing has no
++#   side effects.
++gpu_vram_report_lines() {
++  local our_container="${1:-}"
++  local proc_root="${GPU_ATTR_PROC:-/proc}"
++  command -v nvidia-smi >/dev/null 2>&1 || return 0
++
++  # Per-card usage and UUID, in index order.
++  local -A uuid_of=()
++  local -A used_of=()
++  local -a gpu_order=()
++  local _gi _gu _gm
++  while IFS=, read -r _gi _gu _gm; do
++    _gi="${_gi//[[:space:]]/}"; _gu="${_gu//[[:space:]]/}"; _gm="${_gm//[[:space:]]/}"
++    [[ -z "$_gi" ]] && continue
++    gpu_order+=("$_gi")
++    uuid_of["$_gi"]="$_gu"
++    used_of["$_gi"]="$_gm"
++  done < <(nvidia-smi --query-gpu=index,uuid,memory.used --format=csv,noheader,nounits 2>/dev/null)
++  [[ ${#gpu_order[@]} -eq 0 ]] && return 0
++
++  # Host-visible compute processes: first process seen per card wins.
++  local -A pid_of=()
++  local -A name_of=()
++  local _cu _cp _cn _host_apps=0
++  while IFS=, read -r _cu _cp _cn; do
++    _cu="${_cu//[[:space:]]/}"; _cp="${_cp//[[:space:]]/}"
++    _cn="${_cn#"${_cn%%[![:space:]]*}"}"
++    [[ -z "$_cu" || -z "$_cp" ]] && continue
++    _host_apps=$((_host_apps + 1))
++    [[ -n "${pid_of[$_cu]:-}" ]] && continue
++    pid_of["$_cu"]="$_cp"
++    name_of["$_cu"]="$_cn"
++  done < <(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv,noheader 2>/dev/null)
++
++  local _i _u _m _pid _pname _cname _cid _cg _tail _did _dnm _k
++  local -A id_to_name=()
++  local -A our_gpu=()
++  local _ps_loaded=0
++
++  # Fallback path: the host lists NO compute processes — ask OUR container.
++  if [[ "$_host_apps" -eq 0 && -n "$our_container" ]] && command -v docker >/dev/null 2>&1; then
++    while IFS= read -r _k; do
++      _k="${_k//[[:space:]]/}"
++      [[ -z "$_k" ]] && continue
++      our_gpu["$_k"]=1
++    done < <(docker exec "$our_container" nvidia-smi \
++              --query-compute-apps=gpu_uuid --format=csv,noheader 2>/dev/null)
++  fi
++
++  for _i in "${gpu_order[@]}"; do
++    _m="${used_of[$_i]:-}"
++    _u="${uuid_of[$_i]:-}"
++
++    # Idle card (a few MiB, or an unreadable value) — clean.
++    if ! [[ "$_m" =~ ^[0-9]+$ ]] || [[ "$_m" -le 100 ]]; then
++      echo "- **GPU ${_i} idle VRAM:** ${_m} MiB ✓"
++      continue
++    fi
++
++    _tail=""
++    [[ -n "$our_container" ]] && _tail=" — not \`${our_container}\`"
++
++    if [[ "$_host_apps" -eq 0 ]]; then
++      # Fallback: place OURS from the container's own view; anything else in
++      # use with no host owner is an unattributed card.
++      if [[ -n "${our_gpu[$_u]:-}" ]]; then
++        echo "- **GPU ${_i} idle VRAM:** ${_m} MiB (held by running \`${our_container}\`)"
++      else
++        echo "- **GPU ${_i} idle VRAM:** ${_m} MiB ⚠ something is using this GPU${_tail}"
++      fi
++      continue
++    fi
++
++    _pid="${pid_of[$_u]:-}"
++    if [[ -z "$_pid" ]]; then
++      # Host lists other processes, but none on THIS card → unattributed.
++      echo "- **GPU ${_i} idle VRAM:** ${_m} MiB ⚠ something is using this GPU${_tail}"
++      continue
++    fi
++
++    _pname="${name_of[$_u]:-}"
++    _cname=""
++    if [[ -r "${proc_root}/${_pid}/cgroup" ]]; then
++      _cg="$(command cat "${proc_root}/${_pid}/cgroup" 2>/dev/null)"
++      _cid="$(printf '%s\n' "$_cg" \
++        | command grep -oE 'docker-[0-9a-f]+\.scope' | head -1 \
++        | sed -E 's/^docker-//; s/\.scope$//')"
++      [[ -z "$_cid" ]] && _cid="$(printf '%s\n' "$_cg" \
++        | command grep -oE '/docker[/-][0-9a-f]+' | head -1 \
++        | sed -E 's#^.*/docker[/-]##')"
++      if [[ -n "$_cid" ]] && command -v docker >/dev/null 2>&1 \
++         && [[ "$_ps_loaded" -eq 0 ]]; then
++        # id → name, loaded once.
++        _ps_loaded=1
++        while read -r _did _dnm; do
++          [[ -z "$_did" ]] && continue
++          id_to_name["$_did"]="$_dnm"
++        done < <(docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null)
++      fi
++      if [[ -n "$_cid" && ${#id_to_name[@]} -gt 0 ]]; then
++        _cname="${id_to_name[$_cid]:-}"
++        if [[ -z "$_cname" ]]; then
++          for _k in "${!id_to_name[@]}"; do
++            case "$_cid" in "$_k"*) _cname="${id_to_name[$_k]}"; break ;; esac
++          done
++        fi
++      fi
++    fi
++
++    if [[ -n "$_cname" ]]; then
++      if [[ -n "$our_container" && "$_cname" == "$our_container" ]]; then
++        echo "- **GPU ${_i} idle VRAM:** ${_m} MiB (held by running \`${_cname}\`)"
++      else
++        echo "- **GPU ${_i} idle VRAM:** ${_m} MiB (held by \`${_cname}\`${_tail})"
++      fi
++    else
++      # A compute process outside any container (display, browser, host engine).
++      echo "- **GPU ${_i} idle VRAM:** ${_m} MiB (held by \`${_pname}\`)"
++    fi
++  done
++  return 0
++}
+diff --git a/scripts/report.sh b/scripts/report.sh
+index 133e585..309b358 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -114,6 +114,8 @@ source "$REPO_ROOT/scripts/lib/club-containers.sh"
+ source "$REPO_ROOT/scripts/lib/report_calib.sh"
+ # shellcheck source=lib/p2p-state.sh
+ source "$REPO_ROOT/scripts/lib/p2p-state.sh"
++# shellcheck source=lib/gpu-select.sh
++source "$REPO_ROOT/scripts/lib/gpu-select.sh"
+ 
+ # Pick up a saved MODEL_DIR (and other settings) through the ONE loader, as
+ # launch.sh / switch.sh do (club-3090#1466): your club-3090 config, then the repo
+@@ -763,19 +765,9 @@ section "Display / desktop state"
+     if have docker && docker info >/dev/null 2>&1; then
+       our_container=$(club_running_container)
+     fi
+-    nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
+-      | while IFS=, read -r idx used; do
+-          idx="${idx# }"; used="${used# }"
+-          if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
+-            if [[ -n "$our_container" ]]; then
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
+-            else
+-              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+-            fi
+-          else
+-            echo "- **GPU $idx idle VRAM:** ${used} MiB ✓"
+-          fi
+-        done
++    # Attribute each card to the process actually holding it (#1537) — the old
++    # block credited the ONE club container with EVERY card over 100 MiB.
++    gpu_vram_report_lines "$our_container"
+   fi
+ } | redact
+ 

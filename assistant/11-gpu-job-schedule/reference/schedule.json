@@ -1,0 +1,10 @@
+{
+  "fetch": 0,
+  "quant-a": 30,
+  "quant-b": 80,
+  "bench-a": 120,
+  "bench-b": 155,
+  "quality-b": 155,
+  "docs": 60,
+  "report": 200
+}

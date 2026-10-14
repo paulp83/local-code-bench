@@ -1,0 +1,54 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..9eece7f 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -10,6 +10,13 @@ Two traps this encodes, both paid for on 2026-08-31:
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+     double-counts (measured 13,947 against a live 6,820 -- 2.05x).
++  * model + state buffers: a drafter pinned to a GPU emits the SAME log line shape
++    as the target model, and a hybrid model reports its recurrent state via
++    llama_memory_recurrent. Both must be SUMMED per device -- last-wins let the
++    drafter overwrite the target's weights, dropping the target and the recurrent
++    state into "unaccounted" (~3.5 GiB on a GLM-5.3-Flash + DFlash2 boot).
++    compute is NOT summed: a re-reservation after the drafter loads is the SAME
++    buffer re-reserved, not additive.
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
+ 
+@@ -38,10 +45,33 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    # agg=True: a drafter pinned to the same GPU emits the SAME "load_tensors ... model
++    # buffer size" line shape as the target model. Two models, two buffers -- they ADD.
++    # last-wins here silently replaced the target weights with the drafter's (the
++    # drafter loads after the target, so it was the value kept); the target's weights
++    # then fell into "unaccounted". #1118.
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
++    # agg=False ON PURPOSE. A drafter on a GPU adds its own sched_reserve, but the
++    # target then RE-reserves after the drafter loads -- the last value is the same
++    # buffer re-reserved, not additive. The log does not label which context a
++    # sched_reserve line belongs to, so neither summing (double-counts the re-reserve)
++    # nor last-wins (drops the drafter) is correct here; left as-is pending a labelled
++    # reservation in the engine log.
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # Two distinct "state buffer" shapes, neither matched by the other:
++    #   * "_comp_state:"   -- DeepSeek-style hybrid state
++    #   * llama_memory_recurrent: ... "rs state buffer size" -- the recurrent (GDN/
++    #     DeltaNet) state a hybrid model (GLM, Qwen3-Next) reports. Without this arm the
++    #     recurrent buffer fell into "unaccounted". Device and value are the only two
++    #     stable tokens, so match them and let ".*?" span the wording between them
++    #     (re.finditer does not cross newlines, so this stays within one log line).
++    # agg=True so both arms can coexist per device.
++    state = _per_dev(
++        text,
++        r"(?:_comp_state|llama_memory_recurrent):\s+(CUDA\d).*?buffer size =\s+([\d.]+) MiB",
++        agg=True,
++    )
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

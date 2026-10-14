@@ -1,0 +1,14 @@
+{
+ "task": "26-invoice-reconciliation",
+ "config": "thinkingcap-dualfast",
+ "harness": "hermes",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 18.1,
+ "tool_calls": 4,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 11,
+ "checks_total": 11,
+ "partial": 1.0
+}

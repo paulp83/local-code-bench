@@ -1,0 +1,14 @@
+{
+ "task": "19-bank-categorisation",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 26.0,
+ "tool_calls": 5,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 6,
+ "checks_total": 6,
+ "partial": 1.0
+}

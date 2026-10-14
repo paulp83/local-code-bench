@@ -1,0 +1,25 @@
+{
+ "n": 1209,
+ "config": "thinkingcap-dualfast-omp",
+ "draw": 2,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 421.4,
+ "steps": 74,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 12,
+ "localization": 0.667,
+ "files_touched": [
+  "scripts/catalog.sh",
+  "scripts/lib/profiles/amend.py",
+  "scripts/switch.sh"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-catalog-amend.sh": 0
+ }
+}

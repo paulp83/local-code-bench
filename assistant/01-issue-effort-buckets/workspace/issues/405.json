@@ -1,0 +1,10 @@
+{
+  "number": 405,
+  "title": "model download resumes badly",
+  "labels": [
+    "question"
+  ],
+  "files_touched": 5,
+  "has_repro": true,
+  "needs_gpu": false
+}

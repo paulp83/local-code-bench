@@ -1,0 +1,52 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..81e0ba8 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -1330,7 +1330,11 @@ preflight_compose_deps() {
+     # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+     # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+     # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    # The class also excludes `\` because these composes write drafter paths
++    # inside escaped JSON (`\"/root/.cache/huggingface/<dir>\"`) and an
++    # un-excluded backslash ran the match past the directory name into the
++    # closing quote, capturing `<dir>\` (the gemma external-drafter composes).
++    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+diff --git a/scripts/tests/test-preflight-compose-deps.sh b/scripts/tests/test-preflight-compose-deps.sh
+index 1a44e11..f3e3820 100755
+--- a/scripts/tests/test-preflight-compose-deps.sh
++++ b/scripts/tests/test-preflight-compose-deps.sh
+@@ -112,6 +112,30 @@ touch "${TMP_DIR}/models/gemma-4-31b-autoround-int4/config.json" "${TMP_DIR}/mod
+ out="$(run_deps "$vllm_compose" "${TMP_DIR}/models")"
+ [[ -z "$out" ]]
+ 
++# Drafter path written inside escaped JSON (`"{\"model\":\"/root/...\"}"`): the
++# path extractor's char class must stop at the `\` before the closing quote,
++# or it captures `<dir>\` and the existence check demands an impossible
++# `<dir>\/config.json` (the gemma external-drafter composes).
++vllm_json_compose="${TMP_DIR}/gemma-json.yml"
++cat > "$vllm_json_compose" <<'YAML'
++services:
++  vllm:
++    image: vllm/vllm-openai:v0.21.0
++    command:
++      - --model
++      - /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit
++      - --speculative-config
++      - "{\"model\":\"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\",\"num_speculative_tokens\":4}"
++YAML
++out="$(expect_missing "$vllm_json_compose" "${TMP_DIR}/empty-models")"
++assert_contains "$out" "gemma-4-26b-a4b-it-assistant/config.json"
++assert_contains "$out" "gemma-4-26b-a4b-awq-4bit/config.json"
++assert_not_contains "$out" 'assistant\/config.json'
++mkdir -p "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit" "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant"
++touch "${TMP_DIR}/models/gemma-4-26b-a4b-awq-4bit/config.json" "${TMP_DIR}/models/gemma-4-26b-a4b-it-assistant/config.json"
++out="$(run_deps "$vllm_json_compose" "${TMP_DIR}/models")"
++[[ -z "$out" ]]
++
+ 
+ extends_base="${TMP_DIR}/base.yml"
+ extends_stub="${TMP_DIR}/stub.yml"

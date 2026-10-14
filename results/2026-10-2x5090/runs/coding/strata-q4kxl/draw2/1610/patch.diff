@@ -1,0 +1,150 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..2da4b2e 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -463,6 +463,84 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     return vol, inv
+ 
+ 
++# Path components that are NOT identifying on their own: generic mount
++# roots and generic script/template filenames that repeat across patches
++# (so a compose that mounts *any* patch trips them). A source marker must
++# resolve to a patch-specific component (the patch's own directory name,
++# or its uniquely-named script/template file) instead of one of these.
++_GENERIC_PATH_PARTS = frozenset(
++    {
++        "patches",
++        "local",
++        "vllm",
++        "sglang",
++        "models",
++        "scripts",
++        "services",
++        "install.sh",
++        "install",
++        "apply.sh",
++        "apply.py",
++        "init.sh",
++        "entrypoint.sh",
++        "chat_template.jinja",
++    }
++)
++
++
++def _source_identifier(rel: str) -> str | None:
++    """The patch-specific path component that ties a bind-mount SOURCE to
++    this patch.
++
++    Prefers the **patch directory** — the first meaningful component after
++    a generic ``patches`` segment (skipping ``local/`` grouping dirs). The
++    patch directory name is the one token that appears in the mount's
++    relative SOURCE for *every* wiring style (the whole patch dir mounted
++    *or* a single file under it), and is unique to the patch — unlike a
++    generic ``install.sh`` / ``sitecustomize.py`` (which many patches
++    share) or the ``patches`` parent (in every mounting compose). Falls
++    back to the last non-generic component when there is no ``patches``
++    anchor. Returns ``None`` if nothing specific remains.
++    """
++    parts = [part for part in Path(rel).parts if part not in ("", ".")]
++    for idx, part in enumerate(parts):
++        if part == "patches":
++            for nxt in parts[idx + 1 :]:
++                if nxt not in _GENERIC_PATH_PARTS:
++                    return nxt
++    for part in reversed(parts):
++        if part and part not in _GENERIC_PATH_PARTS:
++            return part
++    return None
++
++
++def _mount_source_markers(patch: dict) -> list[str]:
++    """Patch-specific SOURCE tokens for the bind mounts the patch declares.
++
++    Mirrors :func:`_spec_wiring_markers`' volume side but captures the
++    HOST-side identity of each mount (overlay ``src``, install ``script``,
++    ``sidecar``, chat-template ``jinja``). ``_spec_wiring_present`` uses
++    these to require the mount's SOURCE belongs to this patch — so a
++    compose that binds a DIFFERENT patch at the same container target is
++    not mistaken for this one.
++    """
++    spec = patch.get("delivery_spec") or {}
++    src: list[str] = []
++    for of in spec.get("overlay_files") or []:
++        s = of.get("src") or of.get("source")
++        if s:
++            tok = _source_identifier(s)
++            if tok:
++                src.append(tok)
++    for key in ("script", "sidecar", "jinja"):
++        val = spec.get(key)
++        if val:
++            tok = _source_identifier(val)
++            if tok:
++                src.append(tok)
++    return src
++
++
+ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+@@ -481,7 +559,20 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+-    vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
++    # Match the mount's SOURCE to this patch (not just its container target)
++    # so a compose that binds a DIFFERENT patch at the same target path is
++    # not reported as reachable. Scoped to the non-chat_template class: the
++    # chat-template coverage path resolves the real merged graph (where the
++    # source is rendered as an absolute host path) and is sound on its own.
++    src_markers = (
++        [] if patch.get("delivery_mechanism") == "chat_template"
++        else _mount_source_markers(patch)
++    )
++    src_ok = (not src_markers) or any(m in body for m in src_markers)
++
++    vol_ok = (
++        ((not vol_markers) or any(m in body for m in vol_markers)) and src_ok
++    )
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
+ 
+     if wired_at == {"volumes"}:
+@@ -535,22 +626,28 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+ 
+     body = service_body(compose_text(root, name_or_path))
+ 
+-    # Primary, sound path: the patch's declared delivery_spec wiring is
+-    # genuinely present at the insertion point(s) it claims.
++    # Sound path: the patch's declared delivery_spec wiring is genuinely
++    # present at the insertion point(s) it claims, matched by the mount's
++    # SOURCE (not just its container target).
+     if _spec_wiring_present(patch, body):
+         return True
+ 
+-    # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
++    # Legacy fallback (read-only `delivery:` block, for entries that carry
++    # ONLY the deprecated block and no delivery_spec) — operates on the
++    # service body, so header/comment ID mentions never match. The match
++    # is keyed to patch-SPECIFIC identity: the patch's own directory name
++    # (not its generic parent `patches`) or a non-generic file name, so a
++    # compose mounting some other patch's install.sh is not mistaken for
++    # this one.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
++        markers: list[str] = []
+         for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
++            ident = _source_identifier(rel)
++            if ident:
++                markers.append(ident)
++        if markers and any(marker in body for marker in markers):
++            return True
+         if patch["id"] in body:
+             return True
+     if (

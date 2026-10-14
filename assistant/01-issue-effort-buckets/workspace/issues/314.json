@@ -1,0 +1,11 @@
+{
+  "number": 314,
+  "title": "README typo in quickstart",
+  "labels": [
+    "bug",
+    "enhancement"
+  ],
+  "files_touched": 2,
+  "has_repro": true,
+  "needs_gpu": false
+}

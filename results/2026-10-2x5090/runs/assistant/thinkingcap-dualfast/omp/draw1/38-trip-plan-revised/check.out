@@ -1,0 +1,9 @@
+PASS plan-parses
+PASS no-lisbon
+PASS three-flights
+PASS flights-exact
+PASS berlin-madrid-leg-constraints
+PASS hotels-exact
+PASS total-exact
+PASS within-budget-cap
+PASS: 8 FAIL: 0

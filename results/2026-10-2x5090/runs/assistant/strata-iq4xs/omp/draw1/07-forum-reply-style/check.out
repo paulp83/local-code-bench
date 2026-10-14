@@ -1,0 +1,12 @@
+PASS reply-exists
+PASS starts-with-mention
+PASS max-150-words
+PASS no-dashes
+PASS no-exclamation
+PASS no-banned-phrases
+PASS A1-decode-88.2
+PASS A2-vram-31.4
+PASS A3-context-65536
+PASS A4-command-in-backticks
+PASS no-wrong-values
+PASS: 11 FAIL: 0

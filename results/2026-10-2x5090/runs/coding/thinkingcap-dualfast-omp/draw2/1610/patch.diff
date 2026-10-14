@@ -1,0 +1,312 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..300127d 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -100,6 +100,22 @@ VALID_DELIVERY_MECHANISM = {
+ # orphan vendored template with no patches.yml entry is caught).
+ CHAT_TEMPLATE_ARTIFACT_SUFFIXES = {".jinja", ".jinja2", ".j2"}
+ 
++# Conventional install-script / bootstrap artifact names. These identify NO
++# specific patch — every install-script patch ships its own `install.sh`, so
++# any compose that runs any of them contains the string. A compose line
++# carrying one of these names must be attributed via the patch directory's
++# own name instead (see `_source_markers`).
++GENERIC_ARTIFACT_NAMES = frozenset({
++    "install.sh",
++    "install.py",
++    "apply.sh",
++    "apply.py",
++    "setup.sh",
++    "setup.py",
++    "run.sh",
++    "bootstrap.sh",
++})
++
+ SEED_REQUIRED_KEYS = {
+     "model",
+     "arch_family",
+@@ -401,6 +417,22 @@ def service_body(text: str) -> str:
+ # invoke artifacts (as declared in patches.yml / Phase-A-prime
+ # delivery_spec) are present in the service body.
+ # --------------------------------------------------------------------------
++def _identifying_artifact_name(rel: str) -> str:
++    """The body-marker for a spec's `sidecar`/`script` path. A conventional
++    install-script name (`install.sh`, …) identifies no patch — every
++    install-script patch has one — so return the containing directory's
++    name instead: it is present in the service body wherever the patch is
++    genuinely wired (the mount line's source carries it), and absent when
++    the wiring is gone (another patch's `install.sh` invoke must not
++    satisfy this patch's entrypoint side).
++    """
++    p = Path(rel)
++    name = p.name
++    if name in GENERIC_ARTIFACT_NAMES:
++        name = p.parent.name
++    return name
++
++
+ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     """Derive (volume_markers, invoke_markers) from ``delivery_spec``.
+ 
+@@ -411,7 +443,8 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+       ``mounted_at``) of overlay files / install scripts;
+     * invoke markers: the entrypoint command that runs the sidecar /
+       install script (``invoke`` string, the sidecar/script container
+-      path, or basename).
++      path, or its IDENTIFYING name — a generic ``install.sh``-style
++      basename never counts on its own; the containing dir does).
+     """
+     spec = patch.get("delivery_spec") or {}
+     vol: list[str] = []
+@@ -429,15 +462,15 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     if mounted_at:
+         vol.append(mounted_at)
+ 
+-    # python_sidecar → sidecar is the host path; its basename appears in
+-    # both the bind mount and the `python3 …` invoke line.
++    # python_sidecar → sidecar is the host path; its identifying name
++    # appears in both the bind mount and the `python3 …` invoke line.
+     sidecar = spec.get("sidecar")
+     if sidecar:
+-        inv.append(Path(sidecar).name)
++        inv.append(_identifying_artifact_name(sidecar))
+ 
+     script = spec.get("script")
+     if script:
+-        inv.append(Path(script).name)
++        inv.append(_identifying_artifact_name(script))
+ 
+     invoke = spec.get("invoke")
+     # Only treat `invoke` as a literal body marker when it is an actual
+@@ -463,6 +496,45 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     return vol, inv
+ 
+ 
++def _source_markers(patch: dict) -> list[str]:
++    """Identifying names of a patch's on-disk artifacts, for binding a
++    compose's mount line to THIS patch rather than to another patch that
++    happens to be mounted at the same in-container target.
++
++    * a directory entry (the patch dir itself) contributes its own name;
++    * a file with a distinctive name contributes that name;
++    * a conventional install-script name (`install.sh`, …) identifies no
++      patch — its containing directory does;
++    * the shared `patches/` tree name (the parent of a bare dir entry)
++      appears in every compose that mounts ANY patch and is never a marker.
++    """
++    markers: list[str] = []
++    for rel in patch.get("files") or []:
++        name = Path(rel).name
++        if name in GENERIC_ARTIFACT_NAMES:
++            name = Path(rel).parent.name
++        if not name or name == "patches" or name in GENERIC_ARTIFACT_NAMES:
++            continue
++        if name not in markers:
++            markers.append(name)
++    return markers
++
++
++def _source_bound_vol_line(body: str, vol_markers: list[str], source_markers: list[str]) -> bool:
++    """True iff some line of ``body`` carries a declared mount target AND
++    one of the patch's own source names.
++
++    A target-only probe answers True for a compose that mounts a DIFFERENT
++    patch at the same in-container target (the vLLM and SGLang w4a8 dirs are
++    both wired at `/etc/club3090/w4a8`); the source binding is what makes
++    the mount attributable to this patch.
++    """
++    for line in body.splitlines():
++        if any(m in line for m in vol_markers) and any(s in line for s in source_markers):
++            return True
++    return False
++
++
+ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+@@ -481,7 +553,17 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+-    vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
++    # An install-script mount is this patch's wiring only if the line that
++    # carries the declared target ALSO carries one of the patch's own source
++    # names — another patch mounted at the same in-container target is a
++    # different patch's wiring. Other mechanisms keep the target-only probe
++    # (their declared targets are site-packages-style paths no second
++    # patch shares, and the chat_template path is checked separately).
++    if patch.get("delivery_mechanism") == "install_script" and vol_markers:
++        src = _source_markers(patch)
++        vol_ok = (not src) or _source_bound_vol_line(body, vol_markers, src)
++    else:
++        vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
+ 
+     if wired_at == {"volumes"}:
+@@ -493,6 +575,18 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+         # load-bearing artifact); the invoke line is corroborating.
+         return bool(vol_markers) and vol_ok and inv_ok
+     # Unknown / empty wired_at: fall back to "any declared marker present".
++    # Exception: an install-script spec that declares `mounted_at` declares
++    # BOTH points (mounted_at = the volumes point, script/invoke = the
++    # entrypoint point), so it takes the same both-points rule — the volume
++    # mount is the load-bearing artifact and the invoke is corroborating;
++    # an invoke line pointing at another patch's mount at the same target
++    # must not count as reaching.
++    if (
++        not wired_at
++        and patch.get("delivery_mechanism") == "install_script"
++        and vol_markers
++    ):
++        return bool(vol_markers) and vol_ok and inv_ok
+     return (bool(vol_markers) and vol_ok) or (bool(inv_markers) and inv_ok)
+ 
+ 
+@@ -520,7 +614,15 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     The deprecated ``delivery:`` boolean block is still honoured as a
+     fallback for parity with the existing contract, but every probe runs
+     against the service body so it cannot be tripped by a header/comment
+-    mention of the patch ID or a PR number.
++    mention of the patch ID or a PR number, and its markers are
++    identifying-only (the patch dir's own name / a distinctive artifact
++    name — never the shared ``patches`` tree name or a generic
++    ``install.sh``-style basename, both of which occur in every compose
++    that carries any install-script patch). An install-script patch whose
++    spec declares its mount target (``mounted_at``) is decided by the
++    spec check alone: a negative verdict (mount and/or invoke gone, or a
++    different patch at the same in-container target) is final — the
++    fallback must not resurrect it.
+     """
+     # CONTRACT-2b-i: a `chat_template` patch's effective coverage MUST be
+     # computed from the REAL merged compose graph (`extends:` resolved with
+@@ -540,17 +642,21 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     if _spec_wiring_present(patch, body):
+         return True
+ 
++    # A spec that declares WHERE the patch is mounted (``mounted_at``) was
++    # just checked in full: the mount line is source-bound (a different
++    # patch at the same in-container target does not count) and the
++    # entrypoint invoke is matched. Its negative verdict is FINAL — the
++    # legacy fallback below must not override it.
++    spec = patch.get("delivery_spec") or {}
++    if patch.get("delivery_mechanism") == "install_script" and spec.get("mounted_at"):
++        return False
++
+     # Legacy fallback (read-only `delivery:` block) — operates on the
+     # service body, so header/comment ID mentions never match.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
++        if any(marker in body for marker in _source_markers(patch)):
++            return True
+         if patch["id"] in body:
+             return True
+     if (
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 6f4aabf..2c782da 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -319,6 +319,97 @@ for patch in chat_template_patches:
+                     f"../../patches/... mount form)"
+                 )
+ 
++# (6) install-script negative controls. The legacy `delivery:` fallback
++#     used to derive its markers from the patch's `files` as: the entry's
++#     own name PLUS, for a directory entry, its PARENT's name — always
++#     `patches`, present in every compose that mounts ANY patch — and for
++#     a file entry the bare filename — `install.sh`, present in every
++#     compose that runs ANY install script. So a compose whose mount +
++#     invoke for the patch had been removed still reported reached (the
++#     sound delivery_spec check said False; the fallback overrode it).
++#     Two controls per install-script patch:
++#       * "unwired": the patch's mount + invoke are gone; the compose
++#         still carries the generic patch machinery (another patch dir
++#         under .../patches/ + its install.sh). Must report NOT reached.
++#       * "other-patch-same-target": a DIFFERENT patch is mounted at the
++#         same in-container target (the vLLM and SGLang w4a8 dirs are both
++#         wired at /etc/club3090/w4a8). The target string is present but
++#         the mount's source is the other patch's dir. Must report NOT
++#         reached (the sound check binds the mount line to THIS patch's
++#         source, not just the target).
++#     Plus a "wired" positive control (own dir at the declared target,
++#     invoked) that must keep reporting reached.
++for patch in patches:
++    if patch.get("delivery_mechanism") != "install_script":
++        continue
++    spec = patch.get("delivery_spec") or {}
++    script_rel = spec.get("script")
++    if not script_rel:
++        continue
++    dir_name = Path(script_rel).parent.name
++    mounted = spec.get("mounted_at")
++    invoke = spec.get("invoke") or ""
++    literal = (
++        invoke
++        if (invoke and "/" in invoke and not invoke.endswith((".", "serving", "import")))
++        else ""
++    )
++    if mounted:
++        wired = (
++            "services:\n"
++            "  s:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            f"      - ../../patches/{dir_name}:{mounted}:ro\n"
++            f"    command: {literal or f'bash {mounted}/install.sh'}\n"
++        )
++    else:
++        # No declared target: the identifying artifact is the patch dir's
++        # own name in a mount line (the improved fallback path).
++        wired = (
++            "services:\n"
++            "  s:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            f"      - ../../patches/{dir_name}:/opt/patch-000:ro\n"
++        )
++    unwired = (
++        "services:\n"
++        "  s:\n"
++        "    image: scratch\n"
++        "    volumes:\n"
++        "      - ../../patches/other-patch-000:/etc/club3090/other-patch-000:ro\n"
++        "    command: bash /etc/club3090/other-patch-000/install.sh\n"
++    )
++    other_same_target = None
++    if mounted:
++        other_same_target = (
++            "services:\n"
++            "  s:\n"
++            "    image: scratch\n"
++            "    volumes:\n"
++            f"      - ../../patches/other-patch-000:{mounted}:ro\n"
++            f"    command: bash {mounted}/install.sh\n"
++        )
++    with tempfile.TemporaryDirectory() as _ctl:
++        _ctlp = Path(_ctl)
++        controls = [("wired", wired, True), ("unwired", unwired, False)]
++        if other_same_target is not None:
++            controls.append(("other-patch-same-target", other_same_target, False))
++        for label, text, expect in controls:
++            _f = _ctlp / f"installctl-{patch['id']}-{label}.yml"
++            _f.write_text(text, encoding="utf-8")
++            got = pa.reaches(root, patch, str(_f))
++            if got != expect:
++                errors.append(
++                    f"install-script control {patch['id']} ({label}): "
++                    f"reaches()={got}, expected {expect} — an unwired "
++                    f"install-script patch must not report reached (the "
++                    f"legacy fallback's generic `patches`/`install.sh` "
++                    f"markers / a foreign mount at the same target must "
++                    f"not count)"
++                )
++
+ arch_allowed_keys = pa.ARCH_ALLOWED_KEYS
+ arch_required = pa.ARCH_REQUIRED_KEYS
+ valid_trc = pa.VALID_TRC

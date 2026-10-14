@@ -1,0 +1,43 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..f8e3428 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -6,7 +6,16 @@ boot log for named buffers, then reconciles against nvidia-smi so the gap
+ between "what the engine told us" and "what the card reports" is visible rather
+ than silent -- that gap is where a draft context hides.
+ 
+-Two traps this encodes, both paid for on 2026-08-31:
++Traps this encodes, paid for in the field:
++  * model buffer: SUM every "load_tensors: CUDA<n> model buffer size" line. A drafter
++    pinned to the same GPU emits the SAME line shape as the target, so last-wins would
++    report the drafter's weights as the whole model and silently drop the target's
++    (measured: 656 MiB shown where target+drafter = 3,969 MiB live). Unlike the pool,
++    these are distinct buffers and they add.
++  * state buffer: two engine code paths emit it -- DeepSeek-style "_comp_state: ...
++    state buffer size" and recurrent/GLM-style "llama_memory_recurrent: ... RS buffer
++    size". A drafter can log a second set. Sum both; missing one drops real GiB into
++    `unaccounted`.
+   * moe-cache pool: take the LAST report per (device, pool index). A drafter load
+     triggers a SECOND allocation and both are logged; summing all matches
+     double-counts (measured 13,947 against a live 6,820 -- 2.05x).
+@@ -38,10 +47,19 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
+     compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
++    # state buffers come from two engine code paths: DeepSeek-style
++    # _comp_state and recurrent (GLM/Mamba-style) llama_memory_recurrent.
++    # Both add up, and a drafter may emit a second set, so sum every match.
+     state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    for dev, val in _per_dev(
++        text,
++        r"llama_memory_recurrent:\s+(CUDA\d)\b.*?RS buffer size =\s+([\d.]+) MiB",
++        agg=True,
++    ).items():
++        state[dev] = state.get(dev, 0.0) + val
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}

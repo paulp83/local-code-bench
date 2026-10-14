@@ -1,0 +1,14 @@
+{
+ "task": "33-flaky-fetch",
+ "config": "thinkingcap-dualfast",
+ "harness": "omp",
+ "draw": 1,
+ "model": "thinkingcap38-27b",
+ "agent_s": 16.4,
+ "tool_calls": 3,
+ "exit_status": "done",
+ "passed": true,
+ "checks_passed": 26,
+ "checks_total": 26,
+ "partial": 1.0
+}

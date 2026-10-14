@@ -1,0 +1,261 @@
+diff --git a/scripts/lib/vram_breakdown.py b/scripts/lib/vram_breakdown.py
+index 8935c4d..e95839a 100755
+--- a/scripts/lib/vram_breakdown.py
++++ b/scripts/lib/vram_breakdown.py
+@@ -13,6 +13,13 @@ Two traps this encodes, both paid for on 2026-08-31:
+   * A pool figure read at boot is a LOWER BOUND. The pool grows into free VRAM
+     as traffic admits experts, until it hits the free-minus-reserve floor.
+ 
++And one paid for 2026-10-12 (#1119): a drafter re-uses the target's log-line
++shapes and interleaves its own buffers between the target's. So model=/kv/
++state sum across both models, and a sched_reserve value strictly SMALLER than
++the running max is a distinct context (the drafter's compute), while one
++greater-or-equal is the target re-reserving the same buffer and REPLACES it.
++84% of the old "unaccounted" figure was this under-attribution, not overhead.
++
+ Scope: the BYTE split only. Pool slot counts, hit rates and cache health belong to
+ CAPTURE: EXPERT CACHE and are deliberately not duplicated here -- one owner per
+ number, so the two sections can never disagree.
+@@ -23,11 +30,38 @@ import sys
+ 
+ 
+ def _per_dev(text, pat, agg=False):
++    """Per-device sums (agg=True) or last-wins over one or more line patterns."""
++    if isinstance(pat, str):
++        pat = (pat,)
++    out = {}
++    for p in pat:
++        for m in re.finditer(p, text):
++            dev, val = m.group(1), float(m.group(2))
++            out[dev] = out.get(dev, 0.0) + val if agg else val
++    return out
++
++
++def _compute_per_dev(text, pat):
++    """sched_reserve compute buffers per device, re-reserve-aware.
++
++    The log line does not say which context it belongs to, and a drafter
++    interleaves its own (smaller) reservation between the target's reserve and
++    the target's re-reserve.  Measured ladder (glm53-flash-dual-iq3xxs-moecache
++    CUDA1): 5208.35 (target) -> 1606.48 (drafter) -> 5240.16 (target re-reserve
++    after the drafter loaded).  First and third are the SAME buffer re-created
++    -- summing all three double-counts -- so: a value >= the running max is the
++    main context re-reserved and REPLACES it; a strictly smaller interleaved
++    value is a distinct context (the drafter) and ADDS.
++    """
+     out = {}
+     for m in re.finditer(pat, text):
+         dev, val = m.group(1), float(m.group(2))
+-        out[dev] = out.get(dev, 0.0) + val if agg else val
+-    return out
++        d = out.setdefault(dev, [0.0, 0.0])  # [main, distinct-contexts]
++        if d[0] and val < d[0]:
++            d[1] += val
++        else:
++            d[0] = val
++    return {dev: main + extra for dev, (main, extra) in out.items()}
+ 
+ 
+ def main() -> int:
+@@ -38,10 +72,18 @@ def main() -> int:
+     except OSError:
+         return 1
+ 
+-    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB")
+-    compute = _per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
++    # agg=True wherever a drafter can emit the same line shape as the target:
++    # last-wins reported the DRAFTER's weights as model= (measured: 656 MiB
++    # where the target's 3,313 MiB went missing -- #1119).
++    model = _per_dev(text, r"load_tensors:\s+(CUDA\d) model buffer size =\s+([\d.]+) MiB", agg=True)
++    compute = _compute_per_dev(text, r"sched_reserve:\s+(CUDA\d) compute buffer size =\s+([\d.]+) MiB")
+     kv = _per_dev(text, r"llama_kv_cache:\s+(CUDA\d) KV buffer size =\s+([\d.]+) MiB", agg=True)
+-    state = _per_dev(text, r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB", agg=True)
++    # state caches, two line shapes: DeepSeek's _comp_state and the
++    # GLM/DeltaNet recurrent state (llama_memory_recurrent ... RS buffer).
++    state = _per_dev(text, (
++        r"_comp_state:\s+(CUDA\d) \S+ \S+ state buffer size =\s+([\d.]+) MiB",
++        r"llama_memory_recurrent:\s+(CUDA\d).*?RS buffer size =\s+([\d.]+) MiB",
++    ), agg=True)
+ 
+     # LAST report per (device, pool) -- never sum every match, see module docstring
+     last = {}
+@@ -49,10 +91,9 @@ def main() -> int:
+         r"\[moe-cache\] (CUDA\d) pool\[(\d)\]:.*?slots=(\d+).*?total=(\d+) MiB", text
+     ):
+         last[(m.group(1), m.group(2))] = (int(m.group(3)), int(m.group(4)))
+-    pool, slots, allocs = {}, {}, {}
+-    for (dev, idx), (sl, mib) in last.items():
++    pool, allocs = {}, {}
++    for (dev, idx), (_sl, mib) in last.items():
+         pool[dev] = pool.get(dev, 0) + mib
+-        slots[dev] = slots.get(dev, 0) + sl
+     for m in re.finditer(r"\[moe-cache\] (CUDA\d) pool\[(\d)\]:", text):
+         k = (m.group(1), m.group(2))
+         allocs[k] = allocs.get(k, 0) + 1
+@@ -86,7 +127,7 @@ def main() -> int:
+             parts.append("total=%.0f/%.0fMiB(%.0f%%)" % (used, tot, 100 * used / tot))
+             if acc:
+                 # everything the card reports that the engine did not name:
+-                # draft context, CUDA runtime, fragmentation
++                # CUDA runtime, fragmentation, transient allocations
+                 parts.append("unaccounted=%.0f" % (used - acc))
+         print("  %s: %s" % (dev, "  ".join(parts)))
+ 
+diff --git a/scripts/tests/test-vram-breakdown.sh b/scripts/tests/test-vram-breakdown.sh
+new file mode 100755
+index 0000000..53898d9
+--- /dev/null
++++ b/scripts/tests/test-vram-breakdown.sh
+@@ -0,0 +1,152 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Force Python's UTF-8 mode (PEP 540) for every python3 this script runs.
++# Same rationale as every other suite: repo sources and fixture logs carry
++# unicode, and a real non-UTF-8 locale decodes reads/stdout with the locale
++# codec (#779). Exported, so child processes inherit it.
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++
++# test-vram-breakdown.sh — drafter VRAM attribution (club-3090 #1119).
++#
++# scripts/lib/vram_breakdown.py used to lose the target model to the drafter
++# on any slug with a GPU-pinned drafter: the drafter emits the SAME log-line
++# shapes as the target, and `model=` was last-wins, so the drafter's 656 MiB
++# overwrote the target's 3,313 MiB. Two further buffers were never matched at
++# all (GLM/DeltaNet `llama_memory_recurrent ... RS buffer size`; the drafter's
++# compute reservation, interleaved between the target's reserve and the
++# target's re-reserve). 84% of the reported `unaccounted` was that
++# under-attribution, not genuine overhead.
++#
++# Fixtures are reconstructed from the measured glm53-flash-dual-iq3xxs-moecache
++# boot: CUDA1 ladder 5208.35 (target) -> 1606.48 (drafter) -> 5240.16 (target
++# re-reserve), drafter weights 655.73, drafter KV 80.00, recurrent state
++# 204.75, target KV 1280.94, moe-cache pool with two allocations (last wins).
++# NO live Docker / GPU: nvidia-smi is a fake on PATH, so the reconciliation
++# against `total=`/`unaccounted=` is exercised too.
++#
++# The test IS the spec for the three fixes:
++#   * model= sums target+drafter (not last-wins);
++#   * state= catches both state shapes (_comp_state AND llama_memory_recurrent);
++#   * compute= adds a strictly-smaller interleaved reservation (distinct
++#     context) but REPLACES a greater-or-equal one (the same buffer
++#     re-reserved) — a drafter-free card with a re-reserve ladder must not
++#     double-count, and a single-reserve boot must print one value.
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT_DIR"
++
++TMP="$(mktemp -d)"
++trap 'rm -rf "$TMP"' EXIT
++
++# Fake nvidia-smi: only the invocation vram_breakdown.py makes.
++cat > "$TMP/nvidia-smi" <<'PY'
++#!/usr/bin/env python3
++import sys
++if "--query-gpu" in " ".join(sys.argv):
++    print("0, 16000, 24576")
++    print("1, 22992, 24576")
++PY
++chmod +x "$TMP/nvidia-smi"
++export PATH="$TMP:$PATH"
++
++# --- fixture 1: drafter pinned to CUDA1 (the #1119 repro) -------------------
++cat > "$TMP/boot-drafter.log" <<'EOF'
++load_model: /models/glm53-flash/ggml/glm53-flash-iq3xxs-f16.gguf
++load_tensors:   CUDA0 model buffer size = 3313.42 MiB
++load_tensors:   CUDA1 model buffer size = 3313.42 MiB
++sched_reserve:  CUDA0 compute buffer size = 5208.35 MiB
++sched_reserve:  CUDA1 compute buffer size = 5208.35 MiB
++load_tensors:   CUDA1 model buffer size =  655.73 MiB
++llama_kv_cache: CUDA1 KV buffer size =   80.00 MiB
++sched_reserve:  CUDA1 compute buffer size = 1606.48 MiB
++sched_reserve:  CUDA0 compute buffer size = 5240.16 MiB
++sched_reserve:  CUDA1 compute buffer size = 5240.16 MiB
++llama_kv_cache: CUDA0 KV buffer size = 1280.94 MiB
++llama_kv_cache: CUDA1 KV buffer size = 1280.94 MiB
++llama_memory_recurrent: CUDA0 RS buffer size =  204.75 MiB
++llama_memory_recurrent: CUDA1 RS buffer size =  204.75 MiB
++[moe-cache] CUDA0 pool[0]: admitted=1000/4567 slots=8192 total=4826 MiB
++[moe-cache] CUDA1 pool[0]: admitted=1000/4567 slots=8192 total=4826 MiB
++[moe-cache] CUDA1 pool[0]: admitted=2000/4567 slots=16384 total=9653 MiB
++EOF
++
++# --- fixture 2: no drafter (semantics must not move) ------------------------
++cat > "$TMP/boot-nodrafter.log" <<'EOF'
++load_model: /models/deepseek-v4-flash/gguf
++load_tensors:   CUDA0 model buffer size = 3313.42 MiB
++sched_reserve:  CUDA0 compute buffer size = 5208.35 MiB
++llama_kv_cache: CUDA0 KV buffer size = 1280.94 MiB
++_comp_state:    CUDA0 bf16 f32 state buffer size = 512.00 MiB
++llama_memory_recurrent: CUDA0 RS buffer size =  204.75 MiB
++[moe-cache] CUDA0 pool[0]: admitted=1000/4567 slots=8192 total=4826 MiB
++EOF
++
++python3 - "$TMP" <<'PY'
++import os, subprocess, sys
++
++tmp = sys.argv[1]
++script = "scripts/lib/vram_breakdown.py"  # cwd is repo root
++
++def run(log):
++    r = subprocess.run([sys.executable, script, os.path.join(tmp, log)],
++                       capture_output=True, text=True, encoding="utf-8")
++    if r.returncode != 0:
++        raise SystemExit(f"FAIL: vram_breakdown.py exited {r.returncode} on {log}\n{r.stdout}{r.stderr}")
++    lines = {ln.split(":")[0].strip(): ln for ln in r.stdout.splitlines() if ln.strip().startswith("CUDA")}
++    return r.stdout, lines
++
++fails = []
++def check(name, got, want):
++    if got != want:
++        fails.append(f"{name}: got {got!r}, want {want!r}")
++
++# --- drafter boot -----------------------------------------------------------
++out, dev = run("boot-drafter.log")
++
++c1 = dev["CUDA1"]
++check("CUDA1 model sums target+drafter (not drafter-only last-wins)",
++      next(s for s in c1.split() if s.startswith("model=")), "model=3969")
++check("CUDA1 kv sums drafter+target KV", next(s for s in c1.split() if s.startswith("kv=")), "kv=1361")
++check("CUDA1 state catches llama_memory_recurrent",
++      next(s for s in c1.split() if s.startswith("state=")), "state=205")
++check("CUDA1 compute adds drafter, replaces target re-reserve (5240.16+1606.48)",
++      next(s for s in c1.split() if s.startswith("compute=")), "compute=6847")
++check("CUDA1 pool takes LAST moe-cache report", next(s for s in c1.split() if s.startswith("pool=")), "pool=9653")
++check("CUDA1 unaccounted reconciles against nvidia-smi (22992 - 22034.48)",
++      next(s for s in c1.split() if s.startswith("unaccounted=")), "unaccounted=958")
++check("CUDA1 total from fake nvidia-smi",
++      next(s for s in c1.split() if s.startswith("total=")), "total=22992/24576MiB(94%)")
++
++c0 = dev["CUDA0"]
++check("CUDA0 (drafter-free) model keeps target weights",
++      next(s for s in c0.split() if s.startswith("model=")), "model=3313")
++check("CUDA0 compute replaces re-reserve, never double-counts (5240 not 10449)",
++      next(s for s in c0.split() if s.startswith("compute=")), "compute=5240")
++check("CUDA0 state catches recurrent state",
++      next(s for s in c0.split() if s.startswith("state=")), "state=205")
++check("CUDA0 unaccounted", next(s for s in c0.split() if s.startswith("unaccounted=")), "unaccounted=1135")
++
++check("double-allocation warning still fires (2 moe-cache reports logged)",
++      "WARNING: 2 moe-cache allocations logged per pool" in out, True)
++
++# --- no-drafter boot: identical semantics, no phantom drafter context -------
++_, dev = run("boot-nodrafter.log")
++c0 = dev["CUDA0"]
++check("no-drafter model", next(s for s in c0.split() if s.startswith("model=")), "model=3313")
++check("no-drafter kv", next(s for s in c0.split() if s.startswith("kv=")), "kv=1281")
++check("no-drafter state sums both shapes (_comp_state 512 + RS 204.75)",
++      next(s for s in c0.split() if s.startswith("state=")), "state=717")
++check("no-drafter single reservation stays a single value (no false distinct context)",
++      next(s for s in c0.split() if s.startswith("compute=")), "compute=5208")
++check("no-drafter unaccounted (16000 - 15345.46)",
++      next(s for s in c0.split() if s.startswith("unaccounted=")), "unaccounted=655")
++
++if fails:
++    for f in fails:
++        print("FAIL " + f)
++    raise SystemExit(1)
++print("all vram-breakdown assertions passed")
++PY
++
++echo "test-vram-breakdown.sh OK"

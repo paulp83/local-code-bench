@@ -1,0 +1,23 @@
+{
+ "n": 1174,
+ "config": "strata-iq4xs-omp",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 442.9,
+ "steps": 22,
+ "applied": true,
+ "empty_patch": false,
+ "passed": false,
+ "partial": 0.6,
+ "checks_passed": 55,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/profiles/hf_fetch.py"
+ ],
+ "p2p_run": 2,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-pull-download-ladder.sh": 1
+ }
+}

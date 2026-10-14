@@ -1,0 +1,4 @@
+config,decode_tps,prefill_tps,vram_gib,max_ctx_ok,launch
+tp2-fp8,88.2,6120,29.7,98304,`bash launch.sh --slug glm53 --tp 2 --quant fp8`
+tp2-awq,84.9,5840,27.3,65536,`bash launch.sh --slug glm53 --tp 2 --quant awq`
+single-q4,51.6,3310,31.4,32768,`bash launch.sh --slug glm53 --tp 1 --quant q4`

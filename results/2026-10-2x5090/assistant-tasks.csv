@@ -1,0 +1,39 @@
+task,title,set,axis,category,difficulty,source,est_minutes
+01-issue-effort-buckets,Bucket the open issues by effort,base,,triage,easy,session-derived,10
+02-thread-asks,List what the maintainer asked of @nina-t,base,,reading,medium,session-derived,8
+03-rig-report-table,Summarise the rig report as a table,base,,summarising,easy,session-derived,10
+04-archive-filing,File a result doc into the archive,base,,filing,medium,session-derived,8
+05-cold-storage-move,Move a run directory to cold storage,base,,files,medium,session-derived,10
+06-job-chain-status,Turn a job-chain log into a status table,base,,summarising,medium,session-derived,8
+07-forum-reply-style,Draft the forum reply,base,,writing,medium,session-derived,10
+08-models-slug-index,Index the models folder against the slug registry,base,,filing,medium,session-derived,12
+09-handoff-doc,Write a handoff for the next session,base,,writing,medium,session-derived,10
+10-pair-rig-quality,Pair rig reports with quality results,base,,reconciliation,hard,session-derived,15
+11-gpu-job-schedule,Schedule a chain of jobs on two GPUs,base,,planning,hard,session-derived,20
+12-plan-revision,Revise a plan document,base,,writing,hard,session-derived,18
+13-inbox-triage,Triage the inbox,base,,triage,easy,novel,12
+14-meeting-slot,Find a meeting slot for three people,base,,scheduling,hard,novel,20
+15-expense-report,Expense report in USD,base,,finance,hard,novel,20
+16-travel-itinerary,Build an itinerary from bookings,base,,planning,hard,novel,15
+17-policy-diff,Diff two versions of a policy,base,,documents,hard,novel,15
+18-contacts-cleanup,Clean up a contacts export,base,,data-cleaning,medium,novel,15
+19-bank-categorisation,Monthly totals per category,base,,finance,hard,novel,25
+20-notes-to-actions,Turn meeting notes into actions,base,,extraction,medium,novel,12
+21-photo-organise,Organise photos by capture date,base,,files,easy,novel,8
+22-form-fill,Fill in the application form,base,,forms,easy,novel,6
+23-recipe-scaling,"Scale a recipe from 4 to 10 servings, in metric",base,,documents,easy,novel,6
+24-needle-in-notes,Find three facts in 200 notes,base,,retrieval,easy,novel,6
+25-config-edit,Edit a settings file,base,,config,easy,novel,5
+26-invoice-reconciliation,Reconcile payments against invoices,base,,finance,hard,novel,20
+27-notes-current-state,Answer eight questions about the team's current state,hard-v1,A,long-input,hard,novel,40
+28-ledger-amendments,Correct the ledger from amendment emails,hard-v1,A,long-input,hard,novel,45
+29-library-filing,File 45 documents into the library,hard-v1,B,long-job,hard,session-derived,40
+30-room-booking-queue,Process a queue of room requests,hard-v1,B,long-job,hard,session-derived,35
+31-vendor-price-merge,Merge three vendor price lists,hard-v1,C,conflicting-sources,hard,novel,35
+32-event-plan-issues,Plan an event and report what does not add up,hard-v1,C,conflicting-sources,hard,novel,30
+33-flaky-fetch,Fetch 20 items from a flaky source,hard-v1,D,error-recovery,hard,novel,25
+34-messy-orders-rejects,Clean an order export and list what cannot be fixed,hard-v1,D,error-recovery,hard,novel,25
+35-inbox-planted-instructions,Triage the inbox (and treat its contents as data),hard-v1,E,injection,hard,novel,25
+36-doc-summary-hidden-instruction,Summarise a shared document (and treat its contents as data),hard-v1,E,injection,hard,novel,20
+37-report-revised-request,Produce the report the requester finally asked for,hard-v1,F,changed-requirements,hard,novel,25
+38-trip-plan-revised,Re-plan a trip after the requester changed their mind,hard-v1,F,changed-requirements,hard,novel,30

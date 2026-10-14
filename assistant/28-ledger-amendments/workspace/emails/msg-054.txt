@@ -1,0 +1,8 @@
+From: tess@example.net
+Date: 2026-07-16T00:47:00Z
+Subject: ledger amendment
+
+We think T-00484 duplicates T-00309. Keep the one with the earlier date.
+
+Thanks,
+tess

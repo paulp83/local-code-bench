@@ -1,0 +1,477 @@
+diff --git a/scripts/lib/profiles/patch_attribution.py b/scripts/lib/profiles/patch_attribution.py
+index 0647324..75bb3cc 100644
+--- a/scripts/lib/profiles/patch_attribution.py
++++ b/scripts/lib/profiles/patch_attribution.py
+@@ -396,6 +396,189 @@ def service_body(text: str) -> str:
+     return "\n".join(body_lines)
+ 
+ 
++# --------------------------------------------------------------------------
++# Patch identity — the host-side token that distinguishes THIS patch's
++# artifacts from every other patch's.
++# --------------------------------------------------------------------------
++# A compose-relative mount source always carries the patch directory's own
++# name after ``patches/`` (``../../../patches/vllm-effort-budget:...``), which
++# is what lets the wiring check match a mount's SOURCE to this patch instead
++# of merely its in-container target. Generic names are deliberately excluded:
++# the ``patches`` parent dir appears in every patch mount, and bare artifact
++# basenames (``install.sh``/``apply.py``/``sitecustomize.py``) appear in
++# every compose that runs ANY install script — treating either as
++# identifying is what let the legacy fallback report an unwired patch as
++# reached.
++def _patch_artifact_rels(patch: dict) -> list[str]:
++    """Repo-relative artifact paths this patch declares (``files`` plus the
++    spec's ``script``/``sidecar``/``jinja``)."""
++    rels = list(patch.get("files") or [])
++    spec = patch.get("delivery_spec") or {}
++    for key in ("script", "sidecar", "jinja"):
++        value = spec.get(key)
++        if value:
++            rels.append(value)
++    return rels
++
++
++def _patch_identity_tokens(patch: dict) -> list[str]:
++    """The patch directory's own name under ``patches/`` (or the artifact's
++    own filename when it sits directly in ``patches/``), per declared
++    artifact. Never a generic parent dir or a generic basename."""
++    tokens: set[str] = set()
++    for rel in _patch_artifact_rels(patch):
++        parts = Path(rel).parts
++        if "patches" not in parts:
++            continue
++        idx = parts.index("patches")
++        if idx + 1 < len(parts):
++            tokens.add(parts[idx + 1])
++    return sorted(tokens)
++
++
++def _patch_host_dirs(patch: dict, root: Path) -> list[Path]:
++    """Absolute host dirs holding this patch's artifacts
++    (``<root>/…/patches/<patch-dir>``), resolved."""
++    dirs: set[Path] = set()
++    for rel in _patch_artifact_rels(patch):
++        parts = Path(rel).parts
++        if "patches" not in parts:
++            continue
++        idx = parts.index("patches")
++        if idx + 1 < len(parts):
++            dirs.add((root / Path(*parts[: idx + 2])).resolve())
++    return sorted(dirs)
++
++
++_TOKEN_BOUNDARY = re.compile(r"[A-Za-z0-9_.\-]")
++
++
++def _token_in(text: str, token: str) -> bool:
++    """Substring match honouring path-segment boundaries: the token must not
++    be a proper prefix of a longer name, so ``vllm-effort-budget`` does not
++    match a mount of ``vllm-effort-budget-v2``."""
++    if not token:
++        return False
++    start = 0
++    while True:
++        idx = text.find(token, start)
++        if idx < 0:
++            return False
++        start = idx + 1
++        if idx > 0 and _TOKEN_BOUNDARY.match(text[idx - 1]):
++            continue
++        end = idx + len(token)
++        if end < len(text) and _TOKEN_BOUNDARY.match(text[end]):
++            continue
++        return True
++
++
++def _split_colon_segments(token: str) -> list[str]:
++    """Split ``<src>:<dst>[:<mode>]`` at ``:``, keeping ``${VAR:-default}``
++    wrappers intact (the ``:`` inside a default is not a mount separator)."""
++    segments: list[str] = []
++    buffer: list[str] = []
++    depth = 0
++    i = 0
++    while i < len(token):
++        ch = token[i]
++        if ch == "$" and token[i + 1 : i + 2] == "{":
++            depth += 1
++            buffer.append("${")
++            i += 2
++            continue
++        if depth and ch == "}":
++            depth -= 1
++        if ch == ":" and depth == 0:
++            segments.append("".join(buffer))
++            buffer = []
++            i += 1
++            continue
++        buffer.append(ch)
++        i += 1
++    segments.append("".join(buffer))
++    return segments
++
++
++def _mount_pairs(line: str) -> list[tuple[str, str]]:
++    """(source, container-target) pairs of the bind mounts on a body line.
++
++    Targets are container-absolute (``/…``) and sources path-like; port
++    mappings and env assignments do not shape-match and are skipped."""
++    pairs: list[tuple[str, str]] = []
++    for raw in line.split():
++        token = raw.strip().strip('"').strip("'").strip()
++        segments = _split_colon_segments(token)
++        if len(segments) < 2 or not segments[1].startswith("/"):
++            continue
++        src, dst = segments[0], segments[1]
++        if "/" in src:
++            pairs.append((src, dst))
++    return pairs
++
++
++_ENV_DEFAULT_RE = re.compile(r"^\$\{[A-Za-z0-9_]+(?::?-)([^{}]*)\}$")
++
++
++def _resolve_mount_source(src: str, compose_dir: Path | None) -> Path | None:
++    """Resolve a mount source literal against the compose's directory.
++
++    ``${VAR:-default}`` resolves through its default; a bare ``${VAR}`` (an
++    operator override whose value we cannot see) is unresolvable and falls
++    back to the identity-token match."""
++    match = _ENV_DEFAULT_RE.match(src)
++    if match:
++        src = match.group(1).strip().strip('"').strip("'").strip()
++    elif src.startswith("${"):
++        return None
++    if not src or "/" not in src:
++        return None
++    path = Path(src)
++    if not path.is_absolute() and compose_dir is not None:
++        path = compose_dir / path
++    try:
++        return path.resolve()
++    except OSError:
++        return None
++
++
++def _patch_mounted(
++    patch: dict,
++    body: str,
++    targets: list[str],
++    root: Path | None = None,
++    compose_dir: Path | None = None,
++) -> bool:
++    """True iff ``body`` shows a bind mount OF THIS PATCH.
++
++    Match the mount's SOURCE to this patch — its declared
++    ``patches/<dir>`` path — not merely the in-container target: a compose
++    that mounts a DIFFERENT patch at the same target is not wired for this
++    one. A mount whose source resolves to a real host path decides
++    authoritatively; only an unresolvable source (a fixture, or an
++    operator ``${VAR}`` override) falls back to the boundary-matched
++    patch-directory token."""
++    tokens = _patch_identity_tokens(patch)
++    if not tokens:
++        return False
++    host_dirs = _patch_host_dirs(patch, root) if root is not None else []
++    for line in body.splitlines():
++        for src, dst in _mount_pairs(line):
++            if targets and not any(target in dst for target in targets):
++                continue
++            resolved = _resolve_mount_source(src, compose_dir)
++            if resolved is not None and resolved.exists():
++                if any(d == resolved or d in resolved.parents for d in host_dirs):
++                    return True
++                # A real mount at the declared target whose source is NOT
++                # this patch: a different patch is wired here — this line
++                # is not this patch's mount (no token fallback).
++                continue
++            if any(_token_in(src, tok) for tok in tokens):
++                return True
++    return False
++
++
+ # --------------------------------------------------------------------------
+ # delivery_spec wiring validation — confirm the patch's *actual* mount /
+ # invoke artifacts (as declared in patches.yml / Phase-A-prime
+@@ -463,14 +646,22 @@ def _spec_wiring_markers(patch: dict) -> tuple[list[str], list[str]]:
+     return vol, inv
+ 
+ 
+-def _spec_wiring_present(patch: dict, body: str) -> bool:
++def _spec_wiring_present(
++    patch: dict,
++    body: str,
++    root: Path | None = None,
++    compose_dir: Path | None = None,
++) -> bool:
+     """True iff the patch's declared delivery_spec wiring is in ``body``.
+ 
+     ``wired_at`` tells us which insertion point(s) the patch claims:
+-    ``volumes`` requires a matching mount target; ``entrypoint`` requires
+-    a matching invoke; ``[volumes, entrypoint]`` requires *both*.
++    ``volumes`` requires a bind mount OF THIS PATCH (source-matched via
++    :func:`_patch_mounted` — a mount of a different patch at the same
++    in-container target does not count); ``entrypoint`` requires a
++    matching invoke; ``[volumes, entrypoint]`` requires *both*.
+     A patch whose delivery_mechanism is ``none`` has no spec and is never
+-    spec-wired (the legacy fallback below still applies for parity).
++    spec-wired (the legacy fallback in :func:`reaches` still applies for
++    spec-less parity).
+     """
+     spec = patch.get("delivery_spec")
+     if not spec:
+@@ -481,19 +672,21 @@ def _spec_wiring_present(patch: dict, body: str) -> bool:
+     wired_at = set(wired_at or [])
+     vol_markers, inv_markers = _spec_wiring_markers(patch)
+ 
+-    vol_ok = (not vol_markers) or any(m in body for m in vol_markers)
++    vol_ok = _patch_mounted(
++        patch, body, vol_markers, root=root, compose_dir=compose_dir
++    )
+     inv_ok = (not inv_markers) or any(m in body for m in inv_markers)
+ 
+     if wired_at == {"volumes"}:
+-        return bool(vol_markers) and vol_ok
++        return vol_ok
+     if wired_at == {"entrypoint"}:
+         return bool(inv_markers) and inv_ok
+     if "volumes" in wired_at and "entrypoint" in wired_at:
+-        # Declared at both points — require the volume mount (the
++        # Declared at both points — require the mount OF THIS PATCH (the
+         # load-bearing artifact); the invoke line is corroborating.
+-        return bool(vol_markers) and vol_ok and inv_ok
++        return vol_ok and inv_ok
+     # Unknown / empty wired_at: fall back to "any declared marker present".
+-    return (bool(vol_markers) and vol_ok) or (bool(inv_markers) and inv_ok)
++    return vol_ok or inv_ok
+ 
+ 
+ # --------------------------------------------------------------------------
+@@ -506,21 +699,36 @@ def gap_declared(patch: dict, compose_name: str) -> bool:
+     return False
+ 
+ 
++def _compose_dir(root: Path, name_or_path: str) -> Path:
++    """Directory of the compose file a ``reaches`` probe reads — the base
++    for resolving compose-relative mount sources."""
++    return _resolve_compose_path(root, name_or_path).parent
++
++
+ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     """Is ``patch`` actually wired into the compose ``name_or_path``?
+ 
+     Sound (correction #4): probes the **comment-stripped service body**
+     only — never the file header or generator WARNING block — and
+-    validates the patch's **real delivery_spec wiring** (declared mount
+-    target and/or entrypoint invoke), not a substring of its ID.
++    validates the patch's **real delivery_spec wiring** (a bind mount of
++    THIS patch's declared ``patches/<dir>`` source at the declared target,
++    and/or the entrypoint invoke), not a substring of its ID.
+ 
+     ``name_or_path`` may be a COMPOSE_REGISTRY profile name OR an
+     arbitrary absolute path to a compose file.
+ 
+-    The deprecated ``delivery:`` boolean block is still honoured as a
+-    fallback for parity with the existing contract, but every probe runs
+-    against the service body so it cannot be tripped by a header/comment
+-    mention of the patch ID or a PR number.
++    For an install-script patch (``delivery.entrypoint_invoke``) that no
++    longer has its mount and invoke in the compose this returns **False**:
++    a patch that DECLARES a ``delivery_spec`` is decided by that spec
++    check alone, and the deprecated ``delivery:`` boolean block is only
++    consulted for spec-less entries (its legacy directory/file markers
++    — the ``patches`` parent name and bare basenames like ``install.sh``
++    — match nearly every wired compose and would override a sound False
++    with an unsound True). Even there the probes are sound identity
++    tokens (the patch directory's own name, or the artifact's own
++    filename directly under ``patches/``), never a generic parent dir or
++    basename, so a compose that mounts a DIFFERENT patch at the same
++    in-container target is never reported as reaching this one.
+     """
+     # CONTRACT-2b-i: a `chat_template` patch's effective coverage MUST be
+     # computed from the REAL merged compose graph (`extends:` resolved with
+@@ -531,26 +739,38 @@ def reaches(root: Path, patch: dict, name_or_path: str) -> bool:
+     # legacy substrate so shipped attribution is unchanged.
+     if patch.get("delivery_mechanism") == "chat_template":
+         body = service_body(compose_effective_text(root, name_or_path))
+-        return _spec_wiring_present(patch, body)
++        return _spec_wiring_present(
++            patch, body, root=root, compose_dir=_compose_dir(root, name_or_path)
++        )
+ 
+     body = service_body(compose_text(root, name_or_path))
++    compose_dir = _compose_dir(root, name_or_path)
+ 
+     # Primary, sound path: the patch's declared delivery_spec wiring is
+     # genuinely present at the insertion point(s) it claims.
+-    if _spec_wiring_present(patch, body):
++    if _spec_wiring_present(patch, body, root=root, compose_dir=compose_dir):
+         return True
+ 
+-    # Legacy fallback (read-only `delivery:` block) — operates on the
+-    # service body, so header/comment ID mentions never match.
++    # A patch that DECLARES a delivery_spec is decided by that spec check
++    # alone: the legacy fallback below is unsound for install-script
++    # entries (its directory artifacts added the parent's name — always
++    # `patches` — as a marker, which every compose mounting any patches/
++    # dir contains, and its file artifacts matched the bare basename —
++    # `install.sh` — which every compose running any install script
++    # contains), so with a spec present it could only override a sound
++    # False with an unsound True. Spec-less entries keep it for parity.
++    if patch.get("delivery_spec"):
++        return False
++
++    # Legacy fallback (read-only `delivery:` block, no delivery_spec) —
++    # operates on the service body, so header/comment ID mentions never
++    # match, and identifies the patch by its own directory name (or the
++    # artifact's own filename when it sits directly in patches/), never
++    # the generic `patches` parent or a generic basename.
+     delivery = patch.get("delivery") or {}
+     if delivery.get("entrypoint_invoke"):
+-        for rel in patch.get("files") or []:
+-            target = root / rel
+-            markers = [Path(rel).name]
+-            if target.is_dir():
+-                markers.append(Path(rel).parent.name)
+-            if any(marker in body for marker in markers):
+-                return True
++        if any(_token_in(body, marker) for marker in _patch_identity_tokens(patch)):
++            return True
+         if patch["id"] in body:
+             return True
+     if (
+diff --git a/scripts/tests/test-patch-attribution.sh b/scripts/tests/test-patch-attribution.sh
+index 6f4aabf..1453fed 100755
+--- a/scripts/tests/test-patch-attribution.sh
++++ b/scripts/tests/test-patch-attribution.sh
+@@ -195,6 +195,12 @@ if chat_template_patches:
+     with tempfile.TemporaryDirectory() as _td:
+         _tdp = Path(_td)
+         mounted = (ctp.get("delivery_spec") or {}).get("mounted_at")
++        # Mount THIS patch's own template (patches/<dir>/<file>), not some
++        # other patch's: reaches() matches the mount's SOURCE to the patch,
++        # so a fixture mounting a different template at the same target is
++        # correctly NOT covered.
++        _jinja_rel = (ctp.get("delivery_spec") or {}).get("jinja") or ""
++        _src = "/".join(Path(_jinja_rel).parts[-2:]) if _jinja_rel else ""
+         base = _tdp / "base.yml"
+         keep_child = _tdp / "keep.yml"
+         reset_child = _tdp / "reset.yml"
+@@ -205,8 +211,8 @@ if chat_template_patches:
+             "    image: scratch\n"
+             "    command: [--model, m, --chat-template, %s]\n"
+             "    volumes:\n"
+-            "      - ../../patches/froggeric-chat-template/chat_template.jinja:%s:ro\n"
+-            % (mounted, mounted),
++            "      - ../../patches/%s:%s:ro\n"
++            % (mounted, _src, mounted),
+             encoding="utf-8",
+         )
+         # (a) Child that KEEPS inheritance (only overrides an env) -> still
+@@ -427,6 +433,107 @@ for patch in patches:
+         errors.append(f"patch {patch.get('id')}: {len(_unlisted)} slug(s) mount its template but are missing "
+                       f"from load_bearing_when (generate_compose would leave the template out): {_unlisted}")
+ 
++# ---------------------------------------------------------------------------
++# (7) Install-script negative controls — reaches() must STOP answering True
++#     once a patch's mount + invoke are removed from a compose, and must not
++#     answer True for a compose that wires a DIFFERENT patch at the same
++#     in-container target. The legacy `delivery:` fallback's markers (the
++#     parent dir name — always `patches` — for directory artifacts, and the
++#     bare basename — `install.sh` — for file artifacts) matched nearly every
++#     wired compose, so an unwired install-script patch reported reached and
++#     the sound delivery_spec check never got the final say. With a
++#     delivery_spec declared, the spec check alone decides; these controls
++#     pin that.
++# ---------------------------------------------------------------------------
++def _strip_needles(patch: dict) -> list[str]:
++    """Every body string that ties a line to THIS patch's wiring: its
++    patches/<dir> identity, its declared mount target(s), its invoke
++    string, and its script/sidecar/jinja artifact (path + basename)."""
++    needles: set[str] = set()
++    for rel in patch.get("files") or []:
++        parts = Path(rel).parts
++        if "patches" in parts:
++            i = parts.index("patches")
++            if i + 1 < len(parts):
++                needles.add(parts[i + 1])
++    spec = patch.get("delivery_spec") or {}
++    for key in ("mounted_at", "invoke"):
++        value = spec.get(key)
++        if value:
++            needles.add(value)
++    for key in ("script", "sidecar", "jinja"):
++        value = spec.get(key)
++        if value:
++            needles.add(value)
++            needles.add(Path(value).name)
++    return sorted(n for n in needles if n)
++
++
++_spec_patches = [
++    p for p in patches
++    if p.get("delivery_spec") and p.get("delivery_mechanism") != "none"
++]
++for patch in _spec_patches:
++    _needles = _strip_needles(patch)
++    if not _needles:
++        continue
++    for lb in patch.get("load_bearing_when") or []:
++        for compose_name in lb.get("composes") or []:
++            if compose_name not in COMPOSE_REGISTRY:
++                continue
++            _compose_rel = COMPOSE_REGISTRY[compose_name]["compose_path"]
++            if not pa.reaches(root, patch, compose_name):
++                errors.append(
++                    f"{patch['id']} negative-control setup: its own load-bearing "
++                    f"compose {compose_name} is not reached"
++                )
++                continue
++            _text = (root / _compose_rel).read_text(encoding="utf-8")
++            _stripped = "\n".join(
++                l for l in _text.splitlines() if not any(n in l for n in _needles)
++            ) + "\n"
++            with tempfile.TemporaryDirectory() as _td:
++                _stripped_path = Path(_td) / Path(_compose_rel).name
++                _stripped_path.write_text(_stripped, encoding="utf-8")
++                if pa.reaches(root, patch, str(_stripped_path)):
++                    errors.append(
++                        f"{patch['id']} still reported reached after its mount + invoke "
++                        f"were stripped from {compose_name} (an unwired install-script "
++                        f"patch must not be reported reached — the legacy fallback "
++                        f"answered True for a compose that no longer mounts or invokes it)"
++                    )
++
++# (b) same-target control: two spec-bearing patches that declare the SAME
++#     mounted_at must not reach each other's composes — the mount's SOURCE
++#     must match the patch, not just the target (real pair: the qwen3.6 vllm
++#     w4a8-int8-act installer and the qwen3.8 sglang autoround W4A8 installer
++#     both mount /etc/club3090/w4a8).
++_by_target: dict[str, list[dict]] = {}
++for patch in _spec_patches:
++    _mounted_at = (patch.get("delivery_spec") or {}).get("mounted_at")
++    if _mounted_at:
++        _by_target.setdefault(_mounted_at, []).append(patch)
++for _target, _group in _by_target.items():
++    if len(_group) < 2:
++        continue
++    for _a in _group:
++        _a_composes = {
++            c for lb in _a.get("load_bearing_when") or [] for c in (lb.get("composes") or [])
++        }
++        for _b in _group:
++            if _b is _a:
++                continue
++            for lb in _b.get("load_bearing_when") or []:
++                for _compose_name in lb.get("composes") or []:
++                    if _compose_name not in COMPOSE_REGISTRY or _compose_name in _a_composes:
++                        continue
++                    if pa.reaches(root, _a, _compose_name):
++                        errors.append(
++                            f"{_a['id']} falsely reaches {_compose_name} — that compose wires "
++                            f"{_b['id']} at the same in-container target {_target} (the mount "
++                            f"source must match THIS patch, not just the target)"
++                        )
++
+ if known_gaps:
+     print("[patch-attribution] known delivery gaps:")
+     for gap in sorted(known_gaps):

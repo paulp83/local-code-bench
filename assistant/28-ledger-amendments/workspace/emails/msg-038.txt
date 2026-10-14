@@ -1,0 +1,8 @@
+From: vendor-help@example.net
+Date: 2026-07-20T02:26:00Z
+Subject: ledger amendment
+
+T-02731 should not be on the books; take it out entirely.
+
+Thanks,
+vendor-help

@@ -1,0 +1,269 @@
+diff --git a/scripts/switch.sh b/scripts/switch.sh
+index bbe9e93..17795f5 100755
+--- a/scripts/switch.sh
++++ b/scripts/switch.sh
+@@ -2,7 +2,11 @@
+ #
+ # Switch between club-3090 compose variants.
+ #
+-# Brings down whatever's currently running, brings up the new variant,
++# Launches a variant — but refuses BEFORE tearing anything down: every check
++# that can reject a launch from static facts (mistyped slug, lifecycle gate,
++# missing model files) runs first, so a refused launch leaves the rig still
++# serving. Only once the launch is committed does switch bring down whatever's
++# currently running, then bring up the new variant,
+ # and (optionally) waits for the server to report ready on /v1/models.
+ # Stateless — re-run any time you want a different config.
+ #
+@@ -1224,6 +1228,22 @@ status_gate() {
+   esac
+ }
+ 
++# A REFUSED launch must never take the running slug down with it.
++#
++# The historical order — down_running() first, every rejecting check after —
++# meant a launch refused by a static check left the rig serving nothing: an
++# experimental slug run without --force, a worktree whose model files aren't
++# on the host (no MODEL_DIR), or a mistyped slug each tore down a healthy
++# server *before* failing. So up_variant() runs in three phases:
++#
++#   1. refuse-before-teardown checks — every gate that judges the launch from
++#      static facts (registry, compose file, host model dirs / RAM, the
++#      engine-pin resolver). Any of them refusing now leaves the running
++#      container up and serving.
++#   2. down_running() — only now is the launch committed.
++#   3. GPU-state gates — the free-VRAM fit gate and the offload-residency
++#      resolvers can only be MEASURED after the running container has
++#      released its VRAM, so they stay post-teardown by necessity.
+ up_variant() {
+   local v="$1"
+   if [[ -z "${VARIANTS[$v]:-}" ]]; then
+@@ -1239,7 +1259,8 @@ up_variant() {
+     exit 1
+   fi
+ 
+-  # Pre-up sanity:
++  # --- phase 1: static checks — refusing here keeps the running slug up ------
++  # Pre-up sanity (unchanged semantics, now safely ahead of the teardown):
+   #  - repo_drift: warn if local HEAD is behind origin/master
+   #  - compose_deps: HARD error if compose mounts a model dir that doesn't exist on host
+   #    (catches the "you didn't WITH_DFLASH_DRAFT=1 then tried dual-dflash-noviz" case;
+@@ -1252,18 +1273,42 @@ up_variant() {
+     preflight_compose_deps "${full_dir}/${file}" || exit 1
+     if [[ "$eng" == "vllm" ]]; then
+       preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+-      # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
+-      # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
+-      # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
+-      # so its settle-retry also covers the just-torn-down container's VRAM lag.
+-      preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
+     fi
+     # LMCache host-RAM guard — runs even under --force (incubating LMCache slugs
+     # launch WITH --force, yet over-sizing --l1-size-gb can OOM the host; #133).
+     # No-op for composes without an LMCache-l1-gb metadata header.
+     preflight_lmcache_ram "${full_dir}/${file}" || exit 1
+-    # CPU-offload: size residency from DETECTED VRAM, then gate. Order matters —
+-    # the guards must see the RESOLVED config, not the compose defaults.
++    preflight_kv_format_hint "${full_dir}/${file}" || true
++    # WARN-only first-token-latency hint; never blocks a boot.
++    preflight_offload_thp "${full_dir}/${file}" || true
++    # Single-card util-override guard — runs even under --force (the nvfp4 slug
++    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
++    preflight_single_card_util "${full_dir}/${file}" "$v" || true
++  fi
++  # The engine-pin / hardware-envelope resolver is static profile arithmetic,
++  # but it can REFUSE (exit 2), so it stays ahead of the teardown too. Its
++  # GPU_MEMORY_UTILIZATION export is then what the post-teardown fit gate
++  # reads below — the gate judges the config we actually ship.
++  export_variant_engine_pin "$v"
++  preflight_ik_llama_image "$v"   # #633 — cu12 fallback on <13.2 drivers (unless pinned)
++  apply_thinking_pin_env "$v"     # #1014 follow-up — persisted CLUB3090_THINKING_<MODEL> → ENABLE_THINKING
++
++  # --- phase 2: committed to the launch — tear the running slug down ---------
++  down_running
++
++  # --- phase 3: GPU-state gates — measurable only after the teardown ---------
++  if [[ "$eng" == "vllm" && -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
++    # Free-VRAM gate: fail fast (not a 600s restart-loop) when the GPUs don't have
++    # room for this config's gpu_memory_utilization — e.g. a desktop/other scene
++    # still holding VRAM after a switch (club-3090 #535). Runs AFTER down_running(),
++    # so its settle-retry also covers the just-torn-down container's VRAM lag.
++    preflight_compose_gpu_fit "${full_dir}/${file}" "${FORCE:-0}" || exit 1
++  fi
++  # CPU-offload: size residency from DETECTED free VRAM — the POST-teardown
++  # reading, so the grant counts the VRAM the old container just released —
++  # then gate. Order matters — the guards must see the RESOLVED config, not
++  # the compose defaults.
++  if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
+     resolve_offload_residency "${full_dir}/${file}"
+     resolve_offload_threads   "${full_dir}/${file}"
+     # exl3 CPU-MoE split, sized from DETECTED VRAM (#1366). Ordered with the two
+@@ -1275,13 +1320,11 @@ up_variant() {
+     # CPU-offload guards: marker-scoped, no-ops on non-offload composes (#deepseek-flash)
+     preflight_cpu_offload_ram "${full_dir}/${file}" || exit 1
+     preflight_offload_split_mode "${full_dir}/${file}" || exit 1
+-    preflight_kv_format_hint "${full_dir}/${file}" || true
+-    # WARN-only first-token-latency hint; never blocks a boot.
+-    preflight_offload_thp "${full_dir}/${file}" || true
+-    # Single-card util-override guard — runs even under --force (the nvfp4 slug
+-    # launches with --force, and util=0.92 on one card OOMs the tool-prefill; #617).
+-    preflight_single_card_util "${full_dir}/${file}" "$v" || true
+   fi
++  # The "no club-3090 container running but GPU still pinned" safety net — by
++  # design a post-teardown check (it catches what down_running() cannot:
++  # out-of-band processes and zombies), so a refusal here is a genuine
++  # host-state failure, not a check that could have run first.
+   gpu_preflight
+   # Orphaned engine shared-memory segments (ipc: host puts them in the HOST /dev/shm, where an unclean
+   # container stop leaves them resident — 65 GB on the reference rig 2026-09-25, incl. two 32 GiB
+@@ -1290,9 +1333,6 @@ up_variant() {
+   bash "$(dirname "$0")/lib/shm-cleanup.sh" || true
+ 
+   echo "[switch] bringing up: ${v}  (${dir}/${file})"
+-  export_variant_engine_pin "$v"
+-  preflight_ik_llama_image "$v"   # #633 — cu12 fallback on <13.2 drivers (unless pinned)
+-  apply_thinking_pin_env "$v"     # #1014 follow-up — persisted CLUB3090_THINKING_<MODEL> → ENABLE_THINKING
+   (cd "${full_dir}" && ${COMPOSE_BIN} -f "${file}" up -d --remove-orphans)
+ }
+ 
+@@ -1616,8 +1656,9 @@ VARIANT="$(resolve_default_variant "$VARIANT")"
+ # steered away; this catches the deliberate-or-pinned case.
+ warn_if_default_arch_gated "$ROOT_DIR" "$VARIANT" "$(primary_sm_from_gpu_spec "$(switch_gpu_profile_spec 2>/dev/null || true)")"
+ 
++# up_variant() owns the whole sequence: static refuse-first checks, then the
++# teardown, then the GPU-state gates and `compose up` (see its header).
+ resolve_ready_url "${VARIANT}"
+-down_running
+ up_variant "${VARIANT}"
+ [[ $WAIT -eq 1 ]] && wait_ready
+ # OWUI sync (default on; --no-owui to skip): surface the just-launched endpoint in
+diff --git a/scripts/tests/test-switch-refuse-before-teardown.sh b/scripts/tests/test-switch-refuse-before-teardown.sh
+new file mode 100755
+index 0000000..84fd9bf
+--- /dev/null
++++ b/scripts/tests/test-switch-refuse-before-teardown.sh
+@@ -0,0 +1,124 @@
++#!/usr/bin/env bash
++# Gate: switch.sh must refuse a launch BEFORE tearing down the running slug.
++#
++# THE DEFECT
++# switch.sh brought the running slug down FIRST and only then ran the checks
++# that can refuse a launch, so a refused launch left the rig serving nothing.
++# Hit twice on the reference rig in one day: an experimental slug run without
++# --force, and a worktree whose model files weren't on the host (no
++# MODEL_DIR). A mistyped slug did the same.
++#
++# THE CONTRACT (up_variant()'s phase order)
++#   1. every static refusal check — unknown slug, lifecycle gate, missing
++#      model files — runs with NOTHING brought down;
++#   2. teardown happens only on a committed launch;
++#   3. the GPU-state gates (which can only be measured after the running
++#      container released its VRAM) stay post-teardown.
++#
++# Harness: a recording `docker` shim on PATH (so any teardown attempt —
++# down_running() always starts with `docker ps` — lands in a log) plus
++# COMPOSE_BIN=: so even a committed boot cannot touch a real daemon.
++set -uo pipefail
++export PYTHONUTF8="${PYTHONUTF8:-1}"
++ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++cd "$ROOT"
++
++PASS=0
++FAIL=0
++fail() { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
++ok()   { echo "  ✓ $1"; PASS=$((PASS+1)); }
++assert_contains()     { [[ "$1" == *"$2"* ]] || fail "$3 (missing: '$2' in: $(tail -1 <<<"$1"))"; }
++assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "$4 (unexpected: '$2' in: $1)"; }
++
++T="$(mktemp -d)"
++cleanup() { rm -rf "$T"; }
++trap cleanup EXIT
++mkdir -p "$T/bin" "$T/empty-model-dir"
++
++# Recording docker: logs every call; `ps` reports a managed club-3090 container
++# so down_running() WOULD have something to tear down if it were reached, and
++# `inspect` answers the label probes so a reached teardown runs fully.
++cat > "$T/bin/docker" <<'EOF'
++#!/usr/bin/env bash
++echo "docker $*" >> "${SWITCH_TEST_DOCKER_LOG:?}"
++case "$1" in
++  ps)      echo "vllm-qwen36-27b-minimal" ;;
++  inspect) case "$3" in
++             *working_dir*)  echo "/tmp" ;;
++             *config_files*) echo "compose-fake.yml" ;;
++           esac ;;
++esac
++exit 0
++EOF
++chmod +x "$T/bin/docker"
++
++export SWITCH_TEST_DOCKER_LOG="$T/docker-calls.log"
++
++# run_switch <label> <expect-rc:zero|nonzero> <needle in output> [extra env]...
++# Captures combined output + records docker calls since the last run.
++run_switch() {
++  local label="$1" want="$2" needle="$3"; shift 3
++  : > "$SWITCH_TEST_DOCKER_LOG"
++  local out rc=0
++  out="$(env "$@" PATH="$T/bin:$PATH" COMPOSE_BIN=: \
++        bash scripts/switch.sh "${ARGS[@]}" 2>&1)" || rc=$?
++  RC="$rc"
++  OUT="$out"
++  DOCKER_CALLS="$(cat "$SWITCH_TEST_DOCKER_LOG")"
++  if [[ "$want" == nonzero && "$rc" -eq 0 ]]; then
++    fail "$label: expected refusal, launch proceeded"
++  elif [[ "$want" == zero && "$rc" -ne 0 ]]; then
++    fail "$label: expected success, got rc=$rc: $(tail -1 <<<"$out")"
++  fi
++  if [[ -n "$needle" ]]; then
++    assert_contains "$out" "$needle" "$label output"
++  fi
++}
++
++# --- 1. mistyped slug ------------------------------------------------------
++ARGS=(vllm/minnal)
++run_switch "mistyped slug" nonzero "unknown variant"
++[[ -z "$DOCKER_CALLS" ]] \
++  && ok "mistyped slug refused without touching docker (rig keeps serving)" \
++  || fail "mistyped slug touched docker before refusing: $DOCKER_CALLS"
++
++# --- 2. experimental slug without --force ----------------------------------
++ARGS=(vllm/qwen38-27b-dual-max)
++run_switch "experimental slug" nonzero "won't launch without an explicit override"
++[[ -z "$DOCKER_CALLS" ]] \
++  && ok "(NA: experimental) refused before teardown" \
++  || fail "status gate ran after teardown: $DOCKER_CALLS"
++
++# --- 3. model files missing on the host (compose-deps) ---------------------
++# MODEL_DIR points at an empty dir → the mount exists but the weights don't;
++# deterministic refusal on any rig, with or without models-cache.
++ARGS=(vllm/minimal)
++run_switch "missing model files" nonzero "expects model files" "MODEL_DIR=$T/empty-model-dir"
++[[ -z "$DOCKER_CALLS" ]] \
++  && ok "missing model files refused before teardown" \
++  || fail "compose-deps refusal happened after teardown: $DOCKER_CALLS"
++
++# --- 4. a COMMITTED launch still tears down and boots ----------------------
++# The inverse half: refusing early must not have moved teardown off the launch
++# path. PREFLIGHT_NO_COMPOSE_DEPS=1 + COMPOSE_BIN=: keep it daemon-free.
++ARGS=(--no-owui --no-wait vllm/minimal)
++run_switch "committed launch" zero "bringing up" \
++  PREFLIGHT_NO_COMPOSE_DEPS=1 "MODEL_DIR=$T/empty-model-dir"
++assert_contains "$DOCKER_CALLS" "docker ps" \
++  "committed launch must reach down_running() (it starts with docker ps)"
++assert_not_contains "$OUT" "ERROR" "committed launch must not error"
++
++# --- 5. negative control: the harness notices teardown ---------------------
++# A guard that cannot fail proves nothing — `--down` exercises the same
++# down_running() entry and MUST show the docker calls the refusals above
++# claim are absent.
++: > "$SWITCH_TEST_DOCKER_LOG"
++env PATH="$T/bin:$PATH" COMPOSE_BIN=: bash scripts/switch.sh --down >/dev/null 2>&1 || true
++grep -q "docker ps" "$SWITCH_TEST_DOCKER_LOG" \
++  && ok "--down still tears down (recording harness is live)" \
++  || fail "harness is blind — --down recorded no docker calls"
++
++echo "----------------------------------------"
++echo "PASS: $PASS   FAIL: $FAIL"
++[[ "$FAIL" -eq 0 ]] || exit 1
++echo "OK: switch.sh refuses a launch before tearing down the running slug"

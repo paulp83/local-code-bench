@@ -1,0 +1,123 @@
+diff --git a/scripts/lib/p2p-state.sh b/scripts/lib/p2p-state.sh
+index 6b53fb8..e874453 100644
+--- a/scripts/lib/p2p-state.sh
++++ b/scripts/lib/p2p-state.sh
+@@ -101,7 +101,10 @@ p2p_driver_flavor() {
+ # understood by the classifier. Keeping this here makes bench.sh and report.sh
+ # consume identical evidence. In particular, SGLang does not run our
+ # detect_nvlink.sh entrypoint, but it emits definitive runtime lines for NCCL
+-# and CustomAllReduceV2 initialization.
++# and custom-all-reduce initialization: the V2 `All Reduce config:` line, and —
++# for the V1 kernel that every PCIe rig actually runs (V2 is admitted only on
++# full NVLink) — the `Registering N cuda graph addresses` line that follows
++# CUDA-graph capture, its one and only success signal.
+ p2p_engine_log_evidence() {
+   awk '
+     index($0, "server_args=") && index($0, "disable_custom_all_reduce") {
+@@ -118,7 +121,12 @@ p2p_engine_log_evidence() {
+     index($0, "disable_custom_all_reduce=True") ||
+     index($0, "Setup Custom allreduce failed") ||
+     index($0, "sglang is using nccl==") ||
+-    index($0, "All Reduce config:") { print }
++    index($0, "All Reduce config:") ||
++    # SGLang V1 (PCIe rigs: V2 needs full NVLink) is silent at init; its only
++    # success line is the graph-buffer registration after CUDA-graph capture.
++    # Both casings — SGLang logs "cuda graph addresses", vLLM "CUDA graph".
++    (index($0, "Registering") &&
++     (index($0, "cuda graph addresses") || index($0, "CUDA graph addresses"))) { print }
+   '
+ }
+ # Engagement classifier — PURE (takes the boot-trail/env text on stdin so the
+@@ -126,7 +134,10 @@ p2p_engine_log_evidence() {
+ # report.sh and bench.sh gather exactly this normalized text: the container's
+ # `[nvlink]` boot lines, resolved NCCL_P2P*/NVLINK_MODE env, and the engine's
+ # own all-reduce runtime lines. vLLM reports vetoes; SGLang additionally reports
+-# `sglang is using nccl==...` and `All Reduce config: ...` after initialization.
++# `sglang is using nccl==...`, its V2 `All Reduce config: ...` line after
++# initialization, and — on the V1 kernel every PCIe rig runs — the
++# `Registering N cuda graph addresses` line after CUDA-graph capture (V1's only
++# success signal; the kernel is silent at init).
+ # Prints: "on" | "nccl_only_operator" | "nccl_only_gated" | "nccl_only_degraded"
+ #         | "nccl_only_nolib" | "nccl_only_failed" | "off" | "unknown" | "requested".
+ # Reads detect_nvlink.sh's machine-readable STATE line for OUR configuration and
+@@ -267,7 +278,12 @@ p2p_classify_engagement() {
+       echo nccl_only_operator; return 0 ;;
+   esac
+   case "$text" in
+-    *"All Reduce config:"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
++    # SGLang V1 (what every PCIe rig runs — V2 is admitted only on full NVLink)
++    # is silent at init; its only success signal is the graph-buffer
++    # registration line after CUDA-graph capture. Matched two-sided, since the
++    # graph count sits between the two words. Both casings: SGLang logs
++    # "cuda graph addresses", vLLM logs "CUDA graph addresses".
++    *"All Reduce config:"*|*"Registering "*"cuda graph addresses"*|*"Registering "*"CUDA graph addresses"*|*"custom all-reduce ON"*|*"enabling NVLink mode"*) echo on; return 0 ;;
+   esac
+   case "$text" in
+     *"P2P off"*|*"using PCIe mode"*|*"forcing PCIe mode"*) echo off; return 0 ;;
+diff --git a/scripts/report.sh b/scripts/report.sh
+index db97e00..3429f28 100755
+--- a/scripts/report.sh
++++ b/scripts/report.sh
+@@ -1198,7 +1198,7 @@ else
+     _p2p_class_stream="$(docker logs "$CONTAINER" 2>&1 | p2p_engine_log_evidence || true)"
+     nvlink_boot="$(printf '%s\n' "$_p2p_class_stream" | command grep -F '[nvlink]' | tail -8)"
+     p2p_env="$(docker exec "$CONTAINER" env 2>/dev/null | command grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort)"
+-    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:' || true)"
++    engine_ar_runtime="$(printf '%s\n' "$_p2p_class_stream" | command grep -E 'Custom allreduce is disabled|CustomAllreduce is disabled|CustomAllReduceV2 is disabled|disable_custom_all_reduce=True|\[sglang\]|sglang is using nccl==|All Reduce config:|Registering [0-9]+ (cuda|CUDA) graph addresses' || true)"
+     echo "**Interconnect / P2P engagement:**"
+     if [[ -n "$nvlink_boot" || -n "$p2p_env" || -n "$engine_ar_runtime" ]]; then
+       echo '```'
+diff --git a/scripts/tests/test-p2p-state.sh b/scripts/tests/test-p2p-state.sh
+index a34bdc1..bca0923 100755
+--- a/scripts/tests/test-p2p-state.sh
++++ b/scripts/tests/test-p2p-state.sh
+@@ -129,6 +129,49 @@ assert_contains "$out" "#1462"
+ unset _sgl_fail _ev _ok_boot
+ echo "  ✓ SGLang custom-AR setup failure classified as a fallback, not an opt-out or unknown (#1462)"
+ 
++# ── SGLang V1 custom all-reduce (PCIe rigs) ──────────────────────────────────
++# SGLang admits CustomAllReduceV2 only on full NVLink, so every PCIe rig runs
++# the V1 kernel — which is SILENT at init. Its only success signal is the
++# "Registering N cuda graph addresses" line after CUDA-graph capture (rank 0,
++# plus one per rank). Before this fix such a boot scored "unknown" (no P2P
++# engagement signal) and could never score on.
++_v1=$(cat <<'EOF'
++[2026-09-28 11:04:02] server_args={'tp_size': 4, 'disable_custom_all_reduce': False}
++[2026-09-28 11:04:31 TP0] sglang is using nccl==2.30.7
++[2026-09-28 11:04:58 TP0] Capture cuda graph begin. This can take up to several minutes.
++[2026-09-28 11:05:41 TP0] Registering 4352 cuda graph addresses. This can take up to several minutes to increase the performance of custom allreduce operations. No need to worry if it takes long. Example time: 1.5 minutes for 1000 graphs.
++[2026-09-28 11:05:44 TP1] Registering 258 cuda graph addresses. This can take up to several minutes to increase the performance of custom allreduce operations. No need to worry if it takes long. Example time: 1.5 minutes for 1000 graphs.
++[2026-09-28 11:05:45 TP0] Capture cuda graph end.
++EOF
++)
++_ev="$(printf '%s
++' "$_v1" | p2p_engine_log_evidence)"
++assert_contains "$_ev" "Registering 4352 cuda graph addresses"
++r="$(printf '%s
++' "$_ev" | p2p_classify_engagement)"
++[[ "$r" == "on" ]] || fail "SGLang V1 graph registration -> on (got $r)"
++# unfiltered stream too (the classifier must not depend on the pre-filter)
++r="$(printf '%s
++' "$_v1" | p2p_classify_engagement)"
++[[ "$r" == "on" ]] || fail "unfiltered SGLang V1 registration -> on (got $r)"
++# capture lines alone are not a success signal
++r="$(printf '%s
++' "[sglang] BOOT disable_custom_all_reduce=False" 'TP0] Capture cuda graph begin. This can take up to several minutes.' 'TP0] Capture cuda graph end.' | p2p_classify_engagement)"
++[[ "$r" == "unknown" ]] || fail "cuda-graph capture lines without registration must stay unknown (got $r)"
++# an operator-disabled restart must not be upgraded by an earlier boot's success
++r="$(printf '%s
++' "$_ev" "[sglang] BOOT disable_custom_all_reduce=True" | p2p_classify_engagement)"
++[[ "$r" == "nccl_only_operator" ]] || fail "latest SGLang operator-disabled boot must win over an earlier V1 success (got $r)"
++# a setup failure in the CURRENT boot outranks the success line
++r="$(printf '%s
++' "[sglang] BOOT disable_custom_all_reduce=False" 'TP0] Registering 4352 cuda graph addresses.' 'TP0] Setup Custom allreduce failed with boom. To silence this warning, specify --disable-custom-all-reduce explicitly.' | p2p_engine_log_evidence | p2p_classify_engagement)"
++[[ "$r" == "nccl_only_failed" ]] || fail "V1 setup failure must outrank the success line (got $r)"
++out="$(p2p_verdict 2 pcie_p2p on)"
++assert_contains "$out" "PCIe P2P engaged"
++assert_contains "$out" "custom all-reduce ON"
++unset _v1 _ev
++echo "  ✓ SGLang V1 custom all-reduce (PCIe rigs): graph registration scores on, capture lines stay unknown, epochs + vetoes preserved"
++
+ # ── 3. capability probes via faked nvidia-smi ────────────────────────────────
+ mk_smi() { cat > "$TMP/nvidia-smi" <<EOF
+ #!/usr/bin/env bash

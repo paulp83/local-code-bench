@@ -1,0 +1,4 @@
+slug,date,rig_file,quality_file
+glm53-flash-q4,2026-10-01,2026-10-01_glm53-flash-q4_run2.json,q-2026-10-01-glm53f-q4.json
+qfn-fp8,2026-10-02,2026-10-02_qfn-fp8_run1.json,q-2026-10-02-qfn8.json
+qwen-27b-q4,2026-10-05,2026-10-05_qwen-27b-q4_run3.json,q-2026-10-05-qwen-27b-q4.json

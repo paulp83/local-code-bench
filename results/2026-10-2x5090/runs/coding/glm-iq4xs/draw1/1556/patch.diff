@@ -1,0 +1,189 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 03a2274..fe5cf2d 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -410,9 +410,15 @@ warmup_gate() {
+ if [[ "$MATRIX" == "1" ]]; then
+   if [[ "$SWEEP_DRY" != "1" ]]; then warmup_gate || exit 1; fi
+   slots="$(_detect_slots || true)"
++  # The source label must walk the SAME chain _detect_slots walks (#1537).
++  # It skipped SGLang's two paths — `max-running-requests` in the container cmd
++  # and `max_running_requests` on /get_server_info — so an SGLang sweep whose
++  # count was detected correctly still labelled itself "undetected".
+   slots_src="undetected"
+   if [[ -n "$(_served_seqs || true)" ]]; then slots_src="container max-num-seqs"
+   elif [[ -n "$(_served_np || true)" ]]; then slots_src="container -np"
++  elif [[ -n "$(_served_max_running || true)" ]]; then slots_src="container max-running-requests"
++  elif [[ -n "$(_sgl_max_running || true)" ]]; then slots_src="server /get_server_info max_running_requests"
+   elif [[ -n "$(_props_slots || true)" ]]; then slots_src="server /props total_slots"
+   fi
+   max_len="$(_served_ctx || true)"
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 4bcd814..ba28061 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -95,16 +95,37 @@ def fmt_ttft(seconds):
+     return f"{seconds * 1000:.0f}ms"
+ 
+ 
++# One pattern per engine's boot log, most specific first. Both lines are printed
++# ONCE, at allocation time, so a server that has been up for days has scrolled
++# them past any bounded `--tail` window (#1537) — the reader has to take the
++# whole log, not the last N lines.
++_KV_TOKENS_PATTERNS = (
++    # vLLM: "GPU KV cache size: 210,000 tokens" (optional leading ~).
++    r"GPU KV cache size:\s*~?([\d,]+)\s*tokens",
++    # SGLang: "KV Cache is allocated. dtype: ..., #tokens: 451,633".
++    r"KV Cache is allocated\.[^\n]*?#tokens:\s*([\d,]+)",
++    # SGLang's effective-limits echo, which the "Memory pool end" block repeats
++    # per rank: "max_total_num_tokens=451633".
++    r"max_total_num_tokens=([\d,]+)",
++)
++
++
+ def parse_kv_tokens_text(txt):
+-    """vLLM boot: 'GPU KV cache size: 210,000 tokens' (optional leading ~)."""
++    """KV pool in tokens from either engine's boot log.
++
++    vLLM: 'GPU KV cache size: 210,000 tokens'. SGLang words it entirely
++    differently — 'KV Cache is allocated. ... #tokens: 451,633' and the
++    per-rank 'max_total_num_tokens=451633' — so a vLLM-only parse read 'KV ?'
++    on every SGLang card (#1537). Last match wins: each pattern repeats per
++    rank at most, and all repeats agree.
++    """
+     if not txt:
+         return None
+-    matches = list(
+-        re.finditer(r"GPU KV cache size:\s*~?([\d,]+)\s*tokens", txt, re.I)
+-    )
+-    if not matches:
+-        return None
+-    return int(matches[-1].group(1).replace(",", ""))
++    for pat in _KV_TOKENS_PATTERNS:
++        matches = list(re.finditer(pat, txt, re.I))
++        if matches:
++            return int(matches[-1].group(1).replace(",", ""))
++    return None
+ 
+ 
+ def detect_kv_tokens(container):
+@@ -112,7 +133,10 @@ def detect_kv_tokens(container):
+         return None
+     try:
+         out = subprocess.run(
+-            ["docker", "logs", "--tail", "2500", container],
++            # Full log, no --tail: the allocation lines are printed once at boot
++            # and a long-serving container has scrolled them out of any bounded
++            # window (--tail 2500) long before the probe runs (#1537).
++            ["docker", "logs", container],
+             capture_output=True,
+             text=True,
+             timeout=20,
+@@ -1218,19 +1242,27 @@ def format_recommend(rec):
+     engine = (rec.get("engine") or "").lower()
+     lines = ["=== recommend ==="]
+ 
++    # The knob NAMES are per engine (#1537). SGLang composes read
++    # ${MAX_RUNNING_REQUESTS:-N} and ${CONTEXT_LENGTH:-N}; injecting vLLM's
++    # MAX_NUM_SEQS / MAX_MODEL_LEN there is a silent no-op — the row looks
++    # applied and nothing changes.
++    sgl = engine.startswith("sglang")
++    seq_knob = "MAX_RUNNING_REQUESTS" if sgl else "MAX_NUM_SEQS"
++    ctx_knob = "CONTEXT_LENGTH" if sgl else "MAX_MODEL_LEN"
++
+     def knobs(n, ctx_keep, ctx_set=None):
+-        launch = [f"MAX_NUM_SEQS={n}"]
++        launch = [f"{seq_knob}={n}"]
+         if ctx_set is not None:
+-            launch.append(f"MAX_MODEL_LEN={ctx_set}")
++            launch.append(f"{ctx_knob}={ctx_set}")
+         launch.append(f"bash scripts/switch.sh {slug}")
+         out = [
+-            f"    MAX_NUM_SEQS={n}",
++            f"    {seq_knob}={n}",
+         ]
+         if ctx_set is not None:
+-            out.append(f"    MAX_MODEL_LEN={ctx_set}")
++            out.append(f"    {ctx_knob}={ctx_set}")
+         else:
+             keep = fmt_ctx(ctx_keep) if ctx_keep else "compose default"
+-            out.append(f"    MAX_MODEL_LEN=<keep {keep}>")
++            out.append(f"    {ctx_knob}=<keep {keep}>")
+         out.append(f"    {' '.join(launch)}")
+         if engine in ("llamacpp", "llama.cpp", "ik_llama", "ik-llama"):
+             c = ctx_set if ctx_set is not None else ctx_keep
+@@ -1265,9 +1297,14 @@ def format_recommend(rec):
+             lines.extend(knobs(peak["n"], served, ctx_set=peak["ctx"]))
+             if served and peak["ctx"] < served:
+                 lines.append(
+-                    f"    do not drop MAX_MODEL_LEN unless traffic stays near {fmt_ctx(peak['ctx'])} — "
++                    f"    do not drop {ctx_knob} unless traffic stays near {fmt_ctx(peak['ctx'])} — "
+                     f"raising slots to {peak['n']} at {served_s} will not reproduce {peak['agg']:.0f} tok/s"
+                 )
++        elif sgl:
++            lines.append(
++                "    SGLang: MAX_NUM_SEQS / MAX_MODEL_LEN are inert there — "
++                "use MAX_RUNNING_REQUESTS / CONTEXT_LENGTH"
++            )
+         elif engine.startswith("vllm") or engine == "":
+             lines.append(
+                 "    vLLM: MAX_NUM_SEQS is a cap, not a reservation; keep MAX_MODEL_LEN"
+diff --git a/scripts/tests/test-concurrency-probe.sh b/scripts/tests/test-concurrency-probe.sh
+index 2e7daab..ac13285 100755
+--- a/scripts/tests/test-concurrency-probe.sh
++++ b/scripts/tests/test-concurrency-probe.sh
+@@ -163,6 +163,24 @@ command grep -q "MAX_NUM_SEQS=2" <<<"$card" || fail "keep-full-ctx rec should be
+ command grep -q "MAX_NUM_SEQS=8" <<<"$card" || fail "max-agg rec should be MAX_NUM_SEQS=8 (1K peak)"
+ command grep -q "MAX_MODEL_LEN=1024" <<<"$card" || fail "max-agg rec should set MAX_MODEL_LEN to the short ctx"
+ command grep -q "keep" <<<"$card" || fail "full-ctx rec should keep served max-model-len"
++# #1537: the recommendation must use the ENGINE'S knob names. SGLang composes read
++# ${MAX_RUNNING_REQUESTS:-N} / ${CONTEXT_LENGTH:-N} and ignore vLLM's spelling entirely.
++sgl_card="$(python3 "$LIB" --card <<'JSON'
++{
++  "model": "qwen3.8-27b", "slug": "sgl/qwen38-27b-single", "spec": "MTP n=4",
++  "gpus": "1× RTX 3090", "kv_tokens": 451633, "slots": 2, "served_max_len": 163840,
++  "engine": "sglang", "rows": [
++    {"ctx": 1024, "n": 1, "strm": 90.0, "agg": 90, "ttft_s": 0.1, "vram_gb": 20.0, "clean": 1, "pass": 1, "skip": null},
++    {"ctx": 1024, "n": 2, "strm": 70.0, "agg": 140, "ttft_s": 0.2, "vram_gb": 21.0, "clean": 1, "pass": 1, "skip": null}
++  ]
++}
++JSON
++)"
++command grep -q "MAX_RUNNING_REQUESTS=2" <<<"$sgl_card" || fail "SGLang rec should say MAX_RUNNING_REQUESTS"
++command grep -q "CONTEXT_LENGTH" <<<"$sgl_card" || fail "SGLang rec should say CONTEXT_LENGTH"
++command grep -Eq "MAX_NUM_SEQS=[0-9]|MAX_MODEL_LEN=[0-9]" <<<"$sgl_card" \
++  && fail "SGLang rec must not inject vLLM's knobs (the explanatory note is fine)"
++echo "  ✓ card renderer: per-engine knob names"
+ echo "  ✓ card renderer"
+ 
+ # 8. prompt shapes: cold salts first, shared salts after the prefix
+@@ -175,7 +193,28 @@ echo "  ✓ prompt cache shapes"
+ # 9. KV log parse
+ kv="$(python3 -c 'import sys; sys.path.insert(0,"'"$ROOT_DIR"'/scripts/lib"); from concurrency_probe import parse_kv_tokens_text; print(parse_kv_tokens_text("GPU KV cache size: 210,000 tokens"))')"
+ [[ "$kv" == "210000" ]] || fail "parse_kv_tokens_text, got $kv"
+-echo "  ✓ KV log parse"
++# #1537: SGLang words the pool line differently, and the allocation lines print ONCE at
++# boot — 3000 lines of traffic after them stand in for a long-serving container.
++SGL_LOG="$(mktemp)"
++{ printf '%s\n' 'INFO [scheduler.py] Decode batch, #running-req: 2' \
++    'KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 451,633'
++  for i in $(seq 1 3000); do echo 'INFO Decode batch, gen throughput (token/s): 90.0'; done
++} > "$SGL_LOG"
++kv="$(SGL_LOG_FILE="$SGL_LOG" python3 -c '
++import os, sys
++sys.path.insert(0, "'"$ROOT_DIR"'/scripts/lib")
++import concurrency_probe as cp
++def fake_run(*a, **k):
++    class O:
++        stdout = open(os.environ["SGL_LOG_FILE"]).read(); stderr = ""
++    return O()
++cp.subprocess.run = fake_run
++print(cp.detect_kv_tokens("c"))')"
++rm -f "$SGL_LOG"
++[[ "$kv" == "451633" ]] || fail "SGLang 'KV Cache is allocated ... #tokens' past a bounded tail: got $kv"
++kv="$(python3 -c 'import sys; sys.path.insert(0,"'"$ROOT_DIR"'/scripts/lib"); from concurrency_probe import parse_kv_tokens_text; print(parse_kv_tokens_text("max_total_num_tokens=451633"))')"
++[[ "$kv" == "451633" ]] || fail "parse_kv_tokens_text (sglang max_total_num_tokens=), got $kv"
++echo "  ✓ KV log parse (vLLM + SGLang, from the head of a long log)"
+ 
+ # 10. Live --sweep warm-up gate (WARMUP) — opt-in, dry-run skips it, default is
+ #     silent, and a non-dry sweep against an unreachable server aborts BEFORE

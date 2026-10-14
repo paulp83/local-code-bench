@@ -1,0 +1,268 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 2b0d50f..846ae0c 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -27,7 +27,9 @@
+ #   SWEEP="4 8 12 16" SLUG=vllm/minimal TPS_FLOOR=15 bash scripts/concurrency-probe.sh
+ #
+ # Env: URL (default registry-derived for qwen3.6-27b, currently :8020) · MODEL
+-#   (auto) · CONTAINER (auto for VRAM) · CONCURRENCY (default: served
++#   (auto) · CONTAINER (auto: the container serving $URL, else the first
++#   registry-known / engine-named one — used for VRAM, the GPU label and the
++#   spec fingerprint) · CONCURRENCY (default: served
+ #   max-num-seqs, else 2) · ROUNDS (5; --sweep defaults to 3) ·
+ #   PROMPT_TOKENS (16000) · GEN_TOKENS (256) ·
+ #   VRAM_GROWTH_MB (200) · REQ_TIMEOUT (600).
+@@ -195,8 +197,56 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# best-effort container for VRAM + cmd introspection (name heuristic)
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++# best-effort container for VRAM + GPU scoping + cmd/env introspection. Every
++# consumer below (VRAM, the card's GPU row, the spec fingerprint, KV detection,
++# the serving-slot detector) degrades gracefully when this comes back empty.
++#
++# ⚠️ The old heuristic — first running container matching `vllm-(qwen|gemma)` —
++# was a vLLM-and-two-models guess baked into a probe that runs against ANY slug.
++# On an SGLang container (sgl/…) it matched nothing, so CONTAINER was empty: the
++# card listed every GPU on the host with rig-wide VRAM, and the spec row read
++# "spec ?" (#1537). Resolution order, cheapest evidence first, engine-agnostic:
++#   1. the running container whose published host port is the one $URL hits —
++#      the same "what is actually serving" evidence the other probes use;
++#   2. any running registry-known container (scripts/lib/club-containers.sh) —
++#      covers host-mapped rigs the port probe cannot see;
++#   3. the legacy name heuristic (a rig must never regress below it).
++_detect_container() {
++  local lines names name="" port
++  lines="$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null || true)"
++  if [[ -n "$lines" ]]; then
++    # Works for both `{{.Names}}` and `{{.Names}}|{{.Ports}}` shapes: a stubbed
++    # docker (CI / the guard suite) may not answer the ports form.
++    names="$(printf '%s\n' "$lines" | command cut -d'|' -f1 || true)"
++    if printf '%s\n' "$lines" | command grep -q '|'; then
++      port=""
++      [[ "$URL" =~ :([0-9]{1,5}) ]] && port="${BASH_REMATCH[1]}"
++      if [[ -n "$port" ]]; then
++        name="$(printf '%s\n' "$lines" | command grep -E -- ":${port}->" | head -1 | command cut -d'|' -f1 || true)"
++      fi
++    fi
++    if [[ -z "$name" && -f "${ROOT_DIR}/scripts/lib/club-containers.sh" ]]; then
++      # shellcheck source=lib/club-containers.sh
++      source "${ROOT_DIR}/scripts/lib/club-containers.sh"
++      name="$(printf '%s\n' "$names" | command grep -E "$(club_container_re)" | head -1 || true)"
++    fi
++    if [[ -z "$name" ]]; then
++      name="$(printf '%s\n' "$names" | command grep -m1 -E 'vllm-(qwen|gemma)' || true)"
++    fi
++  fi
++  printf '%s' "$name"
++}
++# Remember whether the caller pinned CONTAINER — a SWEEP reboots the slug, which
++# may boot a DIFFERENT container name, so the auto-detect re-runs post-boot.
++CONTAINER_PINNED="${CONTAINER:+1}"
++CONTAINER="${CONTAINER:-$(_detect_container)}"
++# Surface what was picked (and what was NOT): an empty CONTAINER is the #1537
++# symptom — the card's GPU row silently widens to the whole rig.
++if [[ -n "$CONTAINER" ]]; then
++  echo "[concurrency-probe] CONTAINER=$CONTAINER (auto: container serving $URL)"
++else
++  echo "[concurrency-probe] CONTAINER unset — VRAM + GPU rows fall back to rig-wide" >&2
++fi
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ _served_seqs()   { _container_cmd | command grep -oE 'max-num-seqs [0-9]+'  | command grep -oE '[0-9]+' | head -1; }
+@@ -230,13 +280,79 @@ _gpu_fp() {
+   CONTAINER="$CONTAINER" python3 "$PROBE_PY" --gpu-label 2>/dev/null || echo "? GPU"
+ }
+ 
++# Speculative-decoding fingerprint for the card's SPEC row.
++#
++# ⚠️ The old version grepped ONLY .Config.Cmd for --speculative-config. Every
++# vLLM compose on this stack composes that flag INSIDE its entrypoint script
++# from the SPEC_N env (models/*/vllm/.../mtp.yml: SPEC=(--speculative-config
++# "{\"method\":\"mtp\",\"num_speculative_tokens\":$${SPEC_N}…}")), so the literal flag
++# never appears in Cmd and the card read "spec off" while MTP n=4 was running
++# (#1537). Evidence is therefore the whole container config: Cmd (a compose that
++# passes the flags literally) + Entrypoint (the script that composes them) + Env
++# (SPEC_N / SPEC — the authoritative on/off knob, since `SPEC=off` / `SPEC_N=0`
++# is honoured by that same entrypoint and would otherwise be invisible).
++#
++# Secrets are dropped before the blob is ever assembled: Env carries HF tokens
++# and gateway keys this probe never needs.
++_container_spec_blob() {
++  docker inspect "$CONTAINER" --format \
++    '{{if .Config.Cmd}}{{join .Config.Cmd "\n"}}{{end}}{{"\n"}}{{if .Config.Entrypoint}}{{join .Config.Entrypoint "\n"}}{{end}}{{"\n"}}{{if .Config.Env}}{{join .Config.Env "\n"}}{{end}}' \
++    2>/dev/null \
++    | command grep -vE '[A-Za-z0-9_]*(TOKEN|KEY|SECRET|PASSWORD)[A-Za-z0-9_]*=|^PATH=' || true
++}
++
++# Env lines only. Needed separately from the blob: an entrypoint ECHOES its own
++# off-branch help text ("[spec] drafter OFF (SPEC_N=0 / SPEC=off)"), so "SPEC_N=0"
++# appears in the config of a spec-ON boot too. Only a real env line is evidence
++# that the drafter is off.
++_container_env_blob() {
++  docker inspect "$CONTAINER" --format '{{if .Config.Env}}{{join .Config.Env "\n"}}{{end}}' \
++    2>/dev/null \
++    | command grep -vE '[A-Za-z0-9_]*(TOKEN|KEY|SECRET|PASSWORD)[A-Za-z0-9_]*=|^PATH=' || true
++}
++
++# The drafter depth n, when the container config says one. Args: <full blob> <env
++# lines>. SPEC_N env wins (it is what the entrypoint composes the flag from), then
++# a literal flag the engine received: vLLM's JSON num_speculative_tokens, SGLang's
++# --speculative-num-steps (the depth; --speculative-num-draft-tokens is depth+1,
++# so it is only a fallback). ⚠️ The SPEC_N lookup reads ENV LINES, not the blob: an
++# entrypoint echoes its own "drafter OFF (SPEC_N=0 …)" help text, which is not a
++# value.
++_spec_n_from_blob() {
++  local blob="$1" env="${2:-}" n=""
++  n="$(command grep -oE '(^|[^[:alnum:]_])SPEC_N=[0-9]+' <<<"$env" | command grep -oE '[0-9]+$' | tail -1 || true)"
++  [[ -n "$n" ]] && { printf '%s' "$n"; return 0; }
++  n="$(printf '%s\n' "$blob" | command grep -oiE 'num_speculative_tokens"?: ?[0-9]+' | command grep -oE '[0-9]+$' | tail -1 || true)"
++  [[ -n "$n" ]] && { printf '%s' "$n"; return 0; }
++  n="$(printf '%s\n' "$blob" | command grep -oiE '(num-speculative-tokens|speculative-num-steps)[ =]+[0-9]+' | command grep -oE '[0-9]+$' | tail -1 || true)"
++  [[ -n "$n" ]] && { printf '%s' "$n"; return 0; }
++  # Last resort: the compose's own default depth — `_spec_n="${SPEC_N:-4}"` in a
++  # vLLM entrypoint, the depth a boot that did NOT pin SPEC_N resolves to.
++  # (SGLang's `: "${SPEC_N:=0}"` tier rows are deliberately NOT matched: their
++  # default is tier-conditional, so reading one would guess.)
++  n="$(printf '%s\n' "$blob" | command grep -oE 'SPEC_N:-[0-9]+' | command grep -oE '[0-9]+$' | tail -1 || true)"
++  printf '%s' "$n"
++}
++
+ _spec_fp() {
+-  local cmd
+-  cmd="$(_container_cmd)"
+-  if [[ -z "$cmd" ]]; then echo "spec ?"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'dflash|spec-dflash'; then echo "DFlash"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'num-speculative|speculative-config|--speculative'; then echo "MTP"; return; fi
+-  if printf '%s' "$cmd" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
++  local blob n
++  blob="$(_container_spec_blob)"
++  if [[ -z "$blob" ]]; then echo "spec ?"; return; fi
++  # Explicit off: SPEC=off (back-compat alias) or SPEC_N=0 — read from the ENV
++  # only (see _container_env_blob). Checked BEFORE the kind/n evidence, which
++  # would otherwise report the drafter as on.
++  if printf '%s' "$(_container_env_blob)" | \
++      command grep -qE '(^|[^[:alnum:]_])SPEC_N=0([^0-9]|$)|(^|[^[:alnum:]_])SPEC=(off|OFF|Off|false|no|0)([^[:alnum:]_]|$)'; then
++    echo "spec off"; return
++  fi
++  n="$(_spec_n_from_blob "$blob" "$(_container_env_blob)")"
++  if printf '%s' "$blob" | command grep -qiE 'dflash|spec-dflash'; then
++    printf 'DFlash%s\n' "${n:+ n=$n}"; return
++  fi
++  if printf '%s' "$blob" | command grep -qiE 'num_speculative_tokens|speculative-config|speculative-num|num-speculative|eagle|\bmtp\b|MTP'; then
++    printf 'MTP%s\n' "${n:+ n=$n}"; return
++  fi
++  if printf '%s' "$blob" | command grep -qiE 'ngram'; then echo "ngram"; return; fi
+   echo "spec off"
+ }
+ 
+@@ -372,6 +488,18 @@ warmup_gate() {
+     return 1
+   fi
+   echo "[sweep] WARMUP: server up after ~${waited}s" >&2
++  # Re-resolve the container now that something is serving (skip if pinned): the
++  # top-of-script auto-detect ran before anything answered on $URL, so it may
++  # have fallen back to a name heuristic and scoped VRAM + the GPU label to the
++  # wrong rig (#1537).
++  local cdet
++  if [[ -z "$CONTAINER_PINNED" ]]; then
++    cdet="$(_detect_container)"
++    if [[ -n "$cdet" && "$cdet" != "$CONTAINER" ]]; then
++      echo "[sweep] WARMUP: container re-resolved: $cdet (was: ${CONTAINER:-none})" >&2
++      CONTAINER="$cdet"
++    fi
++  fi
+   # Re-resolve the served model now that the server answers (skip if pinned).
+   if [[ -z "$MODEL_PINNED" ]]; then
+     local det
+@@ -662,6 +790,15 @@ if [[ -n "$SWEEP" ]]; then
+         MODEL="$det"
+       fi
+     fi
++    # Same for the container: each boot may swap it, and VRAM + the card's GPU
++    # row + the spec fingerprint all read from CONTAINER (#1537).
++    if [[ -z "$CONTAINER_PINNED" ]]; then
++      det="$(_detect_container)"
++      if [[ -n "$det" && "$det" != "$CONTAINER" ]]; then
++        echo "[sweep] container: $det (re-resolved post-boot; was: ${CONTAINER:-none})"
++        CONTAINER="$det"
++      fi
++    fi
+     out="$(run_probe "$N" || true)"; echo "$out"
+     line="$(printf '%s\n' "$out" | command grep -m1 '^RESULT ' || true)"
+     clean="$(sed -n 's/.* clean=\([0-9]*\).*/\1/p' <<<"$line")"
+diff --git a/scripts/tests/test-concurrency-probe.sh b/scripts/tests/test-concurrency-probe.sh
+index ba69a32..8ac59ce 100755
+--- a/scripts/tests/test-concurrency-probe.sh
++++ b/scripts/tests/test-concurrency-probe.sh
+@@ -263,4 +263,68 @@ got="$(PATH="$GPU_STUB:$PATH" CONTAINER=pinned-ids python3 "$LIB" --gpu-label)"
+ rm -rf "$GPU_STUB"
+ echo "  ✓ VRAM + GPU label scoped to the container's GPUs (ids, UUIDs, NVIDIA_VISIBLE_DEVICES; rig-wide fallback)"
+ 
++
++# #1537: the card must name the RIGHT container, GPUs and drafter.
++# (1) CONTAINER auto-detect was a `vllm-(qwen|gemma)` name heuristic — an SGLang
++#     container was never found, so the card listed every GPU on the host with
++#     rig-wide VRAM and the spec row read "spec ?". Resolution now prefers the
++#     container actually publishing the port $URL hits.
++# (2) The spec fingerprint grepped ONLY .Config.Cmd for --speculative-config, but
++#     every vLLM compose composes that flag INSIDE its entrypoint from the SPEC_N
++#     env — so a boot running MTP n=4 read "spec off".
++# Stub `docker` (ahead of the estate-safe shim) and drive the probe's own helpers.
++SPEC_STUB="$(mktemp -d)"
++cat > "$SPEC_STUB/docker" <<'DOCK'
++#!/usr/bin/env bash
++# `docker ps` (names|ports) and `docker inspect --format` expanded per section.
++case "$1" in
++  ps) printf '%s\n' \
++       'sgl-qwen38-27b-dual|0.0.0.0:30001->30000/tcp, [::]:30001->30000/tcp' \
++       'vllm-qwen38-mtp|0.0.0.0:8020->8000/tcp' ;;
++  inspect)
++    tmpl="${4:-}"
++    case "$2" in
++      sgl-qwen38-27b-dual)
++        if [[ "$tmpl" == *'.Config.Cmd'* ]]; then
++          printf '%s\n' \
++            'python3 sglang.launch_server --model-path /m --max-running-requests 2 \
++            --speculative-algorithm EAGLE --speculative-num-steps 4' \
++            'bash -c "echo hi"' 'SPEC_N=4' 'HF_TOKEN=hf_redacted' 'PATH=/usr/bin'
++        else
++          printf '%s\n' 'SPEC_N=4' 'HF_TOKEN=hf_redacted' 'PATH=/usr/bin'
++        fi ;;
++      *)
++        if [[ "$tmpl" == *'.Config.Cmd'* ]]; then
++          printf '%s\n' \
++            'vllm serve --model /m --max-num-seqs 8' \
++            'bash -c "_spec_n=\"\${SPEC_N:-4}\"; case \"\${SPEC:-}\" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac"' \
++            'echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding"' \
++            'SPEC_ARGS=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":\$_spec_n}")' \
++            'SPEC_N=' 'SPEC=' 'HF_TOKEN=hf_redacted' 'PATH=/usr/bin'
++        else
++          printf '%s\n' "SPEC_N=${SPEC_N:-}" "SPEC=${SPEC:-}" 'HF_TOKEN=hf_redacted' 'PATH=/usr/bin'
++        fi ;;
++    esac ;;
++esac
++DOCK
++chmod +x "$SPEC_STUB/docker"
++# The helpers live mid-script; lift the region out and source it hermetically.
++spec_fns="$(mktemp)"
++awk '/^# best-effort container/{f=1} f{print} f&&/^_spec_fp/{g=1} g&&/^}$/{exit}' "$PROBE" > "$spec_fns"
++[[ -s "$spec_fns" ]] || fail "could not lift the container/spec helpers out of concurrency-probe.sh"
++got="$(URL=http://localhost:30001 PATH="$SPEC_STUB:$PATH" bash -c 'source '"$spec_fns"' >/dev/null 2>&1; printf "%s|%s|%s" "$CONTAINER" "$(_spec_fp)" "$(_detect_slots)"')"
++[[ "$got" == "sgl-qwen38-27b-dual|MTP n=4|2" ]] \
++  || fail "an SGLang container must be resolved by its published port (CONTAINER + slots + spec): got '$got'"
++got="$(URL=http://localhost:8020 PATH="$SPEC_STUB:$PATH" bash -c 'source '"$spec_fns"' >/dev/null 2>&1; printf "%s" "$CONTAINER"')"
++[[ "$got" == "vllm-qwen38-mtp" ]] || fail "a URL no container publishes must still fall back to a name/registry match: got '$got'"
++got="$(URL=http://localhost:8020 PATH="$SPEC_STUB:$PATH" SPEC_N=4 bash -c 'source '"$spec_fns"' >/dev/null 2>&1; printf "%s" "$(_spec_fp)"')"
++[[ "$got" == "MTP n=4" ]] \
++  || fail "a vLLM boot that composes --speculative-config in its entrypoint from SPEC_N=4 must read MTP n=4, not 'spec off': got '$got'"
++got="$(URL=http://localhost:8020 PATH="$SPEC_STUB:$PATH" SPEC=off bash -c 'source '"$spec_fns"' >/dev/null 2>&1; printf "%s" "$(_spec_fp)"')"
++[[ "$got" == "spec off" ]] || fail "SPEC=off in the container env must read 'spec off' even though the entrypoint carries the flag text: got '$got'"
++got="$(URL=http://localhost:8020 PATH="$SPEC_STUB:$PATH" SPEC_N=0 bash -c 'source '"$spec_fns"' >/dev/null 2>&1; printf "%s" "$(_spec_fp)"')"
++[[ "$got" == "spec off" ]] || fail "SPEC_N=0 in the container env must read 'spec off': got '$got'"
++rm -rf "$SPEC_STUB" "$spec_fns"
++echo "  ✓ card names the right container (port-matched, engine-agnostic) and drafter (entrypoint-composed SPEC_N)"
++
+ echo "test-concurrency-probe: ok"

@@ -1,0 +1,24 @@
+{
+ "n": 1564,
+ "config": "glm-avar6",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 350.7,
+ "steps": 20,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 15,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/catalog.sh",
+  "scripts/lib/profiles/promote.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-catalog-cli.sh": 0,
+  "scripts/tests/test_promote.py": 0
+ }
+}

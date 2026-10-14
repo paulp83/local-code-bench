@@ -1,0 +1,21 @@
+{
+  "id": "38-trip-plan-revised",
+  "set": "hard-v1",
+  "axis": "F",
+  "source": "novel",
+  "category": "changed-requirements",
+  "difficulty": "hard",
+  "est_minutes": 30,
+  "needs_web": false,
+  "notes": "A plan built to message 01 keeps Lisbon, which the newest messages cancel, and uses rating 4.0 hotels; the travel-desk message is a distractor from another address.",
+  "spec_map": {
+    "plan-parses": "Output format comes from the first message.",
+    "no-lisbon": "The **newest** requester message wins on any point it changes",
+    "three-flights": "The **newest** requester message wins on any point it changes",
+    "flights-exact": "the cheapest feasible plan under every rule that is still in force",
+    "berlin-madrid-leg-constraints": "The **newest** requester message wins on any point it changes",
+    "hotels-exact": "Hotels are chosen per city (the cheapest eligible one is optimal, since nights are fixed by the flights).",
+    "total-exact": "the cheapest feasible plan under every rule that is still in force",
+    "within-budget-cap": "the cheapest feasible plan under every rule that is still in force"
+  }
+}

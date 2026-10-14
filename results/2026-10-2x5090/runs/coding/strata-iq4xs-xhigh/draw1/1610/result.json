@@ -1,0 +1,24 @@
+{
+ "n": 1610,
+ "config": "strata-iq4xs-xhigh",
+ "draw": 1,
+ "exit_status": "Submitted",
+ "agent_s": 1008.6,
+ "steps": 75,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 0,
+ "localization": 1.0,
+ "files_touched": [
+  "docs/PATCH_POLICY.md",
+  "scripts/lib/profiles/patch_attribution.py",
+  "scripts/lib/profiles/patches.yml"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-patch-attribution.sh": 0
+ }
+}

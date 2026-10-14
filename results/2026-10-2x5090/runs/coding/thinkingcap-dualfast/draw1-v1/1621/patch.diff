@@ -1,0 +1,99 @@
+diff --git a/scripts/quality-test.sh b/scripts/quality-test.sh
+index b055e42..3059067 100755
+--- a/scripts/quality-test.sh
++++ b/scripts/quality-test.sh
+@@ -1226,15 +1226,56 @@ if [[ -z "$RESUME" && "$NO_THINKING" != "1" && -n "${CONTAINER:-}" && "${CONTAIN
+   if [[ "$_sb_effort" == "none" ]]; then
+     echo "[quality-test] server budget: not applied — REASONING_EFFORT=none runs with thinking off"
+   else
+-    _sb_lines="$(docker logs "$CONTAINER" 2>&1 | command grep -F '[effort-budget]' || true)"
+-    _sb_args=(readback-budget --line -)
+-    if [[ -n "$_sb_effort" ]]; then _sb_args+=(--effort "$_sb_effort"); fi
+-    _sb_rc=0
+-    _sb_out="$(printf '%s\n' "$_sb_lines" | python3 "${ROOT_DIR}/scripts/lib/effort_budget.py" "${_sb_args[@]}" 2>&1)" || _sb_rc=$?
++    # Resolve the server's reasoning budget from its boot evidence. vLLM and
++    # SGLang print one `[effort-budget] v1 …` line at boot (effort_budget.py owns
++    # the parsing; the LAST line wins — `docker logs` spans restarts). llama.cpp
++    # prints no such line: its budget is a single server-wide boot flag
++    # (--reasoning-budget N), read from the container's resolved argv
++    # (scripts/lib/thinking-budget.sh). `_sb_out` ends up a number, `off`, or
++    # unknown (`_sb_rc` 2).
++    _sb_out=""; _sb_rc=2
++    if [[ -n "${_tb_kind:-}" ]]; then
++      _sb_kind="$_tb_kind"
++    else
++      # engine family of the serving container (name, then image)
++      # shellcheck source=lib/engine-kind.sh
++      source "${ROOT_DIR}/scripts/lib/engine-kind.sh"
++      _sb_kind="$(engine_kind_from_container "$CONTAINER" 2>/dev/null || true)"
++      if [[ "$_sb_kind" == "unknown" ]]; then
++        _sb_kind="$(engine_kind_from_image "$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || true)" 2>/dev/null || true)"
++      fi
++    fi
++    if [[ "$_sb_kind" == "llamacpp" ]]; then
++      _sb_src="read from ${CONTAINER}'s boot config (llama.cpp --reasoning-budget, server-wide)"
++      # shellcheck source=lib/thinking-budget.sh
++      source "${ROOT_DIR}/scripts/lib/thinking-budget.sh"
++      _sb_facts="$(docker inspect "$CONTAINER" 2>/dev/null | _thinking_budget_container_facts llamacpp)"
++      case "$_sb_facts" in
++        "BUDGET "*)
++          _sb_n="${_sb_facts#BUDGET }"
++          if [[ "$_sb_n" =~ ^[1-9][0-9]*$ ]]; then
++            _sb_out="$_sb_n"; _sb_rc=0
++          else
++            # -1: the flag is present but unbounded (REASONING_BUDGET unset at
++            # boot), so nothing bounds the run — the cap is left alone.
++            _sb_out="unknown"; _sb_rc=2
++          fi ;;
++        *)
++          # no --reasoning-budget, or the value could not be resolved
++          _sb_out="unknown"; _sb_rc=2 ;;
++      esac
++    else
++      _sb_src="read from ${CONTAINER}'s boot log"
++      _sb_lines="$(docker logs "$CONTAINER" 2>&1 | command grep -F '[effort-budget]' || true)"
++      _sb_args=(readback-budget --line -)
++      if [[ -n "$_sb_effort" ]]; then _sb_args+=(--effort "$_sb_effort"); fi
++      _sb_rc=0
++      _sb_out="$(printf '%s\n' "$_sb_lines" | python3 "${ROOT_DIR}/scripts/lib/effort_budget.py" "${_sb_args[@]}" 2>&1)" || _sb_rc=$?
++    fi
+     if [[ "$_sb_rc" == "0" && "$_sb_out" =~ ^[0-9]+$ ]]; then
+       SERVER_THINKING_BUDGET="$_sb_out"
+       SERVER_THINKING_EFFORT="$_sb_effort"
+-      if [[ -z "$SERVER_THINKING_EFFORT" ]]; then
++      if [[ -z "$SERVER_THINKING_EFFORT" && "$_sb_kind" != "llamacpp" ]]; then
+         # No effort sent: the server's default effort applies — name it from the same line.
+         SERVER_THINKING_EFFORT="$(printf '%s\n' "$_sb_lines" | python3 -c '
+ import importlib.util, sys
+@@ -1245,12 +1286,16 @@ info = m.parse_readback(sys.stdin.read()) or {}
+ print(info.get("default_effort") or "")' "${ROOT_DIR}/scripts/lib/effort_budget.py" 2>/dev/null || true)"
+       fi
+       _sb_eff_note=""
+-      if [[ -n "$_sb_effort" ]]; then
++      if [[ "$_sb_kind" == "llamacpp" ]]; then
++        # llama.cpp's budget is server-wide: it does not vary with the run's
++        # effort, so no effort is named — the run's own effort is what it ran at.
++        :
++      elif [[ -n "$_sb_effort" ]]; then
+         _sb_eff_note=" (effort ${_sb_effort})"
+       elif [[ -n "$SERVER_THINKING_EFFORT" ]]; then
+         _sb_eff_note=" (the server's default effort, ${SERVER_THINKING_EFFORT})"
+       fi
+-      _sb_what="server budget ${SERVER_THINKING_BUDGET} reasoning tokens${_sb_eff_note}, read from ${CONTAINER}'s boot log"
++      _sb_what="server budget ${SERVER_THINKING_BUDGET} reasoning tokens${_sb_eff_note}, ${_sb_src}"
+       if [[ -n "$THINKING_BUDGET" ]]; then
+         echo "[quality-test] ${_sb_what} — --thinking-budget ${THINKING_BUDGET} is sent per request and wins over it; cap from --thinking-budget"
+         SERVER_THINKING_BUDGET=""; SERVER_THINKING_EFFORT=""
+@@ -1280,7 +1325,11 @@ print(info.get("default_effort") or "")' "${ROOT_DIR}/scripts/lib/effort_budget.
+       SERVER_THINKING_BUDGET="off"
+       echo "[quality-test] server budget: off (${CONTAINER} booted with THINKING_BUDGETS=off) — thinking cap unchanged"
+     elif [[ "$_sb_rc" == "0" || "$_sb_rc" == "2" ]]; then
+-      echo "[quality-test] server budget: unknown (no [effort-budget] v1 line in ${CONTAINER}'s boot log) — thinking cap unchanged"
++      if [[ "$_sb_kind" == "llamacpp" ]]; then
++        echo "[quality-test] server budget: unknown (no resolved --reasoning-budget on ${CONTAINER} — unset or unbounded -1) — thinking cap unchanged"
++      else
++        echo "[quality-test] server budget: unknown (no [effort-budget] v1 line in ${CONTAINER}'s boot log) — thinking cap unchanged"
++      fi
+     else
+       echo "[quality-test] WARN: could not read the server budget from ${CONTAINER}'s boot log — thinking cap unchanged:" >&2
+       printf '%s\n' "$_sb_out" | sed 's/^/[quality-test]   /' >&2

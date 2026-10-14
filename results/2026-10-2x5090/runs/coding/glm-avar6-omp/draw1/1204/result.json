@@ -1,0 +1,30 @@
+{
+ "n": 1204,
+ "config": "glm-avar6-omp",
+ "draw": 1,
+ "harness": "omp",
+ "exit_status": "Submitted",
+ "agent_s": 3496.7,
+ "steps": 118,
+ "applied": true,
+ "empty_patch": false,
+ "passed": true,
+ "partial": 1.0,
+ "checks_passed": 3,
+ "localization": 1.0,
+ "files_touched": [
+  "scripts/lib/profiles-local/README.md",
+  "scripts/lib/profiles/compose_registry.py",
+  "scripts/lib/profiles/demote.py",
+  "scripts/lib/profiles/export_pr.py",
+  "scripts/lib/profiles/promote.py",
+  "scripts/lib/registry-emit.sh",
+  "tools/serve-cockpit/club3090_cockpit/services.py",
+  "tools/serve-cockpit/tests/test_services.py"
+ ],
+ "p2p_run": 5,
+ "regressions": [],
+ "test_rc": {
+  "scripts/tests/test-registry-origin-field.sh": 0
+ }
+}

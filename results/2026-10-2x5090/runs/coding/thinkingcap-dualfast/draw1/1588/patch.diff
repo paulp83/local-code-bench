@@ -1,0 +1,200 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 9b03501..6a8d956 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -195,11 +195,17 @@ fi
+ MODEL_PINNED="${MODEL:+1}"
+ MODEL="${MODEL:-$(curl -s -m 5 "${URL}/v1/models" 2>/dev/null \
+   | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo qwen3.6-27b)}"
+-# Container for VRAM, GPU label and flag introspection: the one publishing URL's port, any
+-# engine (#1537: the old `vllm-(qwen|gemma)` name heuristic never found an SGLang container, so
+-# its card listed every GPU on the host). The heuristic stays as the last resort.
++# Container for VRAM, GPU label and flag introspection: the one that SERVES URL on this host —
++# its published port must match URL's port AND host (#1584: matching the port alone bound the
++# local container for a URL on another machine, so the remote run reported that container's
++# max-num-seqs / GPU / spec / KV pool as its own). #1537: the old `vllm-(qwen|gemma)` name
++# heuristic never found an SGLang container, so it stays as the last resort — but only when the
++# URL is one this machine serves; against a remote URL there is no local container to fall back
++# to, so we leave CONTAINER empty rather than borrow a neighbour's values.
+ CONTAINER="${CONTAINER:-$(URL="$URL" python3 "$PROBE_PY" --container-for-url 2>/dev/null || true)}"
+-CONTAINER="${CONTAINER:-$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)}"
++if [[ -z "$CONTAINER" ]] && URL="$URL" python3 "$PROBE_PY" --url-local 2>/dev/null; then
++  CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -m1 -E 'vllm-(qwen|gemma)' || true)"
++fi
+ 
+ _container_cmd() { docker inspect "$CONTAINER" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true; }
+ # The served context: what the ENGINE reports first (SGLang server info, vLLM /v1/models, vLLM's
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index fee390d..9a6d69f 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -24,6 +24,7 @@ import json
+ import math
+ import os
+ import re
++import socket
+ import statistics
+ import subprocess
+ import sys
+@@ -359,12 +360,124 @@ def engine_stats(container):
+ # listed every GPU on the host, spec "?"), and a vLLM compose that builds --speculative-config in
+ # its entrypoint script from SPEC_N read "spec off" with MTP n=4 running. These read the truth:
+ # the container publishing the probed URL's port, and the drafter the ENGINE says it loaded.
+-def container_for_url(url, ps_lines=None):
+-    """Name of the running container publishing ``url``'s host port, else ""."""
+-    m = re.match(r"^[a-z]+://[^/:]+:(\d+)", url or "")
++def _url_host_port(url):
++    """(host, port) from a URL; the port defaults from the scheme (80 / 443). host is None
++    when the URL has no host part to parse."""
++    m = re.match(r"^[a-z]+://([^/:]+)(?::(\d+))?", url or "")
+     if not m:
+-        return ""
+-    port = m.group(1)
++        return None, None
++    port = m.group(2)
++    if port is None:
++        port = "443" if url.startswith("https://") else "80"
++    return m.group(1), port
++
++
++def _host_addrs(host):
++    """The addresses ``host`` names: the loopback literals for localhost / 0.0.0.0, an IP
++    literal for itself, or whatever the hostname resolves to. Empty when a hostname cannot
++    be resolved. Mirrors listen-scope.sh's _host_addrs (#1584): ``URL=<this rig's hostname>``
++    has to count as this host, or a correct container would be dropped."""
++    if host in ("localhost", "0.0.0.0"):
++        return ["127.0.0.1", "::1"]
++    if ":" in host:                    # an IPv6 literal
++        return [host]
++    if re.fullmatch(r"[0-9.]+", host):  # an IPv4 literal
++        return [host]
++    try:
++        return sorted({info[4][0] for info in socket.getaddrinfo(host, None)})
++    except Exception:
++        return []
++
++
++def _own_addrs():
++    """This machine's own IP addresses — what ``hostname -I`` prints. A URL is served by a
++    container we can inspect only when its host is this machine; these are the addresses that
++    identify it (beyond loopback)."""
++    addrs = set()
++    try:
++        for info in socket.getaddrinfo(socket.gethostname(), None):
++            addrs.add(info[4][0])
++    except Exception:
++        pass
++    return addrs
++
++
++def _loopback(addr):
++    return addr.startswith("127.") or addr == "::1"
++
++
++def _ports_serve_url(ports, url):
++    """True when a ``docker ps`` "Ports" string publishes the URL's host port on an address the
++    URL's host actually names, on THIS host. Port equality alone is not enough (#1584): a
++    wildcard / specific bind only serves the addresses it is published on, so a URL on another
++    machine never matches a local container that happens to publish the same port. Mirrors
++    listen-scope.sh's ports_serve_url (a published range 6333-6334 is honoured)."""
++    host, port = _url_host_port(url)
++    if not host or not (port or "").isdigit():
++        return False
++    addrs = _host_addrs(host)
++    if not addrs:
++        return False
++    own = _own_addrs()
++    p = int(port)
++    for m in ports.split(","):
++        m = m.strip()
++        if "->" not in m:          # an exposed-only port, not published
++            continue
++        m = m.split("->", 1)[0]    # host-side bind:port  (0.0.0.0:8020 · [::]:8020 · 127.0.0.1:6333-6334)
++        if ":" not in m:
++            continue
++        bind, hp = m.rsplit(":", 1)
++        bind = bind.strip("[]")
++        lo, dash, hi = hp.partition("-")
++        if not dash:
++            lo = hi = hp
++        if not (lo.isdigit() and hi.isdigit()):
++            continue
++        if not (int(lo) <= p <= int(hi)):
++            continue
++        for a in addrs:
++            if bind in ("0.0.0.0", "::", ""):
++                if _loopback(a) or a in own:
++                    return True
++            elif _loopback(bind):
++                if _loopback(a):
++                    return True
++            elif a == bind:
++                return True
++    return False
++
++
++def url_is_local(url):
++    """True when ``url``'s host is this machine — loopback, its hostname, or one of its own
++    IPs — the only case a local container could be serving it. A host on another machine
++    (``http://10.9.9.9:8020``) is never served by a container we can inspect here, so a run
++    against it must not read a local container's slot count / GPU / spec / KV pool as its own
++    (#1584 follow-up)."""
++    host, _ = _url_host_port(url)
++    if not host:
++        return False
++    if host in ("localhost", "0.0.0.0"):
++        return True
++    addrs = _host_addrs(host)
++    if not addrs:
++        return False
++    own = {a.lower() for a in _own_addrs()}
++    try:
++        own.add(socket.gethostname().lower())
++    except Exception:
++        pass
++    for a in addrs:
++        if _loopback(a) or a.lower() in own:
++            return True
++    return False
++
++
++def container_for_url(url, ps_lines=None):
++    """Name of the running container whose PUBLISHED host port serves ``url`` on this machine,
++    else "". The host matters, not just the port (#1584): a URL on another machine is never
++    served by a local container, so it resolves to nothing rather than the local container
++    that happens to publish the same port."""
+     if ps_lines is None:
+         try:
+             out = subprocess.run(["docker", "ps", "--format", "{{.Names}}|{{.Ports}}"],
+@@ -372,10 +485,9 @@ def container_for_url(url, ps_lines=None):
+             ps_lines = out.stdout.splitlines()
+         except Exception:
+             return ""
+-    pat = re.compile(r":" + port + r"->")
+     for line in ps_lines:
+         name, _, ports = line.partition("|")
+-        if name and pat.search(ports):
++        if name and _ports_serve_url(ports, url):
+             return name.strip()
+     return ""
+ 
+@@ -1353,7 +1465,9 @@ def main(argv=None):
+     p.add_argument("--gpu-label", action="store_true",
+                    help="'N× <GPU name>' for the GPUs $CONTAINER sees (every GPU when it can't be resolved)")
+     p.add_argument("--container-for-url", action="store_true",
+-                   help="name of the running container publishing $URL's port (empty when none)")
++                   help="name of the running container serving $URL on this host (empty when none)")
++    p.add_argument("--url-local", action="store_true",
++                   help="exit 0 when $URL's host is this machine (loopback/hostname/own IP), 1 otherwise")
+     p.add_argument("--served-max-len", action="store_true",
+                    help="context length the engine at $URL / in $CONTAINER serves (empty when unreadable)")
+     p.add_argument("--spec-label", action="store_true",
+@@ -1365,6 +1479,8 @@ def main(argv=None):
+         if name:
+             print(name)
+         return 0
++    if args.url_local:
++        return 0 if url_is_local(_env("URL")) else 1
+     if args.served_max_len:
+         n = served_max_len(_env("URL"), _env("CONTAINER"))
+         if n:

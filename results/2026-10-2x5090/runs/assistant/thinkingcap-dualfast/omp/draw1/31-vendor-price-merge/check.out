@@ -1,0 +1,12 @@
+PASS merged-header
+PASS merged-skus-exact
+PASS merged-sorted
+FAIL merged-prices-and-vendors: ['AX135', 'AX142', 'AX205', 'AX233']
+PASS merged-descriptions
+PASS conflicts-parses
+PASS conflicts-skus-exact
+PASS conflicts-no-false-positives
+PASS conflicts-no-misses
+FAIL conflicts-detail
+PASS conflict-rows-blank-price
+PASS: 9 FAIL: 2

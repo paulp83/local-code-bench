@@ -1,0 +1,316 @@
+diff --git a/scripts/concurrency-probe.sh b/scripts/concurrency-probe.sh
+index 03a2274..8ca2ff5 100755
+--- a/scripts/concurrency-probe.sh
++++ b/scripts/concurrency-probe.sh
+@@ -40,7 +40,8 @@
+ #   not-ready engine reads as a spurious crash); WARMUP_TIMEOUT (900) ·
+ #   WARMUP_REQS (3).
+ #   --sweep knobs: CTX_SWEEP (1k 4k 8k 16k 32k) · N_LIST (1 2 4 8 16 32) ·
+-#   KV_TOKENS (0 = auto from vLLM logs) · N_MAX · CTX_MAX · WALL_BUDGET (15m) ·
++#   KV_TOKENS (0 = auto from the engine's boot log, vLLM or SGLang) · N_MAX · CTX_MAX ·
++#   WALL_BUDGET (15m) ·
+ #   EARLY_STOP (1) · CACHE (shared) · SHARE_FRAC (0.75).
+ set -euo pipefail
+ 
+@@ -217,14 +218,40 @@ _props_slots()   { curl -s -m 3 "${URL}/props" 2>/dev/null \
+ _sgl_max_running() { curl -s -m 3 "${URL}/get_server_info" 2>/dev/null \
+   | python3 -c 'import json,sys; v=json.load(sys.stdin).get("max_running_requests",""); print(v if isinstance(v,int) else "")' 2>/dev/null; }
+ 
+-_detect_slots() {
+-  local n
+-  n="$(_served_seqs || true)"; [[ -n "$n" ]] && { echo "$n"; return; }
+-  n="$(_served_np || true)";   [[ -n "$n" ]] && { echo "$n"; return; }
+-  n="$(_served_max_running || true)"; [[ -n "$n" ]] && { echo "$n"; return; }
+-  n="$(_sgl_max_running || true)";    [[ -n "$n" ]] && { echo "$n"; return; }
+-  n="$(_props_slots || true)"; [[ -n "$n" ]] && { echo "$n"; return; }
+-  echo ""
++# The detectors and the label that names each one's source, in the order they are tried. ONE list on
++# purpose (#1537's follow-up): the --sweep header kept its own copy of this order, dropped the two
++# SGLang paths from it, and printed "slots=4 (undetected)" over a count that was right — a label that
++# contradicts its own number reads as a broken detector, and the fix has to be structural or the two
++# lists drift apart again.
++_SLOTS_SOURCES=(
++  "container max-num-seqs|_served_seqs"
++  "container -np|_served_np"
++  "container max-running-requests|_served_max_running"
++  "server /get_server_info max_running_requests|_sgl_max_running"
++  "server /props total_slots|_props_slots"
++)
++
++# _slots_probe -> "<count>|<source>" for the first detector that answers, "" when none does.
++_slots_probe() {
++  local entry label fn n
++  for entry in "${_SLOTS_SOURCES[@]}"; do
++    label="${entry%%|*}"; fn="${entry##*|}"
++    n="$("$fn" || true)"
++    [[ -n "$n" ]] && { printf '%s|%s' "$n" "$label"; return 0; }
++  done
++  return 0
++}
++
++_detect_slots() { local probe; probe="$(_slots_probe)"; printf '%s\n' "${probe%%|*}"; }
++
++# The knob that RAISES the slot count on this engine. MAX_NUM_SEQS is vLLM's spelling and an SGLang
++# compose never reads it, so quoting it as the fix sends the reader to reboot the same config.
++_slots_knob() {
++  case "${1:-}" in
++    *max-running-requests*|*max_running_requests*) echo "MAX_RUNNING_REQUESTS" ;;
++    *-np*)                                          echo "-np / NPARALLEL" ;;
++    *)                                              echo "MAX_NUM_SEQS / -np" ;;
++  esac
+ }
+ 
+ # The GPUs the probed container sees, not every GPU on the host (#1502): a container pinned to the one
+@@ -310,7 +337,7 @@ PY
+ }
+ 
+ # CONCURRENCY defaults to the served slot count (the thing we're validating).
+-# Detection order: vLLM container flag -> llama.cpp container flag -> /props.
++# Detection order: _SLOTS_SOURCES above (container flags first, then the engine's own info page).
+ # A failed detection is FATAL (#818): the old silent CONCURRENCY=2 fallback
+ # measured queue-wait as concurrency against 1-slot servers and mislabeled arms.
+ # SWEEP / --sweep skip detection here: each arm passes CONCURRENCY=$N into
+@@ -319,14 +346,12 @@ PY
+ if [[ -n "$SWEEP" || "$MATRIX" == "1" ]]; then
+   : # per-arm CONCURRENCY comes from the sweep / matrix loop
+ elif [[ -z "${CONCURRENCY:-}" ]]; then
+-  _conc_src="container max-num-seqs"; CONCURRENCY="$(_served_seqs || true)"
+-  if [[ -z "$CONCURRENCY" ]]; then _conc_src="container -np";          CONCURRENCY="$(_served_np || true)"; fi
+-  if [[ -z "$CONCURRENCY" ]]; then _conc_src="container max-running-requests"; CONCURRENCY="$(_served_max_running || true)"; fi
+-  if [[ -z "$CONCURRENCY" ]]; then _conc_src="server /props total_slots"; CONCURRENCY="$(_props_slots || true)"; fi
+-  if [[ -z "$CONCURRENCY" ]]; then _conc_src="server /get_server_info max_running_requests"; CONCURRENCY="$(_sgl_max_running || true)"; fi
++  _probe="$(_slots_probe)"
++  CONCURRENCY="${_probe%%|*}"
++  _conc_src="${_probe#*|}"
+   if [[ -z "$CONCURRENCY" ]]; then
+     echo "[concurrency-probe] FATAL: cannot detect the served slot count" \
+-         "(container cmd and ${URL}/props both failed) — pass CONCURRENCY=N explicitly" >&2
++         "(container cmd, ${URL}/get_server_info and ${URL}/props all failed) — pass CONCURRENCY=N explicitly" >&2
+     exit 2
+   fi
+   echo "[concurrency-probe] CONCURRENCY=$CONCURRENCY (detected: $_conc_src)"
+@@ -409,12 +434,12 @@ warmup_gate() {
+ # --- --sweep: live N×ctx matrix, no reboot ------------------------------------
+ if [[ "$MATRIX" == "1" ]]; then
+   if [[ "$SWEEP_DRY" != "1" ]]; then warmup_gate || exit 1; fi
+-  slots="$(_detect_slots || true)"
+-  slots_src="undetected"
+-  if [[ -n "$(_served_seqs || true)" ]]; then slots_src="container max-num-seqs"
+-  elif [[ -n "$(_served_np || true)" ]]; then slots_src="container -np"
+-  elif [[ -n "$(_props_slots || true)" ]]; then slots_src="server /props total_slots"
+-  fi
++  # One probe for BOTH the count and its source label, so a source the count came from can never be
++  # missing from the label's list again (#1537's follow-up: an SGLang server read "undetected").
++  _probe="$(_slots_probe)"
++  slots="${_probe%%|*}"
++  slots_src="${_probe#*|}"
++  [[ -n "$_probe" ]] || slots_src="undetected"
+   max_len="$(_served_ctx || true)"
+   if [[ -z "$KV_TOKENS" || "$KV_TOKENS" == "0" ]]; then
+     KV_TOKENS="$(CONTAINER="$CONTAINER" python3 "$PROBE_PY" --detect-kv || true)"
+@@ -422,7 +447,7 @@ if [[ "$MATRIX" == "1" ]]; then
+ 
+   if [[ "$SWEEP_DRY" != "1" && -z "$slots" && "$N_LIST_EXPLICIT" != "1" ]]; then
+     echo "[concurrency-probe] FATAL: --sweep cannot detect the served slot count" \
+-         "(container cmd and ${URL}/props both failed) — pass --n 1,2,4 or CONCURRENCY=N" >&2
++         "(container cmd, ${URL}/get_server_info and ${URL}/props all failed) — pass --n 1,2,4 or CONCURRENCY=N" >&2
+     exit 2
+   fi
+ 
+@@ -456,7 +481,7 @@ if [[ "$MATRIX" == "1" ]]; then
+   fi
+ 
+   if [[ "${slots:-1}" == "1" && "$N_LIST_EXPLICIT" != "1" ]]; then
+-    echo "[sweep] server is 1-slot — raise MAX_NUM_SEQS / -np and rerun for a real sweep" >&2
++    echo "[sweep] server is 1-slot — raise $(_slots_knob "$slots_src") and rerun for a real sweep" >&2
+   fi
+ 
+   t0_matrix=$(date +%s)
+@@ -567,8 +592,12 @@ PY
+   done < <(python3 "$PROBE_PY" --plan-tsv)
+ 
+   rec_json="$(mktemp /tmp/cprobe-rec.XXXXXX)"
++  # The engine the slots came from decides which compose knob names the recommendation prints:
++  # SGLang composes read MAX_RUNNING_REQUESTS / CONTEXT_LENGTH and silently ignore vLLM's pair.
+   if [[ "$slots_src" == "container -np" ]]; then engine="llamacpp"
+   elif [[ "$slots_src" == "container max-num-seqs" ]]; then engine="vllm"
++  elif [[ "$slots_src" == "container max-running-requests"
++        || "$slots_src" == "server /get_server_info max_running_requests" ]]; then engine="sglang"
+   else engine=""
+   fi
+   MODEL="$MODEL" SLUG="${SLUG:-}" SPEC="$(_spec_fp)" GPUS="$(_gpu_fp)" \
+diff --git a/scripts/lib/concurrency_probe.py b/scripts/lib/concurrency_probe.py
+index 4bcd814..adce665 100755
+--- a/scripts/lib/concurrency_probe.py
++++ b/scripts/lib/concurrency_probe.py
+@@ -95,34 +95,71 @@ def fmt_ttft(seconds):
+     return f"{seconds * 1000:.0f}ms"
+ 
+ 
++# The KV pool as each engine states it at boot. Both spellings, deliberately: --detect-kv used to
++# grep only vLLM's line, so every SGLang card read "KV ?" while the engine had printed its pool
++# size in the boot log (#1537's follow-up).
++_KV_PATTERNS = (
++    # vLLM: "GPU KV cache size: 210,000 tokens" (the number is sometimes prefixed "~")
++    r"GPU KV cache size:\s*~?([\d,]+)\s*tokens",
++    # SGLang: "KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 177667". The dtype field
++    # is version-dependent — older/newer builds print "KV Cache is allocated. #tokens: N".
++    r"KV Cache is allocated\.[^\n]*?#tokens:\s*~?([\d,]+)",
++    # SGLang's EFFECTIVE line, printed after the pool is sized. The server_args= dump above it echoes
++    # the REQUEST, so it stays out of the pattern list (docs/engines/SGLANG.md).
++    r"\bmax_total_num_tokens=([\d,]+)",
++)
++
++
+ def parse_kv_tokens_text(txt):
+-    """vLLM boot: 'GPU KV cache size: 210,000 tokens' (optional leading ~)."""
++    """KV pool size in tokens from the boot log of either engine, or None when it doesn't say.
++
++    The LAST match in the text wins, whichever engine printed it: a restarted container keeps the
++    earlier boots' lines, and a TP>2 log prints one pool line per rank (same pool every time).
++    """
+     if not txt:
+         return None
+-    matches = list(
+-        re.finditer(r"GPU KV cache size:\s*~?([\d,]+)\s*tokens", txt, re.I)
+-    )
+-    if not matches:
+-        return None
+-    return int(matches[-1].group(1).replace(",", ""))
++    last_at, last_val = -1, None
++    for pat in _KV_PATTERNS:
++        for m in re.finditer(pat, txt, re.I):
++            if m.start() >= last_at:
++                last_at, last_val = m.start(), int(m.group(1).replace(",", ""))
++    return last_val
+ 
+ 
+-def detect_kv_tokens(container):
+-    if not container:
+-        return None
++def _docker_logs_tail(container, max_lines=5000):
++    """The last ``max_lines`` of the container's log, or "" when docker can't be asked."""
+     try:
+         out = subprocess.run(
+-            ["docker", "logs", "--tail", "2500", container],
++            ["docker", "logs", "--tail", str(max_lines), container],
+             capture_output=True,
+             text=True,
+             timeout=20,
+             encoding="utf-8",
+             errors="replace",
+         )
+-        txt = (out.stdout or "") + (out.stderr or "")
+     except Exception:
++        return ""
++    return (out.stdout or "") + (out.stderr or "")
++
++
++def detect_kv_tokens(container):
++    """Pool size in tokens from the container's boot log.
++
++    ⚠️ Read from the HEAD of the log: the pool is sized at boot, and a container that has been
++    serving for a while has scrolled that line past any --tail window. --detect-kv used to read
++    --tail 2500, so a long-running server — the exact thing a card gets cut for — printed "KV ?"
++    on both engines (#1537's follow-up).
++    """
++    if not container:
+         return None
+-    return parse_kv_tokens_text(txt)
++    # A generous window: the pool line sits a few hundred lines in behind the weight load, and a
++    # container restarted under load can push a later boot's line past a narrow one.
++    tok = parse_kv_tokens_text(_docker_logs_head(container, max_lines=20000))
++    if tok:
++        return tok
++    # A compose noisier than the head window (or a rotated log) can still leave the line readable at
++    # the other end, so ask there too before giving up.
++    return parse_kv_tokens_text(_docker_logs_tail(container))
+ 
+ 
+ def plan_matrix(
+@@ -1178,6 +1215,28 @@ def _row_summary(r):
+     }
+ 
+ 
++# The env vars a COMPOSE reads for these two knobs are spelled per engine, and recommending the
++# wrong dialect is a SILENT no-op: SGLang's entrypoint reads ${MAX_RUNNING_REQUESTS} and
++# ${CONTEXT_LENGTH} and never sees vLLM's MAX_NUM_SEQS / MAX_MODEL_LEN, so the card's "run this"
++# line rebooted the same config (#1537's follow-up). Same dialect map as
++# scripts/lib/profiles/launch_compat.py's #1361 injector, extended with the context knob.
++# An engine absent from the map gets vLLM's names, as the card has always said: vLLM is what most
++# of the registry boots, and llama.cpp's block below already states its real flags.
++_COMPOSE_KNOBS = {
++    "vllm": ("MAX_NUM_SEQS", "MAX_MODEL_LEN"),
++    "sglang": ("MAX_RUNNING_REQUESTS", "CONTEXT_LENGTH"),
++}
++
++
++def compose_knobs(engine, slug=""):
++    """(slots env, context env) the compose under test reads, by engine family."""
++    e = (engine or "").strip().lower()
++    s = (slug or "").strip().lower()
++    if e.startswith("sglang") or e in ("sgl", "sgl/") or s.startswith("sgl/") or s.startswith("sglang/"):
++        return _COMPOSE_KNOBS["sglang"]
++    return _COMPOSE_KNOBS["vllm"]
++
++
+ def recommend_compose(record):
+     """Pick compose knobs from the matrix.
+ 
+@@ -1216,21 +1275,22 @@ def format_recommend(rec):
+     served = rec.get("served_max_len")
+     slug = rec.get("slug") or "<slug>"
+     engine = (rec.get("engine") or "").lower()
++    slots_env, ctx_env = compose_knobs(engine, rec.get("slug") or "")
+     lines = ["=== recommend ==="]
+ 
+     def knobs(n, ctx_keep, ctx_set=None):
+-        launch = [f"MAX_NUM_SEQS={n}"]
++        launch = [f"{slots_env}={n}"]
+         if ctx_set is not None:
+-            launch.append(f"MAX_MODEL_LEN={ctx_set}")
++            launch.append(f"{ctx_env}={ctx_set}")
+         launch.append(f"bash scripts/switch.sh {slug}")
+         out = [
+-            f"    MAX_NUM_SEQS={n}",
++            f"    {slots_env}={n}",
+         ]
+         if ctx_set is not None:
+-            out.append(f"    MAX_MODEL_LEN={ctx_set}")
++            out.append(f"    {ctx_env}={ctx_set}")
+         else:
+             keep = fmt_ctx(ctx_keep) if ctx_keep else "compose default"
+-            out.append(f"    MAX_MODEL_LEN=<keep {keep}>")
++            out.append(f"    {ctx_env}=<keep {keep}>")
+         out.append(f"    {' '.join(launch)}")
+         if engine in ("llamacpp", "llama.cpp", "ik_llama", "ik-llama"):
+             c = ctx_set if ctx_set is not None else ctx_keep
+@@ -1247,7 +1307,7 @@ def format_recommend(rec):
+         )
+ 
+     served_s = fmt_ctx(served) if served else "compose default"
+-    lines.append(f"  served max-model-len={served_s} (usually keep this)")
++    lines.append(f"  served max-model-len ({ctx_env})={served_s} (usually keep this)")
+     lines.append("")
+ 
+     if full:
+@@ -1265,13 +1325,18 @@ def format_recommend(rec):
+             lines.extend(knobs(peak["n"], served, ctx_set=peak["ctx"]))
+             if served and peak["ctx"] < served:
+                 lines.append(
+-                    f"    do not drop MAX_MODEL_LEN unless traffic stays near {fmt_ctx(peak['ctx'])} — "
++                    f"    do not drop {ctx_env} unless traffic stays near {fmt_ctx(peak['ctx'])} — "
+                     f"raising slots to {peak['n']} at {served_s} will not reproduce {peak['agg']:.0f} tok/s"
+                 )
+         elif engine.startswith("vllm") or engine == "":
+             lines.append(
+                 "    vLLM: MAX_NUM_SEQS is a cap, not a reservation; keep MAX_MODEL_LEN"
+             )
++        elif engine.startswith("sglang") or engine.startswith("sgl"):
++            lines.append(
++                f"    SGLang: {slots_env} is a REQUEST — the engine clamps it to what the KV/mamba pool"
++                f" admits, so re-read max_running_requests on /get_server_info after the boot"
++            )
+     else:
+         lines.append(cell_line("max aggregate", peak))
+         lines.extend(knobs(peak["n"], served, ctx_set=peak["ctx"]))

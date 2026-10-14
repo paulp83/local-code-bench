@@ -1,0 +1,77 @@
+diff --git a/scripts/preflight.sh b/scripts/preflight.sh
+index 0fdd75b..3745add 100755
+--- a/scripts/preflight.sh
++++ b/scripts/preflight.sh
+@@ -1330,7 +1330,7 @@ preflight_compose_deps() {
+     # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+     # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+     # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
++    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
+ 
+     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+     # /models/target and /models/drafter instead of using the HF cache mount.
+diff --git a/scripts/tests/test-preflight-drafter-path.sh b/scripts/tests/test-preflight-drafter-path.sh
+new file mode 100755
+index 0000000..53c41cf
+--- /dev/null
++++ b/scripts/tests/test-preflight-drafter-path.sh
+@@ -0,0 +1,58 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Guard: #1305 drafter-path extraction. The in-container HF-cache path extractor
++# in preflight.sh must never capture a character that cannot appear in a real
++# directory name (backslash, quote, brace). These composes write the drafter
++# path inside escaped JSON, so the trailing backslash of the escape used to be
++# swallowed into the captured subdir (`assistant\/config.json` -> "missing").
++#
++# Also re-covers the original narrowing bug the extractor's comment documents:
++# `${VAR:-default}` resolver tokens must be captured intact (not truncated at
++# the `:`), since a truncated token would break the downstream resolver.
++#
++# Pure text scan over the shipped composes; no docker, no GPU.
++
++ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
++
++# Same extractor as preflight.sh (keep in sync).
++# shellcheck disable=SC2016
++EXTRACTOR='[^"'\''\\[:space:],]+'
++
++fail=0
++found=0
++for compose in $(find "$ROOT_DIR/models" -name '*.yml' | sort); do
++  while IFS= read -r token; do
++    found=$((found + 1))
++    # A brace is legal only as part of a complete ${VAR:-default} resolver
++    # token (the downstream resolver strips it); backslash and quote are
++    # never legal in a directory name.
++    case "$token" in
++      *'\\'*|*"'"*|*'"'*)
++        echo "FAIL: $compose captured invalid dir-name char: $token" >&2
++        fail=1
++        ;;
++      *'{'*|*'}'*)
++        case "$token" in
++          *'${'*'}') ;;
++          *)
++            echo "FAIL: $compose captured malformed brace token: $token" >&2
++            fail=1
++            ;;
++        esac
++        ;;
++    esac
++  done < <(command grep -hv '^[[:space:]]*#' "$compose" 2>/dev/null |
++    command grep -oE "/root/\.cache/huggingface/${EXTRACTOR}" || true)
++done
++
++if [[ "$found" -eq 0 ]]; then
++  echo "FAIL: extractor matched nothing across any compose" >&2
++  exit 1
++fi
++
++if [[ "$fail" -ne 0 ]]; then
++  exit 1
++fi
++
++echo "OK: ${found} extracted paths across all composes contain no invalid dir-name characters"

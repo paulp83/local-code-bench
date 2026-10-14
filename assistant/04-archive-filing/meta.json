@@ -1,0 +1,9 @@
+{
+  "id": "04-archive-filing",
+  "source": "session-derived",
+  "category": "filing",
+  "difficulty": "medium",
+  "est_minutes": 8,
+  "needs_web": false,
+  "notes": "Shape from sessions filing results into the notes archive with a naming contract and an INDEX row."
+}

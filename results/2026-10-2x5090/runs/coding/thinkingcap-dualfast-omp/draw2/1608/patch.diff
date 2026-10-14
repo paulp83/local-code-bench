@@ -1,0 +1,268 @@
+diff --git a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+index 81a4f45..24a3de2 100644
+--- a/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
++++ b/models/qwen3.8-27b/vllm/compose/single/autoround-int4/mtp.yml
+@@ -275,6 +275,9 @@ services:
+         _gmu="$${GPU_MEMORY_UTILIZATION:-$$_gmu_tier}"; _seqs="$${MAX_NUM_SEQS:-$$_seqs_tier}"
+         _mnbt="$${MAX_NUM_BATCHED_TOKENS:-$$_mnbt_tier}"; _lptt="$${LONG_PREFILL_TOKEN_THRESHOLD:-$$_lptt_tier}"
+         _mml="$${MAX_MODEL_LEN:-$$_mml_tier}"
++        # Pre-assign so every path reaching the exec below has the array set; the
++        # case re-sets it per arm (test-compose-args-array-scope requires a dominating assignment).
++        LM_ONLY_ARGS=()
+         case "$$VISION" in
+           on) LM_ONLY_ARGS=() ;;
+           off) LM_ONLY_ARGS=(--language-model-only) ;;
+diff --git a/scripts/tests/fixtures/args-array-scope/fail-case-not-exhaustive.yml b/scripts/tests/fixtures/args-array-scope/fail-case-not-exhaustive.yml
+new file mode 100644
+index 0000000..6ece35b
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/fail-case-not-exhaustive.yml
+@@ -0,0 +1,15 @@
++# Fixture for test-compose-args-array-scope: MUST FAIL.
++# One arm assigns, the other neither assigns nor exits -- that path reaches
++# the exec with the array unset, silently dropping the feature. Treating a
++# case as one flat scope (or "any arm assigns") would miss this.
++services:
++  fixture:
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$$KV_OFFLOAD" in
++          1) OFFLOAD_ARGS=(--hicache-size 8) ;;
++          *) ;;
++        esac
++        exec sglang serve "$${OFFLOAD_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/fail-if-else-one-branch.yml b/scripts/tests/fixtures/args-array-scope/fail-if-else-one-branch.yml
+new file mode 100644
+index 0000000..41f653d
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/fail-if-else-one-branch.yml
+@@ -0,0 +1,16 @@
++# Fixture for test-compose-args-array-scope: MUST FAIL.
++# The original catch (MAMBA_ARGS assigned inside the NVLink then-branch only):
++# the else-branch expands an unset array. Pins that the case handling does not
++# over-accept one-sided branches.
++services:
++  fixture:
++    entrypoint:
++      - bash
++      - -c
++      - |
++        if [ "$$_NVLINK_ENABLED" = "1" ]; then
++          MAMBA_ARGS=(--mamba-scheduler)
++        else
++          :
++        fi
++        exec vllm serve "$${MAMBA_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/pass-case-exhaustive-multiline.yml b/scripts/tests/fixtures/args-array-scope/pass-case-exhaustive-multiline.yml
+new file mode 100644
+index 0000000..16116fb
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/pass-case-exhaustive-multiline.yml
+@@ -0,0 +1,19 @@
++# Fixture for test-compose-args-array-scope: MUST PASS.
++# Multi-line arms: one arm assigns the array, the other exits. Exhaustive, so
++# no path to the exec reaches it unset.
++services:
++  fixture:
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$$KV_OFFLOAD" in
++          1)
++            OFFLOAD_ARGS=(--hicache-size 8)
++            ;;
++          *)
++            echo "KV_OFFLOAD must be 1" >&2
++            exit 1
++            ;;
++        esac
++        exec sglang serve "$${OFFLOAD_ARGS[@]}"
+diff --git a/scripts/tests/fixtures/args-array-scope/pass-case-exhaustive-sameline.yml b/scripts/tests/fixtures/args-array-scope/pass-case-exhaustive-sameline.yml
+new file mode 100644
+index 0000000..1f3966a
+--- /dev/null
++++ b/scripts/tests/fixtures/args-array-scope/pass-case-exhaustive-sameline.yml
+@@ -0,0 +1,17 @@
++# Fixture for test-compose-args-array-scope: MUST PASS.
++# The array is assigned only on case arm heads (never at line start), and the
++# case is exhaustive -- every arm assigns or exits -- so every path to the
++# exec has it set. The line-start-only match read this shape (qwen3.8
++# single-fast mtp.yml, #1540) as "never assigned".
++services:
++  fixture:
++    entrypoint:
++      - bash
++      - -c
++      - |
++        case "$$VISION" in
++          on) LM_ONLY_ARGS=() ;;
++          off) LM_ONLY_ARGS=(--language-model-only) ;;
++          *) echo "VISION must be on or off" >&2; exit 1 ;;
++        esac
++        exec vllm serve "$${LM_ONLY_ARGS[@]}"
+diff --git a/scripts/tests/test-compose-args-array-scope.sh b/scripts/tests/test-compose-args-array-scope.sh
+index ff0a573..a9e4011 100755
+--- a/scripts/tests/test-compose-args-array-scope.sh
++++ b/scripts/tests/test-compose-args-array-scope.sh
+@@ -16,6 +16,15 @@
+ # ⚠️ Indentation is NOT a sufficient proxy: in these composes the branch execs sit
+ # at the same column as a block nudged inside the branch. Depth is tracked from the
+ # shell keywords instead.
++#
++# Case arms are alternatives, not one scope. An assignment on an arm head
++# (`on) LM_ONLY_ARGS=() ;;`) is recognized, and a `case` dominates the exec
++# only when EXHAUSTIVE for the array -- every arm assigns it or exits.
++# (2026-10-13: the qwen3.8 single-fast mtp.yml, from #1540, set LM_ONLY_ARGS
++# only on arm heads; the line-start-only match read it as "never assigned".)
++#
++# The guard itself is pinned by fixtures in scripts/tests/fixtures/
++# args-array-scope/ -- pass-* files must stay clean, fail-* must still fail.
+ set -uo pipefail
+ export CLUB3090_CONFIG_DIR=/nonexistent/club-3090-test-config   # tests never read your real settings (#1466)
+ # #779: this gate parses compose YAML through python3; without PYTHONUTF8 a
+@@ -51,47 +60,115 @@ OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
+ CLOSE = re.compile(r'^\s*(fi|done|esac)\b')
+ ALT   = re.compile(r'^\s*(else|elif)\b')
+ ONELINE = re.compile(r'\b(fi|done|esac)\s*;?\s*$')
++# A line that opens a case arm: the `)` ends the pattern list (`on)`, `0|1)`,
++# `full|lean)`, `*)`, glob patterns like `*[!0-9]*|0)`); anything after is the
++# arm body.
++ARM_HEAD = re.compile(r'^\s*[*\w|/.,\[\]! -]+\)\s*(\S.*)?$')
+ 
+-def scope_paths(lines):
+-    """Path of enclosing BRANCH ids per line.  `else`/`elif` starts a NEW id at the
+-    same depth, so an assignment in the then-branch does not dominate the
+-    else-branch -- which plain depth counting cannot express."""
+-    paths, stack, nxt = [], [], [0]
++def scope_context(lines):
++    """(paths, case_of) per line.
++    paths[i]: tuple of enclosing BRANCH ids. `else`/`elif` starts a NEW id at
++    the same depth, so an assignment in the then-branch does not dominate the
++    else-branch -- which plain depth counting cannot express.
++    case_of[i]: (case_start, esac_line) of the innermost open `case`, else
++    None. A `case` is ONE branch id whose ARMS are alternatives, so an
++    assignment in any single arm dominates nothing after the `esac` unless
++    every arm assigns or exits (checked per array)."""
++    paths, case_of = [], [None] * len(lines)
++    stack = []            # (branch_id, keyword, start_line)
++    nxt = [0]
+     def fresh():
+         nxt[0] += 1
+         return nxt[0]
+-    for ln in lines:
+-        if CLOSE.match(ln) and stack: stack.pop()
+-        elif ALT.match(ln) and stack: stack[-1] = fresh()
+-        paths.append(tuple(stack))
+-        if OPEN.match(ln) and not ONELINE.search(ln): stack.append(fresh())
+-    return paths
++    for i, ln in enumerate(lines):
++        if CLOSE.match(ln) and stack:
++            bid, kw, sl = stack.pop()
++            if kw == "case":
++                for k in range(sl + 1, i):
++                    if case_of[k] is None:
++                        case_of[k] = (sl, i)
++        elif ALT.match(ln) and stack:
++            _, kw, sl = stack[-1]
++            stack[-1] = (fresh(), kw, sl)
++        paths.append(tuple(b for b, _, _ in stack))
++        if OPEN.match(ln) and not ONELINE.search(ln):
++            stack.append((fresh(), OPEN.match(ln).group(1), i))
++    return paths, case_of
+ 
+-checked = refs = 0
+-problems = []
++def case_arms(lines, cs, ce):
++    """[(start, end)] line ranges of the arms of the case on lines cs..ce.
++    The first detected arm head starts the first arm; if none is detected the
++    whole body counts as one arm (conservative)."""
++    heads = [k for k in range(cs + 1, ce) if ARM_HEAD.match(lines[k])]
++    if not heads:
++        return [(cs, ce)]
++    return list(zip(heads + [ce], heads[1:] + [ce]))
+ 
+-for p in sorted(pathlib.Path("models").rglob("*.yml")):
+-    if "compose" not in str(p): continue
+-    s = script_of(p)
+-    if not s: continue
+-    checked += 1
+-    lines = s.splitlines()
+-    paths = scope_paths(lines)
++def assign_line(l, arr):
++    """True if `l` assigns `arr`: at line start (`  ARR=(...`), or on an arm
++    head (`on) ARR=(...) ;;`) -- the arm-head form is what the line-start-only
++    match used to miss."""
++    if re.match(rf'^\s*{arr}[+]?=\(', l):
++        return True
++    return ARM_HEAD.match(l) is not None and re.search(rf'\)\s*{arr}[+]?=\(', l) is not None
++
++def check_script(p, script):
++    """(problem strings, array-ref count) for one entrypoint script."""
++    lines = script.splitlines()
++    paths, case_of = scope_context(lines)
++    problems, refs = [], 0
+     for i, ln in enumerate(lines):
+         if not re.match(r'^\s*exec\b', ln): continue
+         for arr in set(re.findall(r'\$\{?([A-Z_]+_ARGS)\[@\]', ln)):
+             refs += 1
+-            asg = [j for j, l in enumerate(lines) if re.match(rf'^\s*{arr}=\(', l)]
++            asg = [j for j in range(i) if assign_line(lines[j], arr)]
+             if not asg:
+                 problems.append(f"{p}: exec uses ${{{arr}[@]}} but it is never assigned"); continue
+             # an assignment dominates the exec iff it comes first AND its branch
+             # path is a prefix of the exec's (same scope, or an enclosing one)
+-            ok = any(j < i and paths[i][:len(paths[j])] == paths[j] for j in asg)
+-            if not ok:
+-                problems.append(
+-                    f"{p}: {arr} is assigned only inside a branch that the exec on line "
+-                    f"{i+1} does not share -- that path expands an unset array, silently "
+-                    f"dropping the feature")
++            if any(paths[i][:len(paths[j])] == paths[j] for j in asg):
++                continue
++            # or every assignment is inside a `case` above the exec and that
++            # case is EXHAUSTIVE for the array: each arm assigns it or exits,
++            # so no path to the exec can reach it unset
++            if any(case_of[j] is not None and case_of[j][1] < i and
++                   all(any(assign_line(lines[k], arr) or re.search(r'\bexit\b', lines[k])
++                         for k in range(a, b))
++                       for a, b in case_arms(lines, *case_of[j]))
++                   for j in asg):
++                continue
++            problems.append(
++                f"{p}: {arr} is assigned only inside a branch that the exec on line "
++                f"{i+1} does not share -- that path expands an unset array, silently "
++                f"dropping the feature")
++    return problems, refs
++
++checked = refs = 0
++problems = []
++
++for p in sorted(pathlib.Path("models").rglob("*.yml")):
++    if "compose" not in str(p): continue
++    s = script_of(p)
++    if not s: continue
++    checked += 1
++    probs, n = check_script(p, s)
++    refs += n
++    problems += probs
++
++# The guard itself is pinned by fixtures: pass-* must stay clean, fail-* must
++# still fail. Both blind spots (arm-head matching; arms as alternatives) are
++# covered there.
++fixdir = pathlib.Path("scripts/tests/fixtures/args-array-scope")
++if fixdir.is_dir():
++    for fp in sorted(fixdir.glob("*.yml")):
++        s = script_of(fp)
++        if s is None:
++            problems.append(f"{fp}: fixture yielded no entrypoint script -- extraction broken"); continue
++        probs, _ = check_script(fp, s)
++        if fp.name.startswith("pass-") and probs:
++            problems.append(f"{fp}: expected PASS but got: " + " | ".join(probs))
++        elif fp.name.startswith("fail-") and not probs:
++            problems.append(f"{fp}: expected a failure but the scan found none")
+ 
+ if checked == 0 or refs == 0:
+     print(f"FAIL: vacuous run (checked={checked}, refs={refs}) -- extraction is broken", file=sys.stderr); sys.exit(1)

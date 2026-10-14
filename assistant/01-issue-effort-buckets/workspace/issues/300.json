@@ -1,0 +1,12 @@
+{
+  "number": 300,
+  "title": "launcher flag ignored",
+  "labels": [
+    "docs",
+    "enhancement",
+    "good first issue"
+  ],
+  "files_touched": 4,
+  "has_repro": true,
+  "needs_gpu": false
+}
