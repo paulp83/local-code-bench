@@ -1,11 +1,13 @@
 # local-code-bench
 
-Two agent benches for locally served models, plus the first round of results.
+Two agent benches for locally served models, a pair of long-context state probes, and the first round of results.
 
 - **Coding** ([`coding/`](coding/)): 20 bug fixes mined from [club-3090](https://github.com/noonghunna/club-3090)'s own pull requests, all merged after the models under test were released, so no model has seen the fix. An agent gets the issue text and a clean checkout in an offline container; the PR's own tests, hidden from the agent, grade the result.
 - **Assistant** ([`assistant/`](assistant/)): 38 non-coding desk tasks with deterministic checks. 26 base tasks (inbox triage, scheduling, expenses, file moves, style-guided replies) and 12 harder ones (hard-v1) built around long inputs, long jobs with state, conflicting sources, error recovery, instructions planted in the data, and changed requirements. All data is synthetic.
 
-Both run the agent in Docker with `--network none`. The only route out is a unix-socket forwarder to your model endpoint. Harnesses: [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) 2.4.6 (bash only), omp 18.6.0, and Hermes (through the [benchlocal-cli](https://github.com/noonghunna/benchlocal-cli) sandbox). Any OpenAI-compatible endpoint works.
+- **Long-context probes** ([`longctx/`](longctx/)): two deterministic, teacher-forced tests that compare two servers differing in one setting (a state dtype, a KV dtype, a quant): log-probs on 8K to 250K-token prefixes, and recall of facts planted early and corrected later. No agent, no sampling noise, about an hour per server. SGLang only.
+
+The two agent benches run the agent in Docker with `--network none`. The only route out is a unix-socket forwarder to your model endpoint. Harnesses: [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) 2.4.6 (bash only), omp 18.6.0, and Hermes (through the [benchlocal-cli](https://github.com/noonghunna/benchlocal-cli) sandbox). Any OpenAI-compatible endpoint works.
 
 ## First results (2026-10, 2× RTX 5090)
 
@@ -30,6 +32,7 @@ Write-up: [`results/2026-10-2x5090/FINDINGS.md`](results/2026-10-2x5090/FINDINGS
 | `coding/` | task build pipeline (PR export → candidates → validation → tasks), the agent drivers (`run_agent.py`, `run_omp.py`), scoring, `report.py` |
 | `coding/tasks.json` | the 20 tasks: PR, base and merge commits, hidden tests, problem text |
 | `assistant/` | one directory per task (`task.md`, `workspace/`, `check.py`, `reference/`, `meta.json`), generators in `_build/`, `run_assistant.py` |
+| `longctx/` | the long-context state probes: `corpus.py`, `logprob.py`, `recall.py`, two report scripts, and the 2026-10 SSM-dtype results ([README](longctx/README.md)) |
 | `results/2026-10-2x5090/` | findings, CSVs, reports, per-run results |
 
 ## Quick start
@@ -49,6 +52,14 @@ cd coding
 # assistant tasks through omp (omp on PATH, or set OMP_BIN)
 cd ../assistant
 ../.venv/bin/python run_assistant.py --harness omp --config my-model --base-url http://HOST:PORT/v1 --model SERVED_ID
+```
+
+```bash
+# long-context probes: compare two servers that differ in one setting (needs SGLang and `tokenizers`; see longctx/README.md)
+cd ../longctx
+python3 corpus.py --repo $CLUB3090_REPO --tokenizer /path/to/tokenizer.json
+python3 logprob.py --arm A --out logprob_A.json && python3 recall.py --arm A --out recall_A.json --tokenizer /path/to/tokenizer.json
+# boot the other server, repeat with --arm B, then: logprob_report.py logprob_A.json logprob_B.json (and recall_report.py)
 ```
 
 Use the Docker bridge address (`172.17.0.1` on Linux) for `HOST` when the server runs on the same machine: the containers can't reach `127.0.0.1` on the host. [`coding/README.md`](coding/README.md) and [`assistant/README.md`](assistant/README.md) cover flags, effort settings, scoring, and how to rebuild the tasks.

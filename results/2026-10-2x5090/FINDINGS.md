@@ -142,4 +142,4 @@ One rig, 20 coding tasks, one or two draws per cell. Treat differences under 4 t
 - **Try another harness** (opencode, Cline, your own). The driver takes any OpenAI-compatible endpoint.
 - **Send harder assistant tasks.** Long inputs separated the models, and the other five axes didn't. Tasks from your own work that take a person 30 minutes or more would help most.
 
-The task lists and every per-task result are in this folder: four CSVs (20 coding tasks, 400 coding runs, 38 assistant tasks, 152 assistant runs) and a README for the columns. Happy to share the harness too.
+The task lists and every per-task result are in this folder: four CSVs (20 coding tasks, 400 coding runs, 38 assistant tasks, 152 assistant runs) and a README for the columns. The harness, all 58 tasks and every run's result live at https://github.com/paulp83/local-code-bench (MIT).
